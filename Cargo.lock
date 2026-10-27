@@ -38,6 +38,7 @@ version = "0.1.0"
 name = "rounddance-sim"
 version = "0.1.0"
 dependencies = [
+ "rounddance-aps",
  "rounddance-mac-sap",
  "rounddance-nwk",
 ]
