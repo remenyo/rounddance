@@ -12,6 +12,7 @@ members = [
     "crates/rounddance-sim",
     "crates/rounddance-hal-host",
     "crates/rounddance-hal-esp",
+    "tools/arbitrator",
 ]
 
 [workspace.package]

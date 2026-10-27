@@ -18,3 +18,4 @@
 | ESP HAL | Not started (stub) |
 | 4.0-native + 3.0-compat revision matrix | Not started |
 | Host-first / C6-standalone parallel bring-up | Not started |
+| Lab arbitrator v0 (wave-5, Track H) | Done (lab-arbitrator: typed inventory from esp-inventory.md + live /dev discovery + /proc holder scan, exclusive leases with FIFO queues + JSON persist + crash-recovery + waiter TTL, per-chip flash profiles + timeout/kill run plans + bounded serial capture, decode.py + tcpdump capture hooks, reserve→…→release-or-quarantine runner with per-stage evidence; 23 unit + 2 pty-loopback integration tests, clippy 0 warnings, fmt clean; no real hardware touched by tests) |
