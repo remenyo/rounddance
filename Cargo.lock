@@ -413,6 +413,12 @@ dependencies = [
 [[package]]
 name = "rounddance-zcl"
 version = "0.1.0"
+dependencies = [
+ "rounddance-aps",
+ "rounddance-mac-sap",
+ "rounddance-nwk",
+ "rounddance-sim",
+]
 
 [[package]]
 name = "rounddance-zdo"

@@ -188,3 +188,89 @@ Wording in code/tests is paraphrase only, never spec text (D1).
 | 07-5356-C42-04 | implemented + verified | `mqv_agree` two-pass combination, implicit-signature scalars (anchors p0168-L4321-L4322 shared key, L4325-L4326 no unilateral control) | `tests/vectors.rs::vector_host_handshake_known_answers` (`KEY_I` == `KEY_R`) |
 | 07-5356-C42-05 | implemented + verified | `session_keys` domain separation + `confirm_tag` MACU/MACV (anchor p0168-L4323-L4325; failure anchor p0167-L4278) | `tests/vectors.rs::vector_host_handshake_known_answers` (`MACU`/`MACV` pins + tamper wipe), unit `session_keys_are_domain_separated` |
 | 07-5356-C42-06 | implemented + verified | `CbkeSession` explicit state machine, canonical transcript, fallible errors (anchor p0167-L4302-L4306) | `tests/vectors.rs::vector_host_handshake_known_answers` (two-sided Done), unit `full_mock_handshake_single_side`, `responder_role_uses_mac_v_first`, sim secured-frame E2E (keys installed by this flow) |
+
+## Wave-9 traceability — ZCL engine + first clusters (doc 07-5123-08)
+
+Corpus-mined IDs below are reused verbatim from the full-corpus sweep
+(`requirements-wave-full-corpus.md`); engine-gap and cluster IDs are
+repo-minted (`07-5123-08-<clause>-<seq>`, dots stripped) with line
+anchors from the private corpus (`text/zcl-07-5123-08/p*.txt`,
+trailing spec line numbers), MINTED-pending-confirm. Wording in
+code/tests is paraphrase only, never spec text (D1).
+
+One disposition note: `07-5123-08-822-04` (sleepy poll until enrolled)
+is accounted-for with N-A-with-cause at this layer — the poll cadence
+is app/HAL-owned; the engine exposes `EnrollStage` for it. Everything
+else below is implemented + verified.
+
+| Requirement ID | State | Implementing code | Verifying test |
+|----------------|-------|-------------------|----------------|
+| 07-5123-08-231-01 | implemented + verified | `cluster.rs`: `ClusterRole` server/client descriptor split | `tests/vectors.rs::vector_onoff_definition_*` (role asserts) |
+| 07-5123-08-231-02 | implemented + verified | `frame.rs`: `FrameControl::encode` zeroes bits 5–7 | `tests/vectors.rs::vector_frame_control_bits_*` |
+| 07-5123-08-232-01 | implemented + verified | `frame.rs`: `FrameControl::decode` ignores bits 5–7 | `tests/vectors.rs::vector_frame_control_bits_*` |
+| 07-5123-08-232-02 | implemented + verified | `frame.rs`: `Header::decode` returns trailing octets as payload | `tests/roundtrip.rs::fuzz_header_roundtrip` |
+| 07-5123-08-2321-01 | implemented + verified | `dispatch.rs`: per-side `dispatch` call documented for fan-out | `tests/vectors.rs::vector_dispatch_integration_onoff` |
+| 07-5123-08-233-01 | implemented + verified | `dispatch.rs`: `check_manufacturer` gate | `tests/vectors.rs::vector_manufacturer_gate_*` |
+| 07-5123-08-2343-01 | implemented + verified | `types.rs`: `Value::default_for` (Non-Value else zero) | `tests/vectors.rs::vector_type_defaults_*` |
+| 07-5123-08-2344-01 | implemented + verified | `attrs.rs`: `access` R/W/cond-W/P/S classes (anchor p0058-L2309-L2313) | `tests/vectors.rs::vector_attr_store_guards_*` |
+| 07-5123-08-2345-01 | implemented + verified | `attrs.rs`: `add_globals` ClusterRevision on every store | `tests/vectors.rs::vector_attr_store_guards_*` |
+| 07-5123-08-2345-02 | implemented + verified | `cluster.rs`: `ClusterDef::revision` reported via global | `tests/vectors.rs::vector_*_definition_*` |
+| 07-5123-08-2345-04 | implemented + verified | `attrs.rs`: `ATTR_CLUSTER_REVISION` 0xfffd uint16 R (anchor p0058-L2315-L2318) | discovery vectors carry 0xFFFD/0x21 |
+| 07-5123-08-2346-01 | implemented + verified | `attrs.rs`: no NVM writes here; config-vs-computed split documented | code inspection (persistence is app-owned) |
+| 07-5123-08-241-01 | implemented + verified | `frame.rs` + `types.rs`: LE octet order throughout | every vector byte string |
+| 07-5123-08-2411-01 | implemented + verified | `frame.rs`: header/payload split, Fig 2-2/2-3 geometry | `tests/vectors.rs::vector_header_manuf_presence_*` |
+| 07-5123-08-2411-02 | implemented + verified | `frame.rs`: `FrameControl` bit layout (anchor p0060-L2369-L2372) | `tests/vectors.rs::vector_frame_control_bits_*` |
+| 07-5123-08-2411-03 | implemented + verified | `frame.rs`: `FrameType` global/cluster-specific, reserved rejected (anchor p0060-L2374-L2376) | `tests/vectors.rs::vector_frame_control_bits_*`, `tests/roundtrip.rs::fuzz_header_roundtrip` |
+| 07-5123-08-24111-01 | implemented + verified | `frame.rs`: manufacturer-code presence rule + `PresenceMismatch` | `tests/vectors.rs::vector_header_manuf_presence_*` |
+| 07-5123-08-2412-01 | implemented + verified | `frame.rs`: `Direction` client/server marking | `tests/vectors.rs::vector_reply_header_*` |
+| 07-5123-08-2412-02 | implemented + verified | `frame.rs`: `reply_to` sets disable bit on responses (anchor p0061-L2386-L2391) | `tests/vectors.rs::vector_reply_header_*` |
+| 07-5123-08-2413-01 | implemented + verified | `frame.rs`: `reply_to` copies the transaction sequence | `tests/vectors.rs::vector_reply_header_*` |
+| 07-5123-08-25-01 | implemented + verified | `dispatch.rs`: server-side discover/read/write support baseline | `tests/vectors.rs::vector_dispatch_integration_onoff` |
+| 07-5123-08-25-02 | implemented + verified | `general.rs`: `cmd` Table 2-3 identifiers (anchor p0062-L2431-L2432) | `tests/vectors.rs::vector_general_ids_and_read_*` |
+| 07-5123-08-251-01 | implemented + verified | `general.rs`: `decode_id_list` + per-identifier records | `tests/vectors.rs::vector_general_ids_and_read_*`, dispatch read |
+| 07-5123-08-251-02 | implemented + verified | `dispatch.rs`: overflowing records shrink to INSUFFICIENT_SPACE, frame goes out as assembled | `tests/vectors.rs::vector_dispatch_integration_onoff` (11-octet tiny-buffer vector) |
+| 07-5123-08-252-01 | implemented + verified | `general.rs`: `ReadRecord` echo + type/value gating | `tests/vectors.rs::vector_read_rsp_records_*` |
+| 07-5123-08-252-02 | implemented + verified | `dispatch.rs`: fit-truncation instead of fragmentation | tiny-buffer vector above |
+| 07-5123-08-253-01 | implemented + verified | `attrs.rs`: `write` validation order | `tests/vectors.rs::vector_attr_store_guards_*` |
+| 07-5123-08-253-02 | implemented + verified | `general.rs`: `encode_write_rsp` all-success compaction | `tests/vectors.rs::vector_write_rsp_compact_*` |
+| 07-5123-08-256-01 | implemented + verified | `dispatch.rs`: WRITE_NO_RSP silent fire-and-forget | code path (no reply arm) + `tests/roundtrip.rs` behavior fuzz |
+| 07-5123-08-257-01 | implemented + verified | `reporting.rs`: per-attribute slots; arrays/composites never reportable | `tests/vectors.rs::vector_reporting_lifecycle_*` |
+| 07-5123-08-257-02 | implemented + verified | `reporting.rs`: disable/default-restore/interval encodings | `tests/vectors.rs::vector_reporting_lifecycle_*` |
+| 07-5123-08-257-03 | implemented + verified | `reporting.rs`: `change_qualifies` analog magnitudes, sign ignored | `tests/vectors.rs::vector_analog_threshold_*` |
+| 07-5123-08-257-04 | implemented + verified | `reporting.rs`: `configure` validation chain + per-record statuses | `tests/vectors.rs::vector_reporting_lifecycle_*` |
+| 07-5123-08-257-05 | implemented + verified | `reporting.rs`: `configure_timeout` supervision slots | `QueryAnswer::Timeout` path + query vectors |
+| 07-5123-08-25-10-01 | implemented + verified | `reporting.rs`: `query` four-case statuses | `tests/vectors.rs::vector_report_cfg_query_*` |
+| 07-5123-08-2511-01 | implemented + verified | `general.rs`: `ReportRecord` codec (anchor p0078-L2903-L2920) | `tests/vectors.rs::vector_report_and_default_rsp_*`, sim report leg |
+| 07-5123-08-2511-02 | implemented + verified | `reporting.rs`: tick-clocked `tick` engine (periodic/discrete/analog rules anchor p0079-L2931-L2947) | `tests/vectors.rs::vector_reporting_lifecycle_*`, `vector_analog_threshold_*` |
+| 07-5123-08-2512-01 | implemented + verified | `dispatch.rs`: `should_default_respond` triage (anchors p0080-L2980-L2994 + p0081-L3001-L3016); unknown-cluster mapping (FAILURE) is the documented MINTED uncertainty | `tests/vectors.rs::vector_default_response_triage_*` |
+| 07-5123-08-2513-01 | implemented + verified | `general.rs`: `DiscoverAttrs` codec (anchor p0081-L3020-L3033) | `tests/vectors.rs::vector_discover_attrs_*` |
+| 07-5123-08-2514-01 | implemented + verified | `discovery.rs`: `handle_discover_attrs` ascending capped pages + completion (anchors p0082-L3040-L3071) | dispatch discovery vector (6-record On/Off page) |
+| 07-5123-08-2518-01 | implemented + verified | `discovery.rs`: `handle_discover_cmds` received/generated sets (anchors p0089-L3277-L3300 + p0090-L3308-L3329) | `tests/vectors.rs::vector_discover_cmds_*` + dispatch vector |
+| 07-5123-08-262-01 | implemented + verified | `types.rs`: `DataType` wire identifiers (anchors p0098-L3511 + p0099–p0100 bodies) | `tests/vectors.rs::vector_datatype_ids_*` |
+| 07-5123-08-262-02 | implemented + verified | `types.rs`: scalar bodies LE, bool admits 0x00/0x01, int sign extension (anchor p0100-L3517-L3531) | `tests/vectors.rs::vector_scalar_bodies_*`, `tests/roundtrip.rs::fuzz_value_roundtrip` |
+| 07-5123-08-262-03 | implemented + verified | `types.rs`: short/long strings + packed scalar arrays, bounded + fallible (anchors p0102-L3588-L3593 + p0103-L3595-L3601 + p0104-L3647-L3653) | `tests/vectors.rs::vector_strings_arrays_*`, fuzz |
+| 07-5123-08-263-01 | implemented + verified | `status.rs`: `ZclStatus` set + deprecated remap, never emitted (anchors p0107-L3731-L3736 + p0108 body) | `tests/vectors.rs::vector_status_remap_*` |
+| 07-5123-08-381-01 | implemented + verified | `onoff.rs`: `REVISION` 2 (anchor p0172-L5051-L5052) | `tests/vectors.rs::vector_onoff_definition_*` |
+| 07-5123-08-382-01 | implemented + verified | `onoff.rs`: `SERVER_ATTRS` table (anchor p0172-L5064-L5066) | definition + store vectors |
+| 07-5123-08-382-02 | implemented + verified | `onoff.rs`: GlobalSceneControl set/clear rules (anchor p0173-L5067-L5080) | `tests/vectors.rs::vector_onoff_scene_paths_*` |
+| 07-5123-08-383-01 | implemented + verified | `onoff.rs`: Off/On/Toggle + timer coupling (anchor p0175-L5101-L5119) | `tests/vectors.rs::vector_onoff_basic_effects_*`, sim toggle leg |
+| 07-5123-08-383-02 | implemented + verified | `onoff.rs`: Off With Effect payload + receipt (anchors p0175-L5120-L5129 + p0176-L5130-L5141) | scene-paths vector (incl. reserved-effect refusal) |
+| 07-5123-08-383-03 | implemented + verified | `onoff.rs`: Recall Global Scene discard/recall (anchor p0176-L5142-L5152) | behavior fuzz exercises the arm |
+| 07-5123-08-383-04 | implemented + verified | `onoff.rs`: Timed Off validation + guard window + `tick_100ms` (anchors p0176-L5154-L5178 + p0177-L5179-L5194) | `tests/vectors.rs::vector_onoff_timed_off_*` |
+| 07-5123-08-3101-01 | implemented + verified | `level.rs`: `REVISION` 3 (anchor p0182-L5270-L5271) | `tests/vectors.rs::vector_level_definition_*` |
+| 07-5123-08-3102-01 | implemented + verified | `level.rs`: `SERVER_ATTRS` table (anchor p0184-L5320-L5322) | definition + store vectors |
+| 07-5123-08-3102-02 | implemented + verified | `level.rs`: ExecuteIfOff gate (anchor p0185-L5342-L5357) | `tests/vectors.rs::vector_level_basics_*` (gate case) |
+| 07-5123-08-3102-03 | implemented + verified | `level.rs`: with/without-On/Off coupling via `take_onoff_request` (anchor p0183-L5296-L5312) | level-basics vector (Some(true)/Some(false)) |
+| 07-5123-08-3102-04 | implemented + verified | `level.rs`: Move-to-Level/Move/Step/Stop payloads + effects (anchors p0187-L5388-L5412 + p0188-L5413-L5432 + p0189-L5434-L5448 + p0190-L5449-L5465) | level-basics vector + client-encoding vector |
+| 07-5123-08-425-01 | implemented + verified | `level.rs`: `level_guard` envelope refusal | level-basics vector (below-min write refused) |
+| 07-5123-08-821-01 | implemented + verified | `ias_zone.rs`: `REVISION` 2 (anchor p0524-L11910-L11911) | `tests/vectors.rs::vector_ias_definition_*` |
+| 07-5123-08-822-01 | implemented + verified | `ias_zone.rs`: `sender_allowed` CIE gate | `tests/vectors.rs::vector_ias_enrollment_*` (foreign refusal) |
+| 07-5123-08-822-02 | implemented + verified | `ias_zone.rs`: sensitivity stored verbatim (order preserved) | modes vector (level round-trips) |
+| 07-5123-08-822-03 | implemented + verified | `behavior.rs`: extension contract + stub enrollment proof | unit `enrollment_stub_flow_is_expressible` |
+| 07-5123-08-822-04 | accounted-for, N-A-with-cause at this layer | poll cadence is app/HAL-owned; `EnrollStage` exposed for it | — (policy test belongs to the HAL wave) |
+| 07-5123-08-822-05 | implemented + verified | `ias_zone.rs`: `on_attribute_written` binds only on committed CIE writes; never self-assigns | enrollment vector (hook path) |
+| 07-5123-08-822-06 | implemented + verified | `ias_zone.rs`: `trigger_enroll_request` + enroll-on-Success | enrollment vector (full handshake) |
+| 07-5123-08-822-07 | implemented + verified | `ias_zone.rs`: `check_bind` NOT_AUTHORIZED lockdown | enrollment vector (stranger vs CIE) |
+| 07-5123-08-822-08 | implemented + verified | `ias_zone.rs`: NormalOp retains config, clears test bit + notifies | `tests/vectors.rs::vector_ias_modes_notify_*` (dedicated NormalOp leg) |
+| 07-5123-08-822-09 | implemented + verified | `ias_zone.rs`: TestMode entry/exit + `tick_1s` expiry | modes-notify vector |
+| 07-5123-08-822-10 | implemented + verified | `ias_zone.rs`: `emit_notification` geometry (status + zero ext + zone id + delay) | modes-notify vector (byte-geometry asserts) |
