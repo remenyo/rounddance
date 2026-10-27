@@ -15,6 +15,7 @@ members = [
     "crates/rounddance-sim",
     "crates/rounddance-hal-host",
     "crates/rounddance-hal-esp",
+    "crates/rounddance-rcp",
     "tools/arbitrator",
 ]
 

@@ -1082,6 +1082,13 @@ name = "rounddance-nwk"
 version = "0.1.0"
 
 [[package]]
+name = "rounddance-rcp"
+version = "0.1.0"
+dependencies = [
+ "rounddance-mac-sap",
+]
+
+[[package]]
 name = "rounddance-roles"
 version = "0.1.0"
 dependencies = [
@@ -1114,8 +1121,10 @@ dependencies = [
  "rounddance-gp",
  "rounddance-mac-sap",
  "rounddance-nwk",
+ "rounddance-rcp",
  "rounddance-roles",
  "rounddance-security",
+ "rounddance-zcl",
  "rounddance-zdo",
 ]
 

@@ -1,0 +1,10 @@
+[package]
+name = "rounddance-rcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "S3+H2 OTBR path: UART RCP framing, host-side RCP driver over the MAC SAP, emulated-RCP test peer"
+
+[dependencies]
+rounddance-mac-sap = { path = "../rounddance-mac-sap" }
