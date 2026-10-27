@@ -4,3 +4,19 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "ESP 802.15.4 HAL adapter: safe wrapper over the IDF 15.4 driver implementing the MAC SAP"
+
+[features]
+default = []
+# On-target driver: declares the 15.4 symbols esp-idf-sys 0.38 does not
+# bind and implements the Driver seam over them. Host builds (tests, WASM,
+# clippy) never enable this; the mock driver covers those.
+esp = ["dep:esp-idf-sys"]
+
+[dependencies]
+rounddance-mac-sap = { path = "../rounddance-mac-sap" }
+esp-idf-sys = { version = "0.38", optional = true }
+
+[dev-dependencies]
+rounddance-mac-sap = { path = "../rounddance-mac-sap" }
+rounddance-nwk = { path = "../rounddance-nwk" }

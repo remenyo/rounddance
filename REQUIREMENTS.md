@@ -450,3 +450,31 @@ credentials), `07-5356-22-C311-01/02` + `-C312-01..10` (cluster flows;
 | 07-5123-08-1074-04 | implemented + verified | `keyest.rs`: `TerminateMsg` codec + `retry_advice` wait/fallback/give-up mapping (§10.7.4.2.1.1.4, anchors p0853-L19448-L19461 + p0854-L19462-L19472) | `se_vectors.rs::vector_keyest_retry_advice_07_5123_08_1074_04`, terminate-advice leg in guards test |
 | 07-5123-08-1074-05 | implemented + verified | `keyest.rs`: `EPH_LEN` 64 expanded-point profile convention (suite-1 wire cert stays 48 octets per Table 10-143, anchor p0865-L19821; compressed-point codecs are follow-up) | `se_vectors.rs::vector_keyest_ephemeral_length_07_5123_08_1074_05` |
 | 07-5356-C41-02 | implemented + verified | `keyupdate.rs`: `derive_update_mask`/`derive_update_key` MMO-masked rotation + `install_link_key` reset-counters install; `keyest.rs`: `install_negotiated_key`/`rotate_link_key` (§C.4.1 key-replacement idea, anchor p0167-L4287-L4297; formula is rounddance construction) | `rounddance-security/tests/vectors.rs::vector_link_key_update_07_5356_c41_02` (pinned mask), `se_vectors.rs` handshake install/rotate legs, sim `se_loop.rs` update leg |
+
+## Wave-16 traceability — ESP HAL adapter (`rounddance-hal-esp`)
+
+All IDs below are repo-minted (`RD-HAL-ESP-<seq>`), MINTED-pending-confirm:
+no 802.15.4 MAC corpus requirement exists yet (mac-sap items are all
+"coverage pending"), so there is no corpus req to fit. Inter-PAN legs
+additionally exercise the wave-13 minted IDs `22-65816-030-121-03` +
+`122-02` (anchors p0087-L1821-L1835, p0091-L2008-L2010, p0092-L2054-L2064).
+Evidence for the driver contract is the wave-15 spike
+(`rd-frame-tx/src/main.rs`: NVS-first L84-94, antenna L96-101,
+enable sequence L120-129, Len+2 frame L143-154, ISR callbacks L50-78)
+plus the wave-6 C leg (`hwleg1_main.c` RX copy + handle_done L60-80).
+Wording in code/tests is paraphrase only, never spec text (D1).
+
+| Requirement ID | State | Implementing code | Verifying test |
+|----------------|-------|-------------------|----------------|
+| RD-HAL-ESP-01 | implemented + verified | `adapter.rs`: `MAX_TX_POWER_DBM`, `set_tx_power` rejects hotter requests before the driver | `adapter_mock.rs::power_cap_enforced_before_init` |
+| RD-HAL-ESP-02 | implemented + verified | `esp.rs`: NVS-init-first + erase-on-version-mismatch, then driver enable; `adapter.rs::init` programs stored provisioning | `adapter_mock.rs::init_programs_filtering_defaults`, `init_applies_pre_provisioned_addrs`, `init_failure_surfaces_and_stays_down` |
+| RD-HAL-ESP-03 | implemented + verified | `adapter.rs`: `build_data_frame`/`build_inter_pan_frame` Len+2 encode, `parse_data_frame`/`parse_inter_pan_frame` checked decode | `adapter_mock.rs::data_request_builds_len_plus_two_frame`, `frame_builders_reject_oversize`, RX parse legs |
+| RD-HAL-ESP-04 | implemented + verified | `adapter.rs`: `map_tx_event` (Done→Delivered, CcaBusy→ChannelBusy, NoAck→NoAck, all other driver failures→NoAck, documented) | `adapter_mock.rs::tx_done_confirms_delivered`, `cca_fail_maps_channel_busy`, `noack_maps_noack`, `other_driver_failures_report_not_delivered` |
+| RD-HAL-ESP-05 | implemented + verified | `esp.rs`: ISR flag-only + bounded mailbox copy + exactly-once `receive_handle_done` (overruns counted); `adapter.rs::pump` drains via `poll_rx` | `adapter_mock.rs::rx_pan_indication_parses_src_and_payload`, `foreign_pan_routes_to_interpan` |
+| RD-HAL-ESP-06 | implemented + verified | `adapter.rs`: `energy_scan` delegates to the driver (sync seam over the async ED-done event on target) | `adapter_mock.rs::ed_scan_delegates_and_maps_sign` |
+| RD-HAL-ESP-07 | implemented + verified | `adapter.rs`: 4 TX slots, `QueueFull` backpressure, `data_cancel` (queued→Cancelled, in-air→runs to completion, else `UnknownHandle`) | `adapter_mock.rs::queue_full_backpressure_then_ordered_confirms`, `cancel_revokes_queued_with_cancelled`, `cancel_air_submitted_runs_to_completion` |
+| RD-HAL-ESP-08 | implemented + verified | `adapter.rs::init` programs promiscuous OFF + RX-when-idle ON (driver defaults promiscuous TRUE); antenna LOW/LOW is a board-code invariant (README + example) | `adapter_mock.rs::init_programs_filtering_defaults` |
+| RD-HAL-ESP-09 | implemented + verified | `adapter.rs`: inter-PAN per-request channel retune, unacknowledged broadcast shape, confirm + channel-tagged indications; also serves `22-65816-030-121-03` + `122-02` | `adapter_mock.rs::interpan_path_tunes_channel_and_confirms`, `interpan_indication_carries_channel_and_bytes` |
+| RD-HAL-ESP-10 | implemented + verified | `adapter.rs`: single-flight submit (in-air skipped by `oldest_queued`), submit faults stay queued + counted (`submit_faults`) | `adapter_mock.rs::submit_busy_stays_queued_then_flushes`, `submit_fault_stays_queued_and_counted` |
+| RD-HAL-ESP-11 | implemented + verified | NWK-frame TX binary shape: repo codec output pinned to the frozen vector before framing (spike `main.rs` L104-118 pattern) | `examples/esp_adapter_shape.rs` output (`15 41 88 00 34 12 ff ff 01 00` + frozen NWK tail), `data_request_builds_len_plus_two_frame` |
+| RD-HAL-ESP-12 | implemented + verified | `adapter.rs`: honest capabilities (HW auto-ACK + CSMA true, HAL retries false, ED true, timestamps false, promiscuous true) | `adapter_mock.rs::capabilities_report_hardware_truthfully` |
