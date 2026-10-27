@@ -274,3 +274,57 @@ else below is implemented + verified.
 | 07-5123-08-822-08 | implemented + verified | `ias_zone.rs`: NormalOp retains config, clears test bit + notifies | `tests/vectors.rs::vector_ias_modes_notify_*` (dedicated NormalOp leg) |
 | 07-5123-08-822-09 | implemented + verified | `ias_zone.rs`: TestMode entry/exit + `tick_1s` expiry | modes-notify vector |
 | 07-5123-08-822-10 | implemented + verified | `ias_zone.rs`: `emit_notification` geometry (status + zero ext + zone id + delay) | modes-notify vector (byte-geometry asserts) |
+
+## Wave-10 traceability — Commissioning core (docs 22-65816-030 BDB v3.1, 05-3474-23 R23.2, 07-5123-08 ZCL §13.3)
+
+BDB `22-65816-030-*` IDs below are corpus-mined (anchors from the
+private corpus `text/pro-bdb-22-65816-030/p*.txt`, trailing spec line
+numbers). R23.2 / ZCL IDs are repo-minted (dots stripped) with line
+anchors from the private corpus (`text/zigbee-spec-r23-05-3474-23/`
+and `text/zcl-07-5123-08/`), MINTED-pending-confirm. Wording in
+code/tests is paraphrase only, never spec text (D1).
+
+Consumed inputs (implemented by earlier waves, not re-implemented):
+`05-3474-23-24311-07` + `05-3474-23-24427-01` (Match_Desc),
+`05-3474-23-24322-02` (`BindManager` over APS tables),
+`05-3474-23-24335-01` (MgmtLeaveReq), `05-3474-23-24311-11`
+(DeviceAnnce), `05-3474-23-453-01` + `05-3474-23-446-01`
+(key storage/rotation), `05-3474-23-451-01` (aux codec),
+`07-5356-C42-04`/`-05`/`-06` (CBKE handshake behind the policy gate).
+
+| Requirement ID | State | Implementing code | Verifying test |
+|----------------|-------|-------------------|----------------|
+| 22-65816-030-81-01 | implemented + verified | `formation.rs`: `FormationMachine` role gating, factory-reset-first, primary-then-secondary scan (anchors p0055-L1204-L1212 + p0057-L1217-L1226) | `tests/vectors.rs::vector_*_22_65816_030_81_01` |
+| 22-65816-030-81-02 | implemented + verified | `formation.rs`: `FormationRequest` fully-parameterized invocation (anchor p0057-L1228-L1241) | `tests/vectors.rs::vector_primitive_params_*`, `vector_router_distributed_params_*` |
+| 22-65816-030-81-03 | implemented + verified | `formation.rs`: confirm raises on-network + coordinator TC startup (anchor p0057-L1242-L1256) | `tests/vectors.rs::vector_success_raises_on_network_*`, `vector_router_no_tc_startup_*`, `vector_exhausted_channels_fail_*` |
+| 22-65816-030-91-01 | implemented + verified | `steering.rs`: `DiscoveryScan` join-permitted-only, `SurveyTable`, rank-by-LQI select (anchors p0059-L1261-L1268 + p0060-L1280-L1296) | `tests/vectors.rs::vector_discovery_scan_shape_*`, `vector_bad_scan_fails_*`, `vector_candidate_ranking_*`, `vector_no_suitable_network_*` |
+| 22-65816-030-91-02 | implemented + verified | `classical.rs`: `TrustCenter::exchange_key` + `on_verify_confirm` (anchors p0061-L1307-L1334) | `tests/vectors.rs::vector_symmetric_exchange_rules_*`, sim `two_node_secure_join_*` |
+| 22-65816-030-91-03 | implemented + verified | `classical.rs`: `JoinerMachine` symmetric transcript + `JoinPolicy` gates (anchors p0063-L1344-L1370) | `tests/vectors.rs::vector_symmetric_join_transcript_*`, sim join + replay |
+| 22-65816-030-91-04 | implemented + verified | `classical.rs`: `KeyAttributes::NEGOTIATED` marker + `TrustCenter::admit` method mapping (anchors p0065-L1381-L1398) | `tests/vectors.rs::vector_negotiation_join_transcript_*` |
+| 22-65816-030-91-05 | implemented + verified | `classical.rs`: `JoinerMachine::on_negotiation_done` (network key + token, fatal-if-missing) (anchors p0066-L1410-L1442) | `tests/vectors.rs::vector_negotiation_join_transcript_*` (token-missing leg) |
+| 22-65816-030-91-06 | implemented + verified | `classical.rs`: `JoinerMachine::close_out` CBKE support/required gate (anchors p0067-L1443-L1449) | `tests/vectors.rs::vector_cbke_required_gate_*` |
+| 22-65816-030-111-01 | implemented + verified | `finding.rs`: `FinderTarget` on-network gate + identify timer + always-serve descriptors (anchors p0079-L1699-L1712) | `tests/vectors.rs::vector_target_needs_network_*` |
+| 22-65816-030-111-02 | implemented + verified | `finding.rs`: `FinderInitiator` off-network fail, broadcast `0xffff`, answer logging (anchors p0082-L1725-L1736) | `tests/vectors.rs::vector_initiator_query_flow_*` |
+| 22-65816-030-111-03 | implemented + verified | `finding.rs`: `match_request_for` + `match_clusters` advance/skip (anchors p0082-L1737-L1750) | `tests/vectors.rs::vector_cluster_matching_*` |
+| 22-65816-030-111-04 | implemented + verified | `finding.rs`: `bind_entry_for` group 0x01 + push flag / unicast 0x03 + resolve-first (anchors p0082-L1750-L1765) | `tests/vectors.rs::vector_group_binding_*`, `vector_unicast_binding_needs_ieee_*` |
+| 22-65816-030-56-01 | accounted-for, N-A at this layer | Snap-back is TC policy config; no reduced-mode state lives here — `TrustCenter::close` restores the closed stance | code inspection (no reduced-mode state in this crate) |
+| 22-65816-030-56-02 | implemented + verified | `classical.rs`: `TrustCenter::set_allow_list` + `admitted` (anchor p0033-L534-L539) | `tests/vectors.rs::vector_allow_list_and_timeout_*` |
+| 22-65816-030-56-03 | implemented + verified | `classical.rs`: `InstallCode` validation + `JoinKdf`/`EccJoinKdf` derivation reuse (anchor p0033-L542-L547) | `tests/vectors.rs::vector_install_code_validation`, `vector_install_code_derivation_mock` (MOCK provenance) |
+| 22-65816-030-56-04 | implemented + verified | `classical.rs`: `TrustCenter::tick` deadline eviction report (anchor p0033-L554-L561) | `tests/vectors.rs::vector_allow_list_and_timeout_*` (timeout leg) |
+| 22-65816-030-57-01 | implemented + verified | `classical.rs`: `JoinMethod::Negotiation` advertisement surface (anchor p0034-L574-L577) | `tests/vectors.rs::vector_negotiation_join_transcript_*` |
+| 22-65816-030-61-01 | implemented + verified | `formation.rs`: `LogicalType` role split (anchor p0035-L598-L605) | `tests/vectors.rs::vector_end_device_cannot_form_*`, role-param vectors |
+| 07-5123-08-133-01 | implemented + verified | `touchlink.rs`: `TOUCHLINK_CLUSTER` 0x1000 + profiles (anchor p1130-L25917-L25919) | `tests/vectors.rs::vector_touchlink_command_ids` |
+| 07-5123-08-13322-01 | implemented + verified | `touchlink.rs`: `rx::` command IDs 0x00/02/06/07/10/12/14/16 + utility 0x41/42 (anchor p1132-L25931-L25932) | `tests/vectors.rs::vector_touchlink_command_ids` |
+| 07-5123-08-13323-01 | implemented + verified | `touchlink.rs`: `tx::` command IDs 0x01/03/11/13/15 + utility 0x40/41/42 (anchor p1144-L26292-L26295) | `tests/vectors.rs::vector_touchlink_command_ids` |
+| 22-65816-030-121-01 | implemented + verified | `touchlink.rs`: `TouchlinkInitiator` scan→select→start/join skeleton (anchor p0085-L1787+) | `tests/vectors.rs::vector_touchlink_skeleton_handshake` |
+| 22-65816-030-1211-01 | implemented + verified | `touchlink.rs`: `TouchlinkFrame` transaction binding (anchor p0091-L2007-L2012) | `tests/vectors.rs::vector_touchlink_frame_codec` |
+| 22-65816-030-121-02 | implemented + verified | `touchlink.rs`: `scan_request` per-channel broadcast frame (anchor p0087-L1821-L1835; inter-PAN TX deferred to the MAC SAP wave) | `tests/vectors.rs::vector_scan_request_payload`, skeleton handshake |
+| 22-65816-030-122-01 | implemented + verified | `touchlink.rs`: `TouchlinkTarget` respond/start-or-join skeleton (anchor p0092-L2054-L2064) | `tests/vectors.rs::vector_touchlink_skeleton_handshake` (stale-transaction leg) |
+| 05-3474-23-3611-01 | implemented + verified | `formation.rs`: formation primitive params shape (anchor p0221-L5224) | `tests/vectors.rs::vector_primitive_params_*` |
+| 05-3474-23-3613-01 | implemented + verified | `steering.rs`: beacon survey rows feed discovery (anchor p0249-L5842) | `tests/vectors.rs::vector_candidate_ranking_*` |
+| 05-3474-23-36161-01 | implemented + verified | `steering.rs`: application-configured discovery scan (anchor p0222-L5278) | `tests/vectors.rs::vector_discovery_scan_shape_*` |
+| 05-3474-23-32214-01 | implemented + verified | `classical.rs`: `TrustCenter::admit` + announce decode as the indication side (anchor p0260-L6171) | sim `two_node_secure_join_*` (announce match leg) |
+| 05-3474-23-32215-01 | implemented + verified | `classical.rs`: `JoinerMachine::close_out` + verified promotion as the confirm side (anchor p0261-L6194) | `tests/vectors.rs::vector_symmetric_join_transcript_*`, sim replay |
+| 05-3474-23-3615-01 | implemented + verified | `classical.rs`: `RejoinMachine` orphan→rejoin with checks gate (anchors p0223-L5334-L5349 + p0225-L5380-L5382) | `tests/vectors.rs::vector_rejoin_checks_*` |
+| 05-3474-23-36111-01 | implemented + verified | `classical.rs`: `LeaveMachine::mgmt_leave_for` self-remove form (anchor p0266-L6285) | `tests/vectors.rs::vector_leave_forms` |
+| 05-3474-23-36113-01 | implemented + verified | `classical.rs`: `LeaveMachine::mgmt_leave_for` parent-evict form (anchor p0146-L3540) | `tests/vectors.rs::vector_leave_forms` |

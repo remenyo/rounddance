@@ -13,7 +13,8 @@
 | Security incl. SE + CBKE | Done (wave-8: classical key/counter/aux codec + NVM store + ECQV/CBKE foundations over injected ECC backend, host p256 reference + mock; 30 unit/vector/fuzz tests + sim secured-transport; clippy 0 warnings, fmt clean, no-default + wasm32 green) |
 | ZCL engine + clusters (wave-9) | Done (rounddance-zcl: frame/type/store/dispatch/reporting/discovery engine + ClusterDef/Behavior layers + On/Off 0x0006 client+server + Level 0x0008 server + IAS Zone 0x0500 server with enrollment machine; 31 vectors + 8k-case fuzz + On/Off toggle/report sim 2-node + replay; clippy 0 warnings, fmt clean, --no-default-features + wasm32 green) |
 | Green Power | Not started |
-| Commissioning (classical / Touchlink / Direct) | Not started |
+| Commissioning (classical / Touchlink / Direct) | In progress (wave-10: BDB formation + steering + finding & binding + Touchlink skeletons + classical join in rounddance-commission, 32 vectors + 8k-case fuzz + sim 2-node secure join + replay; Zigbee Direct not started) |
+| Commissioning core (wave-10) | Done (rounddance-commission: formation.rs channel/PAN/policy + role-gated machine, steering.rs survey + join-decision, finding.rs initiator/target wired to ZDO match_desc + APS tables, touchlink.rs cluster 0x1000 codecs + role skeletons with inter-PAN TX deferred, classical.rs Trust-Center join machines with install-code KDF reuse; tests/vectors.rs 32 spec vectors incl. MOCK-provenance install-code values, tests/roundtrip.rs 8k-case fuzz, rounddance-sim/tests/commission_join.rs 2-node secure join + deterministic replay; clippy 0 warnings, fmt clean, --no-default-features + wasm32 green) |
 | Sim harness | Skeleton done (wave-2: virtual clock, SplitMix64 seeded RNG, scripted-medium SAP stub, round-trip scenario + replay-twice-identical-trace test) |
 | Host HAL | Not started (stub) |
 | ESP HAL | Not started (stub) |
