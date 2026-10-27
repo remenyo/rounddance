@@ -35,8 +35,8 @@ pub mod touchlink;
 
 pub use classical::{
     EccJoinKdf, InstallCode, JoinError, JoinKdf, JoinMethod, JoinPolicy, JoinedDevice,
-    JoinerMachine, JoinerState, KeyAttributes, LeaveMachine, RejoinMachine, RejoinState,
-    TrustCenter, INSTALL_CODE_LENS, MAX_INSTALL_CODE_LEN, MAX_JOINED_DEVICES,
+    JoinerMachine, JoinerState, KeyAttributes, LeaveMachine, MmoJoinKdf, RejoinMachine,
+    RejoinState, TrustCenter, INSTALL_CODE_LENS, MAX_INSTALL_CODE_LEN, MAX_JOINED_DEVICES,
 };
 pub use finding::{
     FinderInitiator, FinderTarget, FindingError, InitiatorState, Respondent, TargetState,
@@ -52,9 +52,10 @@ pub use steering::{
     SteeringState, SurveyError, SurveyTable, MAX_SURVEY_ENTRIES,
 };
 pub use touchlink::{
-    InterPanTx, ScanRequestPayload, TouchlinkError, TouchlinkFrame, TouchlinkInitiator,
-    TouchlinkInitiatorState, TouchlinkTarget, TouchlinkTargetState, MAX_TOUCHLINK_FRAME,
-    MAX_TOUCHLINK_PAYLOAD, TOUCHLINK_CLUSTER, TOUCHLINK_PROFILE, TOUCHLINK_UTILITY_PROFILE,
+    InterPanTx, SapInterPan, ScanRequestPayload, TouchlinkError, TouchlinkFrame,
+    TouchlinkInitiator, TouchlinkInitiatorState, TouchlinkTarget, TouchlinkTargetState,
+    MAX_TOUCHLINK_FRAME, MAX_TOUCHLINK_PAYLOAD, TOUCHLINK_CLUSTER, TOUCHLINK_PROFILE,
+    TOUCHLINK_UTILITY_PROFILE,
 };
 
 /// Crate identifier.

@@ -13,12 +13,18 @@
 ///
 /// Requirement `07-5123-08-263-01` (MINTED-pending-confirm): the
 /// enumerated set below; deprecated senders map to their replacements
-/// on receipt and are never emitted.
+/// on receipt and are never emitted. `Failure` is receipt-only: it is
+/// accepted from pre-revision-6 senders (`07-5123-08-2512-03`) but
+/// never emitted for peer-visible triage conditions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ZclStatus {
     /// Operation was successful.
     Success,
-    /// Operation was not successful.
+    /// Legacy / local failure marker. Accepted on receipt (deprecated
+    /// senders, local faults); never emitted for peer-visible
+    /// protocol triage — each condition has its own code below
+    /// (`07-5123-08-2512-01` correction: unknown cluster emits
+    /// [`ZclStatus::UnsupportedCluster`], not this).
     Failure,
     /// Sender lacks authorization for the command.
     NotAuthorized,
@@ -47,6 +53,11 @@ pub enum ZclStatus {
     InvalidSelector,
     /// Exchange aborted on excessive response time.
     Timeout,
+    /// Named cluster is not implemented on this endpoint
+    /// (`07-5123-08-2512-01` correction, anchor p0081-L3010-L3012:
+    /// unicast to a missing cluster answers with this, never
+    /// [`ZclStatus::Failure`]).
+    UnsupportedCluster,
     /// Unknown/reserved value preserved verbatim (forward compat;
     /// never generated locally, only echoed from the wire).
     Other(u8),
@@ -78,6 +89,7 @@ impl ZclStatus {
             0x8d => Self::InvalidDataType,
             0x8e => Self::InvalidSelector,
             0x94 => Self::Timeout,
+            0xc3 => Self::UnsupportedCluster,
             other => Self::Other(other),
         }
     }
@@ -103,6 +115,7 @@ impl ZclStatus {
             Self::InvalidDataType => 0x8d,
             Self::InvalidSelector => 0x8e,
             Self::Timeout => 0x94,
+            Self::UnsupportedCluster => 0xc3,
             Self::Other(v) => v,
         }
     }

@@ -35,15 +35,18 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
+pub mod aes;
 #[cfg(feature = "host")]
 pub mod backend_host;
 pub mod cbke;
 pub mod cert;
 pub mod classical;
 pub mod ecc;
+pub mod mmo;
 pub mod mock;
 pub mod store;
 
+pub use aes::{encrypt_block_aes128, BLOCK_LEN};
 pub use cbke::{
     CbkeError, CbkeSession, CbkeState, Role, CONFIRM_LABEL_U, CONFIRM_LABEL_V, SESSION_KEY_LABEL,
 };
@@ -56,6 +59,7 @@ pub use ecc::{
     mqv_agree, reconstruct_static, scalar_from_kdf, session_keys, EccBackend, EccError, MAC_LEN,
     MAX_KDF_OUT, POINT_LEN, SCALAR_LEN,
 };
+pub use mmo::{mmo_hash_128, MmoError, MMO_DIGEST_LEN, MMO_MAX_MSG_LEN};
 pub use store::{NvmStore, PersistedState, RamStore, StoreError, COUNTER_STRIDE};
 
 /// Crate identifier.

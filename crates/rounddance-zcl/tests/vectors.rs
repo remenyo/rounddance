@@ -1322,6 +1322,23 @@ fn vector_default_response_triage_07_5123_08_2512_01() {
     ));
 }
 
+// 07-5123-08-2512-03: legacy error codes are receivable (receipt
+// tolerance for pre-revision-6 senders, anchor p0081-L3012-L3013).
+// FAILURE is accepted on receipt but never emitted for peer-visible
+// triage (2512-01 correction).
+#[test]
+fn vector_legacy_failure_receipt_tolerance_07_5123_08_2512_03() {
+    // Live FAILURE code decodes to the receipt-only variant.
+    assert_eq!(ZclStatus::from_u8(0x01), ZclStatus::Failure);
+    // Deprecated pre-revision-6 aliases map to their replacements.
+    assert_eq!(ZclStatus::from_u8(0x90), ZclStatus::Failure);
+    assert_eq!(ZclStatus::from_u8(0x91), ZclStatus::Failure);
+    assert_eq!(ZclStatus::from_u8(0x93), ZclStatus::Failure);
+    // The corrected unknown-cluster code round-trips on the wire.
+    assert_eq!(ZclStatus::from_u8(0xC3), ZclStatus::UnsupportedCluster);
+    assert_eq!(ZclStatus::UnsupportedCluster.as_u8(), 0xC3);
+}
+
 // 07-5123-08-233-01: unrecognized manufacturer codes are not executed.
 #[test]
 fn vector_manufacturer_gate_07_5123_08_233_01() {
@@ -1455,7 +1472,8 @@ fn vector_dispatch_integration_onoff() {
         DispatchOutcome::Respond(_) => panic!("toggle sends no reply"),
     }
     assert!(onoff::onoff(&store));
-    // Unknown cluster maps to the documented failure status.
+    // Unknown cluster maps to UNSUPPORTED_CLUSTER (0xC3), never FAILURE
+    // (07-5123-08-2512-01 sweep-2 correction, anchor p0081-L3010-L3012).
     let mut ctx = Ctx {
         store: &mut store,
         reporting: &mut eng,
@@ -1477,7 +1495,7 @@ fn vector_dispatch_integration_onoff() {
             &mut out
         )
         .unwrap_err(),
-        ZclStatus::Failure
+        ZclStatus::UnsupportedCluster
     );
     // Attribute discovery walks all six instance attributes.
     let disc = Header {

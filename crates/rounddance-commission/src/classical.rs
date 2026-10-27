@@ -24,7 +24,7 @@
 //! [`rounddance_zdo`]. Nothing here duplicates those machines; the
 //! machines below only sequence them.
 
-use rounddance_security::{EccBackend, EccError, NETWORK_KEY_LEN};
+use rounddance_security::{mmo_hash_128, EccBackend, EccError, NETWORK_KEY_LEN};
 use rounddance_zdo::{DeviceAnnce, MgmtLeaveReq};
 
 /// Install-code payload lengths admitted (octets, excluding the 2-octet
@@ -69,7 +69,11 @@ pub enum JoinError {
 
 /// One install code: payload plus check field, validated on build.
 ///
-/// Requirement `22-65816-030-56-03`.
+/// Requirements `22-65816-030-56-03` (install-code-gated dynamic
+/// keys) + `22-65816-030-56-07` (format/CRC parameter set, anchor
+/// p0041-L807-L827: 128-bit payload, 16-bit check, LE check field).
+/// Validation rejects BE-stored or non-reflected-CRC codes, which the
+/// BDB worked example distinguishes.
 #[derive(Debug, Clone, Copy)]
 pub struct InstallCode {
     bytes: [u8; MAX_INSTALL_CODE_LEN],
@@ -89,7 +93,10 @@ impl InstallCode {
             return Err(JoinError::BadInstallCode);
         }
         let expect = crc16_ccitt(&code[..payload_len]);
-        let got = u16::from_be_bytes([code[payload_len], code[payload_len + 1]]);
+        // The check field rides little-endian on the wire
+        // (`22-65816-030-56-07` / §6.11.1.1: the worked example shows
+        // the field as C3 B5 for CRC 0xB5C3).
+        let got = u16::from_le_bytes([code[payload_len], code[payload_len + 1]]);
         if expect != got {
             return Err(JoinError::BadInstallCode);
         }
@@ -112,7 +119,7 @@ impl InstallCode {
         }
         out[..payload.len()].copy_from_slice(payload);
         out[payload.len()..payload.len() + INSTALL_CODE_CRC_LEN]
-            .copy_from_slice(&crc16_ccitt(payload).to_be_bytes());
+            .copy_from_slice(&crc16_ccitt(payload).to_le_bytes());
         Ok(payload.len() + INSTALL_CODE_CRC_LEN)
     }
 
@@ -129,33 +136,43 @@ impl InstallCode {
     }
 }
 
-/// 16-bit CCITT check used on install codes (polynomial 0x1021, initial
-/// 0xFFFF). Self-consistent within this crate: codes built by
+/// 16-bit CCITT check used on install codes, per the §6.11.1.1.1
+/// parameter set (`22-65816-030-56-07`, anchor p0041-L816-L827):
+/// polynomial 0x1021, direct init 0xFFFF, final XOR 0xFFFF, reflected
+/// input and output (bitwise LSB-first form with reflected polynomial
+/// 0x8408).
+///
+/// Self-consistent within this crate: codes built by
 /// [`InstallCode::with_crc`] pass [`InstallCode::from_slice`], and any
-/// single-octet corruption fails.
+/// single-octet corruption fails. The BDB §6.11.1.1 worked example
+/// (payload 83..05 → 0xB5C3) is pinned as a frozen vector in
+/// `tests/vectors.rs`.
 fn crc16_ccitt(data: &[u8]) -> u16 {
     let mut crc = 0xFFFFu16;
     for &b in data {
-        crc ^= (b as u16) << 8;
+        crc ^= b as u16;
         for _ in 0..8 {
-            if crc & 0x8000 != 0 {
-                crc = (crc << 1) ^ 0x1021;
+            if crc & 0x0001 != 0 {
+                crc = (crc >> 1) ^ 0x8408;
             } else {
-                crc <<= 1;
+                crc >>= 1;
             }
         }
     }
-    crc
+    crc ^ 0xFFFF
 }
 
 /// Injected install-code → link-key derivation.
 ///
-/// The derivation reuses the security crate's hash/KDF abstraction
-/// ([`EccBackend::kdf`]) — this crate defines no digest of its own.
-/// Backends: any [`EccBackend`] via [`EccJoinKdf`], or a test stub.
+/// The input is always the full validated code (payload + 2-octet
+/// check field, as laid out by [`InstallCode`]): the normative BDB
+/// derivation hashes the whole code, check field included.
+/// Backends: the normative [`MmoJoinKdf`], any [`EccBackend`] via
+/// [`EccJoinKdf`], or a test stub.
 pub trait JoinKdf {
-    /// Derive the 16-octet initial link key from the install-code
-    /// payload and the joiner's long address.
+    /// Derive the 16-octet initial link key from the full install
+    /// code and the joiner's long address (the address is advisory:
+    /// the normative derivation ignores it).
     fn derive_link_key(
         &self,
         install_code: &[u8],
@@ -164,9 +181,35 @@ pub trait JoinKdf {
     ) -> Result<(), JoinError>;
 }
 
+/// Normative install-code derivation: the AES-MMO-128 hash of the
+/// full validated code (payload + check field), per §6.11.1.2
+/// (`22-65816-030-56-08`, anchor p0041-L828-L834). The joiner address
+/// plays no role in this construction and is ignored.
+///
+/// This replaces the backend-injected [`EccJoinKdf`] as the
+/// derivation real devices use; the worked key is pinned in
+/// `tests/vectors.rs`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MmoJoinKdf;
+
+impl JoinKdf for MmoJoinKdf {
+    fn derive_link_key(
+        &self,
+        install_code: &[u8],
+        _eui64: &[u8; 8],
+        out: &mut [u8; NETWORK_KEY_LEN],
+    ) -> Result<(), JoinError> {
+        let digest = mmo_hash_128(install_code).map_err(|_| JoinError::KdfFailed)?;
+        out.copy_from_slice(&digest);
+        Ok(())
+    }
+}
+
 /// [`JoinKdf`] over any security-crate ECC/hash backend (reuse, not
-/// duplication): the install-code payload and long address feed the
-/// backend KDF under a commissioning domain label.
+/// duplication): the full validated code and long address feed the
+/// backend KDF under a commissioning domain label. Injection seam
+/// for tests and alternate backends — not the on-air derivation
+/// (see [`MmoJoinKdf`]).
 pub struct EccJoinKdf<B>(pub B);
 
 impl<B: EccBackend> JoinKdf for EccJoinKdf<B> {
@@ -553,15 +596,17 @@ impl TrustCenter {
     }
 
     /// Derive the initial link key from the device install code
-    /// (`22-65816-030-56-03`): never the anonymous well-known secret —
-    /// the KDF input must be the validated code.
+    /// (`22-65816-030-56-03` + `22-65816-030-56-08`): never the
+    /// anonymous well-known secret — the KDF input is the full
+    /// validated code (payload + check field, §6.11.1.2 hashes the
+    /// whole code).
     pub fn install_code_key<K: JoinKdf>(
         kdf: &K,
         code: &InstallCode,
         eui64: &[u8; 8],
         out: &mut [u8; NETWORK_KEY_LEN],
     ) -> Result<(), JoinError> {
-        kdf.derive_link_key(code.payload(), eui64, out)
+        kdf.derive_link_key(code.as_slice(), eui64, out)
     }
 
     /// Symmetric exchange, Trust-Center side (`22-65816-030-91-02`):

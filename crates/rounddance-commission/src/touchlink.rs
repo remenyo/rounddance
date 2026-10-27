@@ -12,10 +12,13 @@
 //! Requirement IDs below are repo-minted (`07-5123-08-133-*` and
 //! `22-65816-030-12-*`, dots stripped), MINTED-pending-confirm.
 //!
-//! Full inter-PAN transmit is a later wave (it needs a MAC SAP
-//! inter-PAN service first): this module owns the cluster identifier,
-//! the command codecs, and both role state skeletons, with the
-//! transmit seam marked at [`InterPanTx`].
+//! Inter-PAN transmit rides the MAC SAP inter-PAN service
+//! ([`rounddance_mac_sap::MacInterPanSap`]) through the [`InterPanTx`]
+//! seam: this module owns the cluster identifier, the command codecs,
+//! both role state skeletons, and the TX drivers
+//! ([`TouchlinkInitiator::broadcast_scan`],
+//! [`TouchlinkTarget::respond`]), with the SAP adapter at
+//! [`SapInterPan`].
 
 /// Touchlink Commissioning cluster identifier (`07-5123-08-133-01`,
 /// anchor p1130-L25917).
@@ -88,6 +91,14 @@ pub enum TouchlinkError {
     PayloadTooLong,
     /// Operation not allowed in the current state.
     BadState,
+    /// Underlying inter-PAN transport failed.
+    Transport,
+}
+
+impl From<rounddance_mac_sap::MacError> for TouchlinkError {
+    fn from(_: rounddance_mac_sap::MacError) -> Self {
+        Self::Transport
+    }
 }
 
 /// One touchlink commissioning frame: the inter-PAN transaction
@@ -207,13 +218,45 @@ impl ScanRequestPayload {
     }
 }
 
-/// Deferred inter-PAN transmit seam: the later MAC SAP wave implements
-/// this; both state machines below stop at "frame ready".
+/// Inter-PAN transmit seam: broadcast one touchlink frame per scan
+/// channel. Implemented by the MAC SAP adapter ([`SapInterPan`]) and
+/// by test/sim media.
 pub trait InterPanTx {
     /// Transmit error for the seam.
     type Error;
     /// Queue one touchlink frame on `channel` (broadcast inter-PAN).
     fn send(&mut self, channel: u8, frame: &TouchlinkFrame) -> Result<(), Self::Error>;
+}
+
+/// [`InterPanTx`] over the MAC SAP inter-PAN service: encodes each
+/// touchlink frame into one inter-PAN payload on the requested
+/// channel (`22-65816-030-121-03` + `122-02`, repo-minted,
+/// MINTED-pending-confirm).
+pub struct SapInterPan<'a, S: rounddance_mac_sap::MacInterPanSap + ?Sized> {
+    sap: &'a mut S,
+}
+
+impl<'a, S: rounddance_mac_sap::MacInterPanSap + ?Sized> SapInterPan<'a, S> {
+    /// Wrap a live inter-PAN SAP.
+    #[must_use]
+    pub fn new(sap: &'a mut S) -> Self {
+        Self { sap }
+    }
+}
+
+impl<S: rounddance_mac_sap::MacInterPanSap + ?Sized> InterPanTx for SapInterPan<'_, S> {
+    type Error = rounddance_mac_sap::MacError;
+
+    fn send(&mut self, channel: u8, frame: &TouchlinkFrame) -> Result<(), Self::Error> {
+        use rounddance_mac_sap::{Channel, FramePayload};
+        let on = Channel::new(channel).map_err(|_| Self::Error::InvalidChannel)?;
+        let mut buf = [0u8; MAX_TOUCHLINK_FRAME];
+        let n = frame
+            .encode_into(&mut buf)
+            .map_err(|_| Self::Error::FrameTooLong)?;
+        let msdu = FramePayload::from_slice(&buf[..n]).map_err(|_| Self::Error::FrameTooLong)?;
+        self.sap.interpan_request(on, &msdu).map(|_| ())
+    }
 }
 
 /// Initiator sequencing skeleton (`22-65816-030-121-01`: scan each
@@ -314,6 +357,33 @@ impl TouchlinkInitiator {
         }
     }
 
+    /// Broadcast the scan request on every scan channel through the
+    /// inter-PAN seam (`22-65816-030-121-03`, repo-minted,
+    /// MINTED-pending-confirm; scan broadcast per §12.1,
+    /// anchor p0087-L1821-L1835). Only valid while scanning;
+    /// returns the channel count sent.
+    pub fn broadcast_scan<Tx: InterPanTx>(
+        &self,
+        tx: &mut Tx,
+        channels: &[u8],
+        touchlink_info: u8,
+        key_index: u8,
+    ) -> Result<usize, TouchlinkError>
+    where
+        Tx::Error: Into<TouchlinkError>,
+    {
+        if self.state != TouchlinkInitiatorState::Scanning {
+            return Err(TouchlinkError::BadState);
+        }
+        let frame = self.scan_request(touchlink_info, key_index);
+        let mut sent = 0usize;
+        for &channel in channels {
+            tx.send(channel, &frame).map_err(Into::into)?;
+            sent += 1;
+        }
+        Ok(sent)
+    }
+
     /// Note one scan response on this transaction (identifier match is
     /// the caller's check per §12.1.1.1).
     pub fn note_response(&mut self, matching_transaction: bool) {
@@ -401,6 +471,48 @@ impl TouchlinkTarget {
         if self.state == TouchlinkTargetState::ScanReceived {
             self.state = TouchlinkTargetState::Responded;
         }
+    }
+
+    /// Build the scan-response frame for the latched transaction
+    /// (`tx::SCAN_RSP`, `07-5123-08-13323-01`): the target's own
+    /// touchlink information plus the key index it accepts. Fuller
+    /// response application fields are a follow-up; the transaction
+    /// binding and command identifier are the frozen parts.
+    #[must_use]
+    pub fn scan_response(&self, touchlink_info: u8, key_index: u8) -> TouchlinkFrame {
+        let mut payload = [0u8; MAX_TOUCHLINK_PAYLOAD];
+        payload[0] = touchlink_info;
+        payload[1] = key_index;
+        TouchlinkFrame {
+            transaction: self.transaction,
+            command: tx::SCAN_RSP,
+            payload,
+            payload_len: ScanRequestPayload::LEN as u8,
+        }
+    }
+
+    /// Transmit the scan response on `channel` through the inter-PAN
+    /// seam and latch it sent (`22-65816-030-122-02`, repo-minted,
+    /// MINTED-pending-confirm; target rules per §12.2,
+    /// anchor p0092-L2054-L2064). Only valid after a scan request.
+    pub fn respond<Tx: InterPanTx>(
+        &mut self,
+        tx: &mut Tx,
+        channel: u8,
+        touchlink_info: u8,
+        key_index: u8,
+    ) -> Result<(), TouchlinkError>
+    where
+        Tx::Error: Into<TouchlinkError>,
+    {
+        match self.state {
+            TouchlinkTargetState::ScanReceived | TouchlinkTargetState::Responded => {}
+            _ => return Err(TouchlinkError::BadState),
+        }
+        let frame = self.scan_response(touchlink_info, key_index);
+        tx.send(channel, &frame).map_err(Into::into)?;
+        self.on_response_sent();
+        Ok(())
     }
 
     /// Apply an incoming network start/join order on this transaction.

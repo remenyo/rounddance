@@ -119,7 +119,10 @@ pub fn check_manufacturer(header: &Header, known: &[u16]) -> Result<(), ZclStatu
 /// outcome: unicast only, never answering a Default Response, honoring
 /// the disable bit (errors still answer when it is set).
 ///
-/// Requirement `07-5123-08-2512-01` (MINTED-pending-confirm).
+/// Requirement `07-5123-08-2512-01` (MINTED-pending-confirm;
+/// sweep-2 correction applied: unknown-cluster emits
+/// [`ZclStatus::UnsupportedCluster`], broadcast/multicast errors stay
+/// silent per `07-5123-08-2512-02`).
 #[must_use]
 pub const fn should_default_respond(
     header: &Header,
@@ -177,7 +180,13 @@ pub fn dispatch(
 ) -> Result<DispatchOutcome, ZclStatus> {
     check_manufacturer(header, known_manufacturers)?;
     ctx.sender_ieee = sender_ieee;
-    let def = endpoint.find(cluster_id).ok_or(ZclStatus::Failure)?;
+    // Missing cluster on a unicast frame answers UNSUPPORTED_CLUSTER,
+    // never FAILURE (`07-5123-08-2512-01` correction, anchor
+    // p0081-L3010-L3012); FAILURE stays receipt-only per
+    // `07-5123-08-2512-03`.
+    let def = endpoint
+        .find(cluster_id)
+        .ok_or(ZclStatus::UnsupportedCluster)?;
     match header.control.frame_type {
         FrameType::Global => {
             let mut behavior = behavior;

@@ -408,6 +408,90 @@ fn vector_scan_request_payload() {
     );
 }
 
+// 07-5123-08-13322-01 / 13323-01: scan request/response wire shape.
+// The transaction rides little-endian, then the frozen command octet
+// (0x00 scan request, 0x01 scan response), then the info/key pair.
+#[test]
+fn vector_touchlink_scan_wire_ids() {
+    let init = {
+        let mut init = TouchlinkInitiator::new();
+        init.begin_scan(0x1234_5678).unwrap();
+        init
+    };
+    let req = init.scan_request(0x0B, 0x04);
+    let mut buf = [0u8; MAX_TOUCHLINK_FRAME];
+    let n = req.encode_into(&mut buf).unwrap();
+    assert_eq!(&buf[..n], &[0x78, 0x56, 0x34, 0x12, 0x00, 0x0B, 0x04]);
+    let back = TouchlinkFrame::decode(&buf[..n]).unwrap();
+    assert_eq!(back.transaction, 0x1234_5678);
+    assert_eq!(back.command, 0x00);
+
+    let mut target = TouchlinkTarget::new();
+    target.on_scan_request(&back);
+    let rsp = target.scan_response(0x0C, 0x04);
+    assert_eq!(rsp.transaction, 0x1234_5678);
+    assert_eq!(rsp.command, 0x01);
+    let m = rsp.encode_into(&mut buf).unwrap();
+    assert_eq!(&buf[..m], &[0x78, 0x56, 0x34, 0x12, 0x01, 0x0C, 0x04]);
+    let back_rsp = TouchlinkFrame::decode(&buf[..m]).unwrap();
+    assert_eq!(back_rsp.command, 0x01);
+    assert_eq!(back_rsp.transaction, 0x1234_5678);
+}
+
+// 22-65816-030-121-03 / 122-02: the SAP adapter puts one touchlink
+// frame per inter-PAN payload on the requested channel; out-of-range
+// channels surface as transport errors.
+#[test]
+fn vector_touchlink_sap_adapter_transfer() {
+    use rounddance_mac_sap::{
+        Channel, FramePayload, MacError, MacInterPanSap, TxConfirm, TxHandle,
+    };
+
+    struct Capture {
+        channel: Option<Channel>,
+        bytes: Vec<u8>,
+        next: u32,
+    }
+    impl MacInterPanSap for Capture {
+        fn interpan_request(
+            &mut self,
+            channel: Channel,
+            msdu: &FramePayload,
+        ) -> Result<TxHandle, MacError> {
+            self.channel = Some(channel);
+            self.bytes = msdu.as_slice().to_vec();
+            self.next += 1;
+            Ok(TxHandle(self.next))
+        }
+        fn poll_interpan_confirm(&mut self) -> Option<TxConfirm> {
+            None
+        }
+        fn poll_interpan_indication(&mut self) -> Option<rounddance_mac_sap::InterPanIndication> {
+            None
+        }
+    }
+
+    let mut cap = Capture {
+        channel: None,
+        bytes: Vec::new(),
+        next: 0,
+    };
+    let frame = TouchlinkFrame::new(0x1234_5678, 0x00, &[0x0B, 0x04]).unwrap();
+    let err = {
+        let mut sap = SapInterPan::new(&mut cap);
+        sap.send(20, &frame).unwrap();
+        // Channel 10 is outside the 2.4 GHz band: transport error.
+        sap.send(10, &frame).unwrap_err()
+    };
+    assert_eq!(cap.channel, Some(Channel::new(20).unwrap()));
+    assert_eq!(&cap.bytes, &[0x78, 0x56, 0x34, 0x12, 0x00, 0x0B, 0x04]);
+    assert_eq!(err, MacError::InvalidChannel);
+    assert_eq!(
+        TouchlinkError::from(MacError::InvalidChannel),
+        TouchlinkError::Transport
+    );
+}
+
 // 22-65816-030-121-01 / 122-01: initiator/target skeleton handshake.
 #[test]
 fn vector_touchlink_skeleton_handshake() {
@@ -489,6 +573,67 @@ fn vector_install_code_derivation_mock() {
     TrustCenter::install_code_key(&kdf, &code, &[0x02; 8], &mut k2).unwrap();
     assert_eq!(k1, k1b);
     assert_ne!(k1, k2);
+}
+
+// 22-65816-030-56-07: BDB §6.11.1.1 worked example, frozen. Payload
+// 83..05 takes check bytes C3 B5 on the wire (CRC 0xB5C3 stored
+// little-endian, anchor p0041-L807-L815); big-endian storage of the
+// same value is rejected.
+#[test]
+fn vector_install_code_crc_worked_22_65816_030_56_07() {
+    let payload = [
+        0x83, 0xFE, 0xD3, 0x40, 0x7A, 0x93, 0x97, 0x23, 0xA5, 0xC6, 0x39, 0xB2, 0x69, 0x16, 0xD5,
+        0x05,
+    ];
+    let mut wire = [0u8; MAX_INSTALL_CODE_LEN];
+    let n = InstallCode::with_crc(&payload, &mut wire).unwrap();
+    assert_eq!(n, 18);
+    assert_eq!(&wire[16..18], &[0xC3, 0xB5]);
+    let code = InstallCode::from_slice(&wire[..n]).unwrap();
+    assert_eq!(code.payload(), &payload);
+    // The same check value in big-endian order is not the code.
+    let mut swapped = wire;
+    swapped[16] = 0xB5;
+    swapped[17] = 0xC3;
+    assert_eq!(
+        InstallCode::from_slice(&swapped[..n]).unwrap_err(),
+        JoinError::BadInstallCode
+    );
+    // A non-reflected-CRC code (old 0x9502 variant) is rejected.
+    let mut stale = wire;
+    stale[16] = 0x02;
+    stale[17] = 0x95;
+    assert_eq!(
+        InstallCode::from_slice(&stale[..n]).unwrap_err(),
+        JoinError::BadInstallCode
+    );
+}
+
+// 22-65816-030-56-08: BDB §6.11.1.2 worked key, frozen. The MMO hash
+// of the worked code (anchor p0041-L828-L834) must produce
+// 66B6900981E1EE3CA4206B6B861C02BB — the same value the security
+// crate pins at the hash layer, now reached through the Trust-Center
+// derivation entry point. The joiner address is not an input.
+#[test]
+fn vector_install_code_mmo_worked_22_65816_030_56_08() {
+    let wire = [
+        0x83, 0xFE, 0xD3, 0x40, 0x7A, 0x93, 0x97, 0x23, 0xA5, 0xC6, 0x39, 0xB2, 0x69, 0x16, 0xD5,
+        0x05, 0xC3, 0xB5,
+    ];
+    let code = InstallCode::from_slice(&wire).unwrap();
+    let mut key = [0u8; 16];
+    TrustCenter::install_code_key(&MmoJoinKdf, &code, &[0xAA; 8], &mut key).unwrap();
+    assert_eq!(
+        key,
+        [
+            0x66, 0xB6, 0x90, 0x09, 0x81, 0xE1, 0xEE, 0x3C, 0xA4, 0x20, 0x6B, 0x6B, 0x86, 0x1C,
+            0x02, 0xBB
+        ]
+    );
+    // Address-independence: a different EUI derives the same key.
+    let mut key2 = [0u8; 16];
+    TrustCenter::install_code_key(&MmoJoinKdf, &code, &[0x01; 8], &mut key2).unwrap();
+    assert_eq!(key, key2);
 }
 
 // 22-65816-030-91-03: symmetric joiner transcript

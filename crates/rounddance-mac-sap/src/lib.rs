@@ -501,6 +501,55 @@ pub trait MacSap: MacDataSap + MacMgmtSap {}
 
 impl<T: MacDataSap + MacMgmtSap> MacSap for T {}
 
+/// One inter-PAN payload: same bound as [`FramePayload`] (inter-PAN
+/// frames still fit one PSDU).
+pub type InterPanPayload = FramePayload;
+
+/// One received inter-PAN frame: channel it arrived on plus payload.
+///
+/// Spec area: inter-PAN delivery (touchlink exchange rides this, not
+/// the PAN data path); serves `22-65816-030-121-03` + `122-02`
+/// (repo-minted, MINTED-pending-confirm).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InterPanIndication {
+    /// Channel the frame arrived on.
+    pub channel: Channel,
+    /// Payload bytes (bounded, no heap).
+    pub msdu: FramePayload,
+}
+
+/// Upper-layer view of the inter-PAN service (commissioning exchange
+/// path, separate from PAN data).
+///
+/// Spec area: inter-PAN request/confirm/indication serving the
+/// touchlink scan/response exchange (`22-65816-030-121-03` +
+/// `122-02`, repo-minted, MINTED-pending-confirm; anchors
+/// p0087-L1821-L1835, p0091-L1990-L1993, p0092-L2054-L2064).
+/// Broadcast-only, unacknowledged, per-channel: the caller selects
+/// the channel per request and pairs responses by the transaction
+/// identifier inside the payload.
+pub trait MacInterPanSap {
+    /// Broadcast one inter-PAN payload on `channel`; the matching
+    /// [`TxConfirm`] arrives via
+    /// [`MacInterPanSap::poll_interpan_confirm`].
+    ///
+    /// # Errors
+    ///
+    /// [`MacError::QueueFull`] under backpressure, [`MacError::FrameTooLong`]
+    /// for oversize payloads, [`MacError::NotReady`] when the radio is down.
+    fn interpan_request(
+        &mut self,
+        channel: Channel,
+        msdu: &FramePayload,
+    ) -> Result<TxHandle, MacError>;
+
+    /// Take the oldest pending inter-PAN transmit confirm, if any.
+    fn poll_interpan_confirm(&mut self) -> Option<TxConfirm>;
+
+    /// Take the oldest pending received inter-PAN frame, if any.
+    fn poll_interpan_indication(&mut self) -> Option<InterPanIndication>;
+}
+
 /// Crate identifier.
 #[must_use]
 pub fn name() -> &'static str {
@@ -585,6 +634,113 @@ mod tests {
         ] {
             assert!(!format!("{e}").is_empty());
         }
+    }
+
+    /// Minimal in-test loopback proving the inter-PAN seam contract:
+    /// requests confirm in order and indications echo channel + bytes.
+    struct LoopbackInterPan {
+        next: u32,
+        confirms: [Option<TxConfirm>; 4],
+        indications: [Option<InterPanIndication>; 4],
+    }
+
+    impl LoopbackInterPan {
+        const fn new() -> Self {
+            Self {
+                next: 0,
+                confirms: [None, None, None, None],
+                indications: [None, None, None, None],
+            }
+        }
+
+        fn push_confirm(&mut self, c: TxConfirm) {
+            let mut i = 0;
+            while i < self.confirms.len() {
+                if self.confirms[i].is_none() {
+                    self.confirms[i] = Some(c);
+                    return;
+                }
+                i += 1;
+            }
+        }
+
+        fn push_indication(&mut self, ind: InterPanIndication) {
+            let mut i = 0;
+            while i < self.indications.len() {
+                if self.indications[i].is_none() {
+                    self.indications[i] = Some(ind);
+                    return;
+                }
+                i += 1;
+            }
+        }
+    }
+
+    impl MacInterPanSap for LoopbackInterPan {
+        fn interpan_request(
+            &mut self,
+            channel: Channel,
+            msdu: &FramePayload,
+        ) -> Result<TxHandle, MacError> {
+            let h = TxHandle(self.next);
+            self.next += 1;
+            self.push_confirm(TxConfirm {
+                handle: h,
+                status: TxStatus::Delivered,
+                timestamp_us: None,
+            });
+            self.push_indication(InterPanIndication {
+                channel,
+                msdu: *msdu,
+            });
+            Ok(h)
+        }
+
+        fn poll_interpan_confirm(&mut self) -> Option<TxConfirm> {
+            let mut i = 0;
+            while i < self.confirms.len() {
+                if self.confirms[i].is_some() {
+                    return self.confirms[i].take();
+                }
+                i += 1;
+            }
+            None
+        }
+
+        fn poll_interpan_indication(&mut self) -> Option<InterPanIndication> {
+            let mut i = 0;
+            while i < self.indications.len() {
+                if self.indications[i].is_some() {
+                    return self.indications[i].take();
+                }
+                i += 1;
+            }
+            None
+        }
+    }
+
+    #[test]
+    fn interpan_loopback_confirms_and_echoes_channel() {
+        let mut sap = LoopbackInterPan::new();
+        let ch15 = Channel::new(15).unwrap();
+        let ch20 = Channel::new(20).unwrap();
+        let a = FramePayload::from_slice(&[0x78, 0x56, 0x34, 0x12, 0x00, 0x0b, 0x00]).unwrap();
+        let b = FramePayload::from_slice(&[0x78, 0x56, 0x34, 0x12, 0x01]).unwrap();
+        let h0 = sap.interpan_request(ch15, &a).unwrap();
+        let h1 = sap.interpan_request(ch20, &b).unwrap();
+        assert_ne!(h0, h1);
+        // Confirms arrive in request order.
+        assert_eq!(sap.poll_interpan_confirm().unwrap().handle, h0);
+        assert_eq!(sap.poll_interpan_confirm().unwrap().handle, h1);
+        assert!(sap.poll_interpan_confirm().is_none());
+        // Indications keep their channel and bytes.
+        let first = sap.poll_interpan_indication().unwrap();
+        assert_eq!(first.channel, ch15);
+        assert_eq!(first.msdu.as_slice(), a.as_slice());
+        let second = sap.poll_interpan_indication().unwrap();
+        assert_eq!(second.channel, ch20);
+        assert_eq!(second.msdu.as_slice(), b.as_slice());
+        assert!(sap.poll_interpan_indication().is_none());
     }
 
     #[test]
