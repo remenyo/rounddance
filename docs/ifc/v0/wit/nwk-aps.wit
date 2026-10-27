@@ -1,0 +1,88 @@
+package rounddance:ifc@v0;
+
+/// NWK/APS data path — second-highest traffic, plus shared tables.
+/// Management ops (join/leave/bind/group) ride request/response pairs
+/// matched by transaction sequence; data rides FIFO per destination.
+world nwk-aps {
+    export nwk-data;
+    export aps-data;
+    export tables;
+
+    interface common {
+        variant ifc-error {
+            queue-full,
+            frame-too-long,
+            no-route,
+            no-ack,
+            security-fail,
+            not-ready,
+            invalid-parameter,
+            timeout,
+            aborted,
+        }
+    }
+
+    interface nwk-data {
+        use common.{ifc-error};
+
+        /// One NWK payload, <=128 octets after headers.
+        record nldu { bytes: list<u8> }
+
+        record nlde-request {
+            dst: u16,
+            nsdu: nldu,
+            radius: u8,
+            alias: option<u16>,
+        }
+
+        record nlde-confirm {
+            handle: u32,
+            status: result<_, ifc-error>,
+        }
+
+        record nlde-indication {
+            src: u16,
+            nsdu: nldu,
+            lqi: u8,
+        }
+
+        nlde-request: func(req: nlde-request) -> result<u32, ifc-error>;
+        poll-confirm: func() -> option<nlde-confirm>;
+        poll-indication: func() -> option<nlde-indication>;
+        queue-free: func() -> u32;
+    }
+
+    interface aps-data {
+        use common.{ifc-error};
+
+        record aps-address {
+            dst: u16,
+            endpoint: u8,
+            cluster: u16,
+            profile: u16,
+        }
+
+        /// <=100 octets (room for fragmentation headers above).
+        record asdu { bytes: list<u8> }
+
+        apsde-request: func(
+            to: aps-address, asdu: asdu, ack: bool,
+        ) -> result<u32, ifc-error>;
+        apsde-cancel: func(handle: u32) -> result<_, ifc-error>;
+        poll-confirm: func() -> option<u32>;
+        poll-indication: func() -> option<asdu>;
+        queue-free: func() -> u32;
+    }
+
+    interface tables {
+        use common.{ifc-error};
+
+        /// Binding/group tables: provisioning-sized, never resized
+        /// mid-transaction (D5). Ops fail invalid-parameter when full.
+        bind: func(src: u16, cluster: u16, dst: u16) -> result<_, ifc-error>;
+        unbind: func(src: u16, cluster: u16, dst: u16) -> result<_, ifc-error>;
+        add-group: func(group: u16, endpoint: u8) -> result<_, ifc-error>;
+        remove-group: func(group: u16, endpoint: u8) -> result<_, ifc-error>;
+        clear-all: func();
+    }
+}

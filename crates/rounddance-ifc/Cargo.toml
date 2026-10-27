@@ -1,0 +1,14 @@
+[package]
+name = "rounddance-ifc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Inter-module interface v0: envelope, CBOR codec, framing, handshake, credit flow, reference transports"
+rust-version.workspace = true
+
+[lib]
+name = "rounddance_ifc"
+
+[dev-dependencies]
+libc = "0.2"

@@ -68,6 +68,13 @@ name = "rounddance-hal-host"
 version = "0.1.0"
 
 [[package]]
+name = "rounddance-ifc"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "rounddance-mac-sap"
 version = "0.1.0"
 

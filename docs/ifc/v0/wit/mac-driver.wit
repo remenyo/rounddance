@@ -1,0 +1,95 @@
+package rounddance:ifc@v0;
+
+/// MAC driver over the component boundary — the most-crossed interface
+/// (every frame crosses it twice). Mirrors rounddance-mac-sap.
+world mac-driver {
+    export data;
+    export mgmt;
+
+    interface types {
+        /// <=116 octets. Host must call check-bounds first.
+        record payload { bytes: list<u8> }
+
+        variant addr-mode {
+            none,
+            short(u16),
+            extended(u64),
+        }
+
+        record mac-addr {
+            pan: option<u16>,
+            addr: addr-mode,
+        }
+
+        record tx-request {
+            dst: mac-addr,
+            msdu: payload,
+            ack: bool,
+        }
+
+        variant tx-status {
+            delivered,
+            no-ack,
+            channel-busy,
+            cancelled,
+        }
+
+        record tx-confirm {
+            handle: u32,
+            status: tx-status,
+            timestamp-us: option<u64>,
+        }
+
+        record rx-indication {
+            src: mac-addr,
+            lqi: u8,
+            timestamp-us: option<u64>,
+            msdu: payload,
+        }
+
+        variant mac-error {
+            queue-full,
+            frame-too-long,
+            invalid-address,
+            invalid-channel,
+            no-ack,
+            channel-busy,
+            not-ready,
+            unknown-handle,
+            unsupported,
+            radio-fault,
+        }
+
+        record capabilities {
+            hw-auto-ack: bool,
+            hw-csma-ca: bool,
+            hw-retries: bool,
+            energy-scan: bool,
+            frame-timestamping: bool,
+            promiscuous-mode: bool,
+        }
+    }
+
+    interface data {
+        use types.{tx-request, tx-confirm, rx-indication, mac-error};
+
+        data-request: func(req: tx-request) -> result<u32, mac-error>;
+        data-cancel: func(handle: u32) -> result<_, mac-error>;
+        poll-confirm: func() -> option<tx-confirm>;
+        poll-indication: func() -> option<rx-indication>;
+        tx-queue-free: func() -> u32;
+        tx-queue-capacity: func() -> u32;
+    }
+
+    interface mgmt {
+        use types.{mac-error, capabilities};
+
+        reset: func(cold: bool);
+        set-channel: func(channel: u8) -> result<_, mac-error>;
+        set-short-addr: func(addr: u16);
+        set-extended-addr: func(addr: u64);
+        set-pan-id: func(pan: u16);
+        energy-scan: func(channel: u8) -> result<u8, mac-error>;
+        capabilities: func() -> capabilities;
+    }
+}

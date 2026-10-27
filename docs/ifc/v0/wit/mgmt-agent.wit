@@ -1,0 +1,47 @@
+package rounddance:ifc@v0;
+
+/// Management agent — the operator face. Must work on a sick node:
+/// always available, even when the rest of the stack is down.
+/// Crosses every deployment (USB on standalone, loopback on host).
+world mgmt-agent {
+    export query;
+    export alarms;
+
+    interface query {
+        variant mgmt-error {
+            queue-full,
+            unknown-function,
+            unauthorized,
+            not-ready,
+        }
+
+        /// Function id from docs/ifc/v0/functions.md (1..=9).
+        get-state: func(function: u8) -> result<list<u8>, mgmt-error>;
+
+        record log-page {
+            next-cursor: u64,
+            bytes: list<u8>,
+        }
+
+        /// Bounded log read: at most 256 bytes per call, cursor resumes.
+        get-log: func(cursor: u64) -> result<log-page, mgmt-error>;
+
+        /// Provisioning write. Privileged: unauthorized without the
+        /// commissioning window or operator credential.
+        set-provisioning: func(blob: list<u8>) -> result<_, mgmt-error>;
+
+        /// Named self-test id -> pass/fail byte + detail blob.
+        diagnostic: func(test-id: u8) -> result<list<u8>, mgmt-error>;
+    }
+
+    interface alarms {
+        record alarm {
+            function: u8,
+            code: u16,
+            detail: list<u8>,
+        }
+
+        /// Occurrence order. None when quiet.
+        poll-alarm: func() -> option<alarm>;
+    }
+}

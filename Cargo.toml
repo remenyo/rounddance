@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/rounddance-mac-sap",
+    "crates/rounddance-ifc",
     "crates/rounddance-nwk",
     "crates/rounddance-aps",
     "crates/rounddance-zdo",
