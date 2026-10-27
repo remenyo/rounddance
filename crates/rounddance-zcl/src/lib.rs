@@ -5,7 +5,7 @@
 //!
 //! Three layers: engine (`frame`, `types`, `attrs`, `general`,
 //! `reporting`, `dispatch`, `discovery`), definitions (`cluster`),
-//! behavior (`behavior`, `onoff`, `level`, `ias_zone`).
+//! behavior (`behavior`, `onoff`, `level`, `ias_zone`, `ace`, `wd`).
 //!
 //! Paraphrase-level model of doc `07-5123-08` (ZCL). All wording here
 //! is paraphrase; citations name document, revision, and clause/line
@@ -28,6 +28,7 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
+pub mod ace;
 pub mod attrs;
 pub mod behavior;
 pub mod cluster;
@@ -45,6 +46,7 @@ pub mod price;
 pub mod reporting;
 pub mod status;
 pub mod types;
+pub mod wd;
 
 pub use attrs::{
     access, AttrDef, AttrStore, WriteGuard, ATTR_CLUSTER_REVISION, ATTR_REPORTING_STATUS, MAX_ATTRS,

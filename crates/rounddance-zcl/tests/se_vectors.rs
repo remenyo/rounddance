@@ -662,3 +662,272 @@ fn vector_keyest_ephemeral_length_07_5123_08_1074_05() {
         Err(keyest::ExchangeError::Terminated)
     );
 }
+
+// ---- price.rs: block periods + block thresholds --------------------
+// (wave-22 coverage expansion; corpus-mined 102-01/02/03 + 104-02
+// reused, codec/table/store rows repo-minted MINTED-pending-confirm)
+
+fn block_period_fixture() -> price::BlockPeriod {
+    price::BlockPeriod {
+        provider_id: 0x1122_3344,
+        issuer_event_id: 0x0000_0010,
+        start_time: 0x1000_0000,
+        duration: 60,
+        control: 0x01,
+        duration_type: 0x20,
+        tariff_type: 0x00,
+        tariff_resolution: 0x00,
+    }
+}
+
+// 07-5123-08-1025-01: PublishBlockPeriod 19-octet codec.
+#[test]
+fn vector_block_period_codec_07_5123_08_1025_01() {
+    let ev = block_period_fixture();
+    let mut out = [0u8; 20];
+    assert_eq!(price::encode_publish_block_period(&ev, &mut out), Ok(19));
+    assert_eq!(
+        &out[..19],
+        &[
+            0x44, 0x33, 0x22, 0x11, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x3c, 0x00,
+            0x00, 0x01, 0x20, 0x00, 0x00,
+        ]
+    );
+    assert_eq!(price::decode_publish_block_period(&out[..19]).unwrap(), ev);
+    assert!(ev.ack_required());
+    assert!(!ev.repeating());
+    assert_eq!(ev.timebase(), price::DUR_BASE_MINUTES);
+    assert!(price::decode_publish_block_period(&out[..18]).is_err());
+    assert!(price::decode_publish_block_period(&out[..20]).is_err());
+    let mut wide = ev;
+    wide.duration = price::BLOCK_DURATION_UNTIL_CHANGED + 1;
+    assert!(price::encode_publish_block_period(&wide, &mut out).is_err());
+}
+
+// 07-5123-08-1023-01: Get Block Period(s) codec (5- and 6-octet).
+#[test]
+fn vector_get_block_periods_codec_07_5123_08_1023_01() {
+    let req = price::decode_get_block_periods(&[0x00, 0x00, 0x00, 0x00, 0x02]).unwrap();
+    assert_eq!(req.start_time, 0);
+    assert_eq!(req.max_events, 2);
+    assert_eq!(req.tariff_type, None);
+    let req2 = price::decode_get_block_periods(&[0x78, 0x56, 0x34, 0x12, 0x00, 0x01]).unwrap();
+    assert_eq!(req2.start_time, 0x1234_5678);
+    assert_eq!(req2.max_events, 0);
+    assert_eq!(req2.tariff_type, Some(0x01));
+    assert!(price::decode_get_block_periods(&[0x00, 0x00, 0x00, 0x00]).is_err());
+    assert!(price::decode_get_block_periods(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]).is_err());
+}
+
+// 07-5123-08-1025-02 + 102-03: backlog supersession + cancel.
+#[test]
+fn vector_block_table_supersede_cancel_07_5123_08_1025_02() {
+    let mut table = price::BlockTable::new();
+    assert!(table.is_empty());
+    let first = block_period_fixture();
+    table.insert(first);
+    assert_eq!(table.len(), 1);
+    // Same window, older-or-equal issuer: newcomer loses.
+    let mut stale = first;
+    stale.issuer_event_id = 0x0000_0005;
+    table.insert(stale);
+    assert_eq!(table.len(), 1);
+    // Same window, newer issuer: replaces.
+    let mut newer = first;
+    newer.issuer_event_id = 0x0000_0020;
+    table.insert(newer);
+    assert_eq!(table.len(), 1);
+    let mut hits = [newer; price::MAX_BLOCK_PERIODS];
+    let n = table.scheduled_since(0x1000_0000, 0, None, &mut hits);
+    assert_eq!(n, 1);
+    assert_eq!(hits[0].issuer_event_id, 0x0000_0020);
+    // Cancel by provider + issuer removes it.
+    let mut cancel = newer;
+    cancel.start_time = price::BLOCK_START_CANCEL;
+    table.insert(cancel);
+    assert!(table.is_empty());
+    // Mirror tracks the covering period.
+    table.insert(newer);
+    let mut beh = price::ServerBehavior::new();
+    beh.blocks_mut().insert(newer);
+    beh.refresh_block_mirror(0x1000_0000 + 100);
+    assert_eq!(beh.block_mirror(), (0x1000_0000, 60, 0x20));
+}
+
+// 07-5123-08-1026-01: PublishBlockThresholds codec (tier/count nibbles).
+#[test]
+fn vector_block_thresholds_codec_07_5123_08_1026_01() {
+    // Header (19) + set(tier 2, count 2) + 2x uint48.
+    let wire: [u8; 19 + 1 + 12] = [
+        0x44, 0x33, 0x22, 0x11, // provider
+        0x07, 0x00, 0x00, 0x00, // issuer
+        0x00, 0x00, 0x00, 0x10, // start
+        0x55, 0x00, 0x00, 0x00, // tariff
+        0x00, 0x01, 0x00, // index 0, total 1, per-tier control
+        0x22, // tier 2, count 2
+        0xe8, 0x03, 0x00, 0x00, 0x00, 0x00, // 1000
+        0x10, 0x27, 0x00, 0x00, 0x00, 0x00, // 10000
+    ];
+    let msg = price::decode_publish_block_thresholds(&wire).unwrap();
+    assert_eq!(msg.provider_id, 0x1122_3344);
+    assert_eq!(msg.issuer_tariff_id, 0x55);
+    assert_eq!(msg.set_count, 1);
+    assert_eq!(msg.sets[0].tier, 2);
+    assert_eq!(msg.sets[0].count, 2);
+    assert_eq!(msg.sets[0].values[0], 1000);
+    assert_eq!(msg.sets[0].values[1], 10000);
+    let mut out = [0u8; 64];
+    assert_eq!(
+        price::encode_publish_block_thresholds(&msg, &mut out),
+        Ok(wire.len())
+    );
+    assert_eq!(&out[..wire.len()], &wire);
+    // All-tiers control with a nonzero tier nibble is refused.
+    let mut bad = wire;
+    bad[18] = 0x01;
+    assert!(price::decode_publish_block_thresholds(&bad).is_err());
+    // Zero total / index past total refused.
+    let mut bad2 = wire;
+    bad2[17] = 0x00;
+    assert!(price::decode_publish_block_thresholds(&bad2).is_err());
+}
+
+// 07-5123-08-102-02 + 104-02: tariff shape + scaled thresholds.
+#[test]
+fn vector_threshold_shape_and_scale_07_5123_08_102_02() {
+    assert_eq!(price::threshold_count_for_tariff(true, 5), 0);
+    assert_eq!(price::threshold_count_for_tariff(false, 0), 1);
+    assert_eq!(price::threshold_count_for_tariff(false, 3), 3);
+    assert_eq!(price::threshold_count_for_tariff(false, 15), 15);
+    assert_eq!(price::threshold_count_for_tariff(false, 200), 15);
+    assert_eq!(price::scaled_threshold(52003, 1, 1000), 52);
+    assert_eq!(price::scaled_threshold(999, 3, 0), 2997);
+    assert_eq!(price::scaled_threshold(999, 0, 1000), 0);
+}
+
+// 07-5123-08-1023-01/02: behavior serves block periods + thresholds,
+// NOT_FOUND when empty.
+#[test]
+fn vector_block_serve_and_not_found_07_5123_08_1023() {
+    use rounddance_zcl::behavior::{Behavior, Ctx, EventQueue};
+    use rounddance_zcl::frame::{Direction, FrameControl, FrameType, Header};
+    let mut store = price::server_store().unwrap();
+    let mut eng = rounddance_zcl::ReportingEngine::new();
+    let mut events = EventQueue::new();
+    let mut beh = price::ServerBehavior::new();
+    let header = Header {
+        control: FrameControl {
+            frame_type: FrameType::ClusterSpecific,
+            manufacturer_specific: false,
+            direction: Direction::ToServer,
+            disable_default_response: false,
+        },
+        manufacturer_code: None,
+        tsn: 0x60,
+        command_id: price::CMD_GET_BLOCK_PERIODS,
+    };
+    // Empty backlog: NOT_FOUND for both queries.
+    {
+        let mut ctx = Ctx {
+            store: &mut store,
+            reporting: &mut eng,
+            events: &mut events,
+            now_s: 0x1000_0000,
+            peer_onoff: None,
+            sender_ieee: None,
+        };
+        assert_eq!(
+            <price::ServerBehavior as Behavior>::handle_cluster_command(
+                &mut beh,
+                &mut ctx,
+                &header,
+                price::CMD_GET_BLOCK_PERIODS,
+                &[0x00, 0x00, 0x00, 0x00, 0x00]
+            ),
+            Err(rounddance_zcl::ZclStatus::NotFound)
+        );
+        assert_eq!(
+            <price::ServerBehavior as Behavior>::handle_cluster_command(
+                &mut beh,
+                &mut ctx,
+                &header,
+                price::CMD_GET_BLOCK_THRESHOLDS,
+                &[0x55, 0x00, 0x00, 0x00]
+            ),
+            Err(rounddance_zcl::ZclStatus::NotFound)
+        );
+    }
+    // Load one period + one threshold set, then serve both.
+    beh.blocks_mut().insert(block_period_fixture());
+    let wire: [u8; 32] = [
+        0x44, 0x33, 0x22, 0x11, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x55, 0x00, 0x00,
+        0x00, 0x00, 0x01, 0x00, 0x22, 0xe8, 0x03, 0x00, 0x00, 0x00, 0x00, 0x10, 0x27, 0x00, 0x00,
+        0x00, 0x00,
+    ];
+    let msg = price::decode_publish_block_thresholds(&wire).unwrap();
+    beh.thresholds_insert(&msg);
+    {
+        let mut ctx = Ctx {
+            store: &mut store,
+            reporting: &mut eng,
+            events: &mut events,
+            now_s: 0x1000_0000,
+            peer_onoff: None,
+            sender_ieee: None,
+        };
+        <price::ServerBehavior as Behavior>::handle_cluster_command(
+            &mut beh,
+            &mut ctx,
+            &header,
+            price::CMD_GET_BLOCK_PERIODS,
+            &[0x00, 0x00, 0x00, 0x00, 0x00],
+        )
+        .unwrap();
+        <price::ServerBehavior as Behavior>::handle_cluster_command(
+            &mut beh,
+            &mut ctx,
+            &header,
+            price::CMD_GET_BLOCK_THRESHOLDS,
+            &[0x55, 0x00, 0x00, 0x00],
+        )
+        .unwrap();
+    }
+    // Two outbound answers: the 19-octet period + the threshold set.
+    let mut kinds = Vec::new();
+    while let Some(ev) = events.pop() {
+        if let rounddance_zcl::AppEvent::OutboundCommand { cmd, len, .. } = ev {
+            kinds.push((cmd, len));
+        }
+    }
+    assert_eq!(
+        kinds,
+        vec![
+            (price::CMD_PUBLISH_BLOCK_PERIOD, 19),
+            (price::CMD_PUBLISH_BLOCK_THRESHOLDS, 32)
+        ]
+    );
+}
+
+// 07-5123-08-1023-02: threshold store keeps newest per tariff.
+#[test]
+fn vector_threshold_store_newest_wins_07_5123_08_1023_02() {
+    let wire: [u8; 32] = [
+        0x44, 0x33, 0x22, 0x11, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x55, 0x00, 0x00,
+        0x00, 0x00, 0x01, 0x00, 0x22, 0xe8, 0x03, 0x00, 0x00, 0x00, 0x00, 0x10, 0x27, 0x00, 0x00,
+        0x00, 0x00,
+    ];
+    let msg = price::decode_publish_block_thresholds(&wire).unwrap();
+    let mut store = price::ThresholdStore::new();
+    store.insert(&msg);
+    assert_eq!(store.for_tariff(0x55).unwrap().issuer_event_id, 7);
+    assert!(store.for_tariff(0x56).is_none());
+    // Older-or-equal issuer for the same tariff loses.
+    let mut older = msg;
+    older.issuer_event_id = 3;
+    store.insert(&older);
+    assert_eq!(store.for_tariff(0x55).unwrap().issuer_event_id, 7);
+    let mut newer = msg;
+    newer.issuer_event_id = 9;
+    store.insert(&newer);
+    assert_eq!(store.for_tariff(0x55).unwrap().issuer_event_id, 9);
+}

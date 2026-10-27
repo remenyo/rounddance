@@ -147,6 +147,70 @@ fn fuzz_price_table_stays_bounded() {
     }
 }
 
+// Block-period + threshold codecs never panic; round-trips are
+// exact and tables stay bounded.
+#[test]
+fn fuzz_block_codecs_stay_bounded() {
+    let mut fz = Fuzz(0x5EED_1025);
+    let mut buf = [0u8; 400];
+    let mut table = price::BlockTable::new();
+    let mut thresholds = price::ThresholdStore::new();
+    let mut i = 0;
+    while i < CASES {
+        fz.fill(&mut buf);
+        let len = fz.below(401) as usize;
+        let slice = &buf[..len];
+        let _ = price::decode_publish_block_period(slice);
+        let _ = price::decode_get_block_periods(slice);
+        let _ = price::decode_publish_block_thresholds(slice);
+        let ev = price::BlockPeriod {
+            provider_id: fz.next() as u32,
+            issuer_event_id: fz.next() as u32,
+            start_time: fz.next() as u32,
+            duration: (fz.next() & 0x00ff_ffff) as u32,
+            control: fz.next() as u8,
+            duration_type: (fz.next() & 0x23) as u8,
+            tariff_type: fz.next() as u8,
+            tariff_resolution: fz.next() as u8,
+        };
+        let mut wire = [0u8; 19];
+        assert_eq!(price::encode_publish_block_period(&ev, &mut wire), Ok(19));
+        assert_eq!(price::decode_publish_block_period(&wire), Ok(ev));
+        table.insert(ev);
+        assert!(table.len() <= price::MAX_BLOCK_PERIODS);
+        let mut hits = [ev; price::MAX_BLOCK_PERIODS];
+        let n = table.scheduled_since(
+            fz.next() as u32,
+            fz.next() as u8,
+            if fz.next() & 1 == 0 {
+                None
+            } else {
+                Some(fz.next() as u8)
+            },
+            &mut hits,
+        );
+        assert!(n <= price::MAX_BLOCK_PERIODS);
+        let _ = table.mirror_for(fz.next() as u32);
+        if let Ok(msg) = price::decode_publish_block_thresholds(slice) {
+            // Decoded-then-encoded-then-decoded is a fixed point.
+            let mut wire2 = [0u8; 400];
+            if let Ok(n2) = price::encode_publish_block_thresholds(&msg, &mut wire2) {
+                let rt = price::decode_publish_block_thresholds(&wire2[..n2]).unwrap();
+                assert_eq!(rt.set_count, msg.set_count);
+                assert_eq!(
+                    rt.sets[..rt.set_count as usize],
+                    msg.sets[..msg.set_count as usize]
+                );
+            }
+            thresholds.insert(&msg);
+            let _ = thresholds.for_tariff(msg.issuer_tariff_id);
+        }
+        let _ = price::threshold_count_for_tariff(fz.next() & 1 == 0, fz.next() as u8);
+        let _ = price::scaled_threshold(fz.next(), fz.next(), fz.next());
+        i += 1;
+    }
+}
+
 // Update-mask derivation and table install never panic; masks stay
 // deterministic per (ieee, nonce).
 #[test]

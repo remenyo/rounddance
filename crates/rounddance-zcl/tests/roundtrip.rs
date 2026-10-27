@@ -13,7 +13,7 @@
 use rounddance_zcl::behavior::{AppEvent, EventQueue};
 use rounddance_zcl::cluster::ClusterDef;
 use rounddance_zcl::*;
-use rounddance_zcl::{general, ias_zone, level, onoff};
+use rounddance_zcl::{ace, general, ias_zone, level, onoff, wd};
 
 /// Case budget: covers the field cross-product several times over.
 const CASES: u32 = 8_000;
@@ -412,10 +412,14 @@ fn fuzz_behaviors_total_no_panic() {
     let mut obeh = onoff::ServerBehavior;
     let mut lbeh = level::ServerBehavior::new();
     let mut ibeh = ias_zone::ServerBehavior::new();
-    let mut body = [0u8; 12];
+    let mut abeh = ace::ServerBehavior::new();
+    let mut wbeh = wd::ServerBehavior::new();
+    let mut astore = ace::server_store().unwrap();
+    let mut wstore = wd::server_store().unwrap();
+    let mut body = [0u8; 40];
     let mut i = 0;
     while i < CASES {
-        let len = f.below(13) as usize;
+        let len = f.below(41) as usize;
         f.fill(&mut body[..len.max(1)]);
         let cmd = f.below(256) as u8;
         let hdr = Header {
@@ -462,10 +466,32 @@ fn fuzz_behaviors_total_no_panic() {
             sender_ieee: None,
         };
         let _ = ibeh.handle_cluster_command(&mut ctx, &hdr, cmd, &body[..len]);
+        let mut ctx = Ctx {
+            store: &mut astore,
+            reporting: &mut eng,
+            events: &mut events,
+            now_s: 0,
+            peer_onoff: None,
+            sender_ieee: None,
+        };
+        let _ = abeh.handle_cluster_command(&mut ctx, &hdr, cmd, &body[..len]);
+        let mut ctx = Ctx {
+            store: &mut wstore,
+            reporting: &mut eng,
+            events: &mut events,
+            now_s: 0,
+            peer_onoff: None,
+            sender_ieee: None,
+        };
+        let _ = wbeh.handle_cluster_command(&mut ctx, &hdr, cmd, &body[..len]);
+        ace::tick_1s(&mut abeh, &mut events, 0x01, (f.below(5)) as u8);
+        wd::tick_1s(&mut wbeh, &mut events, (f.below(300)) as u16);
         // Stores stay well-formed: globals readable after any battering.
         assert!(ostore.get(ATTR_CLUSTER_REVISION).is_some());
         assert!(lstore.get(ATTR_CLUSTER_REVISION).is_some());
         assert!(istore.get(ATTR_CLUSTER_REVISION).is_some());
+        assert!(astore.get(ATTR_CLUSTER_REVISION).is_some());
+        assert!(wstore.get(ATTR_CLUSTER_REVISION).is_some());
         // Event queue drains (bounds the backlog across the run).
         while events.pop().is_some() {}
         i += 1;
@@ -477,9 +503,73 @@ fn fuzz_behaviors_total_no_panic() {
     assert_eq!(ldef.cluster_id(), 0x0008);
     let idef = ias_zone::ServerDef;
     assert_eq!(idef.cluster_id(), 0x0500);
+    let adef = ace::ServerDef;
+    assert_eq!(adef.cluster_id(), 0x0501);
+    let wdef = wd::ServerDef;
+    assert_eq!(wdef.cluster_id(), 0x0502);
     let _ = AppEvent::StateChanged {
         cluster: 0,
         from: 0,
         to: 0,
     };
+}
+
+// IAS ACE + WD codecs: arbitrary slices never panic, and valid
+// structures round-trip exactly.
+#[test]
+fn fuzz_ias_codec_roundtrip() {
+    let mut f = Fuzz(0x01a5_0502);
+    let mut buf = [0u8; 64];
+    let mut i = 0;
+    while i < CASES {
+        f.fill(&mut buf);
+        let len = f.below(65) as usize;
+        let slice = &buf[..len];
+        let _ = ace::decode_arm(slice);
+        let _ = ace::decode_bypass(slice);
+        let _ = ace::decode_zone_status_query(slice);
+        let _ = wd::decode_start_warning(slice);
+        let _ = wd::decode_squawk(slice);
+        // Valid arm structures round-trip.
+        let code_len = f.below(17) as usize;
+        let mut code = [0u8; 16];
+        let mut k = 0;
+        while k < code_len {
+            code[k] = b'0' + (f.below(10) as u8);
+            k += 1;
+        }
+        let mut wire = [0u8; 40];
+        if let Ok(n) = ace::encode_arm(
+            (f.below(4)) as u8,
+            &code[..code_len],
+            (f.below(18)) as u8,
+            &mut wire,
+        ) {
+            let back = ace::decode_arm(&wire[..n]).unwrap();
+            let mut wire2 = [0u8; 40];
+            let m = ace::encode_arm(back.mode, back.code, back.zone_id, &mut wire2).unwrap();
+            assert_eq!(&wire[..n], &wire2[..m]);
+        }
+        // Valid warning structures round-trip.
+        let w = wd::StartWarning {
+            mode: (f.below(7)) as u8,
+            strobe: (f.below(2)) as u8,
+            siren: (f.below(4)) as u8,
+            duration_s: f.next() as u16,
+            duty: f.next() as u8,
+            level: (f.below(4)) as u8,
+        };
+        let mut wwire = [0u8; 5];
+        assert_eq!(wd::encode_start_warning(&w, &mut wwire), Ok(5));
+        assert_eq!(wd::decode_start_warning(&wwire), Ok(w));
+        let s = wd::Squawk {
+            mode: (f.below(2)) as u8,
+            strobe: f.below(2) == 1,
+            level: (f.below(4)) as u8,
+        };
+        let mut swire = [0u8; 1];
+        assert_eq!(wd::encode_squawk(&s, &mut swire), Ok(1));
+        assert_eq!(wd::decode_squawk(&swire), Ok(s));
+        i += 1;
+    }
 }
