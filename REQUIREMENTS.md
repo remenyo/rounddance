@@ -478,3 +478,40 @@ Wording in code/tests is paraphrase only, never spec text (D1).
 | RD-HAL-ESP-10 | implemented + verified | `adapter.rs`: single-flight submit (in-air skipped by `oldest_queued`), submit faults stay queued + counted (`submit_faults`) | `adapter_mock.rs::submit_busy_stays_queued_then_flushes`, `submit_fault_stays_queued_and_counted` |
 | RD-HAL-ESP-11 | implemented + verified | NWK-frame TX binary shape: repo codec output pinned to the frozen vector before framing (spike `main.rs` L104-118 pattern) | `examples/esp_adapter_shape.rs` output (`15 41 88 00 34 12 ff ff 01 00` + frozen NWK tail), `data_request_builds_len_plus_two_frame` |
 | RD-HAL-ESP-12 | implemented + verified | `adapter.rs`: honest capabilities (HW auto-ACK + CSMA true, HAL retries false, ED true, timestamps false, promiscuous true) | `adapter_mock.rs::capabilities_report_hardware_truthfully` |
+
+## Wave-17 traceability — Zigbee Direct core (`rounddance-direct`)
+
+All `20-27688-041-*` IDs below are corpus-mined (page+clause
+anchored, `reconcile` for exact wording — the extraction carries no
+printed body line numbers). The admin-key default derivation
+(`zb-direct` MMO construction) is repo-defined, MINTED-pending-confirm.
+Wording in code/tests is paraphrase only, never spec text (D1).
+
+| Requirement ID | State | Implementing code | Verifying test |
+|----------------|-------|-------------------|----------------|
+| 20-27688-041-53-01 | implemented + verified | role model: Direct runs over the BLE capability interface, no BT stack (`lib.rs` crate docs; ZDD/ZVD roles in `session.rs`/`advert.rs`) | `vectors.rs::vector_security_service_shape_20_27688_041_65_01` (service shape), sim `direct_commission.rs::direct_full_commissioning` |
+| 20-27688-041-62-01 | implemented + verified | `advert.rs`: `AdvPolicy` (minimum 60 s timeout, quiet-until-resume) | `vectors.rs::vector_adv_provisioning_timeout_20_27688_041_62_01` |
+| 20-27688-041-62-02 | implemented + verified | `advert.rs`: `mark_provisioned`/`mark_unprovisioned` (leave returns to open-to-provision) | sim `direct_commission.rs` form/leave legs via `AdvPolicy` transitions |
+| 20-27688-041-63-01 | implemented + verified | `gatt.rs`: `authorize` (provisioning vs. provisioned gates, status reads excepted); `session.rs`: single-session no-second-provisioning rule | `vectors.rs::vector_access_control_20_27688_041_63_01`, `vector_anonymous_guard_and_admin_lifecycle` |
+| 20-27688-041-63-02 | implemented + verified | `session.rs`: `PskKind` (default/install-code/anonymous/passcode), initiator-chosen key in `begin` | `vectors.rs::vector_establishment_timeout_20_27688_041_65_03` (PSK begin legs), sim `direct_commission.rs::direct_full_commissioning` |
+| 20-27688-041-63-03 | implemented + verified | `session.rs`: anonymous begin needs positive countdown (`JoinWindowClosed`); `commission.rs`: `permit_remaining` countdown | `vectors.rs::vector_anonymous_guard_and_admin_lifecycle` |
+| 20-27688-041-63-04 | implemented + verified | `session.rs`: `set_admin_key` once-only (`AdminKeyLocked`), `factory_reset` unlocks | `vectors.rs::vector_anonymous_guard_and_admin_lifecycle` |
+| 20-27688-041-63-05 | implemented + verified | `session.rs`: `derive_admin_key` + `commission.rs::complete_join` TC-key default (`zb-direct` MMO construction, MINTED-pending-confirm) | sim `direct_commission.rs::direct_full_commissioning` (form-without-admin → join leg) |
+| 20-27688-041-646-01 | implemented + verified | `session.rs`: `BleCounters` (increment-before-encrypt, stale-drop, retire-at-max) | `vectors.rs::vector_counters_20_27688_041_646_01`, `roundtrip.rs::fuzz_counters_reject_stale` |
+| 20-27688-041-65-01 | implemented + verified | `gatt.rs`: `SECURITY_SERVICE_UUID` + 3 `SECURITY_CHARS` (§6.5, Table 5) | `vectors.rs::vector_security_service_shape_20_27688_041_65_01` |
+| 20-27688-041-65-02 | implemented + verified | `gatt.rs`: per-method Authenticate characteristics (distinctive UUIDs, strict-sequence discipline in `session.rs`) | `vectors.rs::vector_security_service_shape_20_27688_041_65_01` |
+| 20-27688-041-65-03 | implemented + verified | `session.rs`: 15 s establishment silence → drop; validation failure → immediate drop | `vectors.rs::vector_establishment_timeout_20_27688_041_65_03` |
+| 20-27688-041-75-01 | implemented + verified | `advert.rs`: `suspend`/`resume_links` (extension dropped/freed with link capacity) | `vectors.rs::vector_adv_provisioning_timeout_20_27688_041_62_01` (policy legs) |
+| 20-27688-041-76-01 | implemented + verified | `advert.rs`: `AdvExtension` 9-octet record (version nibble, flags, PAN/addr LE, all-ones sentinels), refresh-on-change | `vectors.rs::vector_adv_factory_new_record_20_27688_041_76_01` + `vector_adv_joined_record_20_27688_041_76_01`, `roundtrip.rs::fuzz_adv_record_round_trip` (fuzzer-caught flag-shift fix) |
+| 20-27688-041-772-01 | implemented + verified | `gatt.rs`: commissioning service/characteristics (Table 26); `attr.rs`: TLV/status codec (Tables 27–33, LE); `commission.rs`: single-flight + busy rejection + 3 s timeout + failure-completes-with-notify | `vectors.rs` service-shape/access/TLV/timeout vectors, `roundtrip.rs` TLV/status fuzz + machine-rejection fuzz, sim `direct_commission.rs` full + timeout + replay tests |
+| 20-27688-041-772-02 | implemented + verified | `commission.rs`: form-starts-closed + status notify, permit feeds window, leave erases params+keys, key rotation via `keyupdate`, link-key flag codec in `attr.rs` (Tables 34–35) | `vectors.rs::vector_form_starts_closed_20_27688_041_772_02` + `vector_join_bad_key_rejected` + `vector_leave_erases_everything_20_27688_041_772_02`, `vector_link_key_tlv_codec_20_27688_041_772_02`, sim `direct_commission.rs` full + bad-key tests |
+
+## Wave-17 traceability — lab-arbitrator lease-expiry fix
+
+Repo-minted IDs (`ARB-LEASE-<seq>`), MINTED-pending-confirm: no
+corpus requirement covers host tooling.
+
+| Requirement ID | State | Implementing code | Verifying test |
+|----------------|-------|-------------------|----------------|
+| ARB-LEASE-01 | implemented + verified | `leases.rs`: `EXPIRY_WARN_SECS` (300 s) + `expiring_soon` (swept, TTL-carrying, soonest-first); `main.rs::cmd_status` prints `WARNING … expires in Ns — renew with: arbitrator renew …` | `leases.rs::expiry_is_visible_and_renewable` (invisible fresh → visible with TTL → renewable → invisible) |
+| ARB-LEASE-02 | implemented + verified | `main.rs::cmd_status` keeps per-lease `remaining=Ns` TTLs; explicit `renew` command (pre-existing) is the renewal path the warning points at | `leases.rs::expiry_is_visible_and_renewable` (renew leg), `renew_rejects_non_owner_and_extends` |

@@ -135,6 +135,19 @@ fn cmd_status() -> i32 {
             );
         }
     }
+    // Warn-before-expiry: leases inside the horizon are surfaced
+    // with an explicit renew command instead of expiring silently.
+    let warn = Duration::from_secs(leases::EXPIRY_WARN_SECS);
+    for (l, ttl) in m.expiring_soon(warn) {
+        println!(
+            "  WARNING {} (owner={}) expires in {}s — renew with: arbitrator renew --port {} --owner {}",
+            l.port,
+            l.owner,
+            ttl.as_secs(),
+            l.port,
+            l.owner
+        );
+    }
     let mut depths: Vec<_> = m.queue_depths().into_iter().collect();
     depths.sort();
     if depths.iter().any(|(_, n)| *n > 0) {

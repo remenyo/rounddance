@@ -79,6 +79,11 @@ impl fmt::Display for LeaseError {
 
 impl std::error::Error for LeaseError {}
 
+/// Warn-before-expiry horizon for `status`: leases with less than
+/// this TTL are surfaced as expiring instead of vanishing silently
+/// at expiry (the silent-expiry fix).
+pub const EXPIRY_WARN_SECS: u64 = 300;
+
 /// Time source. Production uses the wall clock; tests use [`ManualClock`].
 pub trait Clock {
     fn now_epoch(&self) -> u64;
@@ -333,6 +338,25 @@ impl<C: Clock> LeaseManager<C> {
         Ok(removed)
     }
 
+    /// Live leases expiring within `warn`, soonest first, each
+    /// with its remaining TTL. Visibility half of the
+    /// silent-expiry fix: already-expired leases are swept (they
+    /// are gone, not expiring), and everything returned here is
+    /// still renewable via [`LeaseManager::renew`].
+    pub fn expiring_soon(&mut self, warn: Duration) -> Vec<(Lease, Duration)> {
+        self.sweep();
+        let now = self.now();
+        let mut out: Vec<(Lease, Duration)> = self
+            .store
+            .leases
+            .values()
+            .filter(|l| !l.expired(now) && l.remaining(now) <= warn)
+            .map(|l| (l.clone(), l.remaining(now)))
+            .collect();
+        out.sort_by_key(|(_, ttl)| *ttl);
+        out
+    }
+
     /// Live lease on `port`, if any.
     pub fn lease(&mut self, port: &str) -> Option<Lease> {
         self.sweep();
@@ -513,6 +537,32 @@ mod tests {
         assert!(m.clear_quarantine("/dev/ttyACM7").unwrap());
         m.acquire("/dev/ttyACM7", "w1", "x", Duration::from_secs(60))
             .unwrap();
+        let _ = fs::remove_file(&p);
+    }
+
+    #[test]
+    fn expiry_is_visible_and_renewable() {
+        let p = tmp();
+        let mut m = mgr_at(&p, 1000);
+        m.acquire("/dev/ttyACM7", "w1", "flash", Duration::from_secs(1800))
+            .unwrap();
+        // Fresh 30-minute lease: nothing within the warn horizon.
+        assert!(m.expiring_soon(Duration::from_secs(300)).is_empty());
+        // Near expiry the lease is visible with its TTL instead of
+        // vanishing silently.
+        m.clock.now = 1000 + 1800 - 120;
+        let soon = m.expiring_soon(Duration::from_secs(300));
+        assert_eq!(soon.len(), 1);
+        assert_eq!(soon[0].0.owner, "w1");
+        assert_eq!(soon[0].1, Duration::from_secs(120));
+        // Renewable back to a healthy TTL, then invisible again.
+        m.renew("/dev/ttyACM7", "w1", Duration::from_secs(1800))
+            .unwrap();
+        assert!(m.expiring_soon(Duration::from_secs(300)).is_empty());
+        assert_eq!(
+            m.lease("/dev/ttyACM7").unwrap().remaining(m.clock.now),
+            Duration::from_secs(1800)
+        );
         let _ = fs::remove_file(&p);
     }
 }

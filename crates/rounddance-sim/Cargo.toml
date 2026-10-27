@@ -11,6 +11,7 @@ rounddance-mac-sap = { path = "../rounddance-mac-sap" }
 [dev-dependencies]
 rounddance-aps = { path = "../rounddance-aps" }
 rounddance-commission = { path = "../rounddance-commission" }
+rounddance-direct = { path = "../rounddance-direct" }
 rounddance-gp = { path = "../rounddance-gp" }
 rounddance-nwk = { path = "../rounddance-nwk" }
 rounddance-roles = { path = "../rounddance-roles" }
