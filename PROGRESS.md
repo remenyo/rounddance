@@ -6,7 +6,8 @@
 | Frozen scope (SCOPE.md from D1–D5) | Done |
 | Standards corpus page/section coverage | In progress (parallel stream) |
 | MAC SAP trait boundary | Done (wave-2: TX/RX types, capability discovery, error taxonomy, cancel/backpressure; spec-area docs, seed coverage pending) |
-| NWK / APS / ZDO bring-up | Not started |
+| NWK / APS / ZDO bring-up | In progress (wave-3: NWK frame codec done — header encode/decode, NLDE construction guards, spec vectors, sim transport, bounded fuzz; routing/commands/APS/ZDO not started) |
+| NWK frame codec (wave-3) | Done (rounddance-nwk: Fig. 3-4/3-5 header codec + §3.2.1.1.3 NLDE guards; tests/vectors.rs 16 spec vectors, tests/roundtrip.rs 8k-case bounded fuzz, sim nwk_transport loopback + 2-node + replay) |
 | Security incl. SE + CBKE | Not started |
 | ZCL engine + clusters | Not started |
 | Green Power | Not started |

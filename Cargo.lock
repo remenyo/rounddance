@@ -39,6 +39,7 @@ name = "rounddance-sim"
 version = "0.1.0"
 dependencies = [
  "rounddance-mac-sap",
+ "rounddance-nwk",
 ]
 
 [[package]]
