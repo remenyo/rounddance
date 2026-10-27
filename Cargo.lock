@@ -37,6 +37,9 @@ version = "0.1.0"
 [[package]]
 name = "rounddance-sim"
 version = "0.1.0"
+dependencies = [
+ "rounddance-mac-sap",
+]
 
 [[package]]
 name = "rounddance-zcl"
