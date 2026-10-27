@@ -1,0 +1,22 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/rounddance-mac-sap",
+    "crates/rounddance-nwk",
+    "crates/rounddance-aps",
+    "crates/rounddance-zdo",
+    "crates/rounddance-security",
+    "crates/rounddance-zcl",
+    "crates/rounddance-gp",
+    "crates/rounddance-commission",
+    "crates/rounddance-sim",
+    "crates/rounddance-hal-host",
+    "crates/rounddance-hal-esp",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/remenyo/rounddance"
+rust-version = "1.85"
