@@ -161,3 +161,30 @@ text (D1).
 | 05-3474-23-24339-01 | implemented + verified | `MgmtNwkUpdateReq` (Table 2-64, anchor p0149-L3626) | `tests/vectors.rs::vector_mgmt_nwk_update_*`, `tests/roundtrip.rs` fuzz |
 | 05-3474-23-24339-02 | implemented + verified | `MgmtNwkUpdateNotify` scan report, energy count = channel popcount (§2.4.3.3.9.3, anchors p0151-L3696-L3709) | `tests/vectors.rs::vector_mgmt_nwk_update_*` |
 | 05-3474-23-232-01 | implemented + verified | `ZdoError`: every decoder fallible, oversize counts rejected, never truncating | `tests/roundtrip.rs::fuzz_malformed_never_panics` |
+
+## Wave-8 traceability — classical security + ECQV/CBKE foundations (docs 05-3474-23 R23.2 ch4, 07-5356 SE 1.4a §§5/C.4.2)
+
+Classical IDs are repo-minted (`05-3474-23-<clause>-<seq>`, dots
+stripped) with line anchors from the private corpus
+(`text/zigbee-spec-r23-05-3474-23/p*.txt`, trailing spec line numbers),
+MINTED-pending-confirm. CBKE IDs are repo-minted (`07-5356-<clause>-<seq>`,
+lettered appendix clauses kept, e.g. `C4224` = C.4.2.2.4) with anchors
+from `text/smart-energy-07-5356-22/p*.txt`, MINTED-pending-confirm.
+Wording in code/tests is paraphrase only, never spec text (D1).
+
+| Requirement ID | State | Implementing code | Verifying test |
+|----------------|-------|-------------------|----------------|
+| 05-3474-23-4311-01 | implemented + verified | `FrameCounter::take` monotonic handoff, `CounterExhausted` forces rekey (§4.3.1.1, anchor p0421-L10119-L10123) | unit `outgoing_counter_monotonic_and_exhausts`, `tests/vectors.rs::vector_counter_replay_pair`, `tests/roundtrip.rs::fuzz_counter_monotonicity` |
+| 05-3474-23-4312-01 | implemented + verified | `ReplayTable::check` strict-advance accept, evict-stalest bound (§4.3.1.2, anchor p0422-L10156-L10164) | `tests/vectors.rs::vector_counter_replay_pair`, `vector_replay_eviction`, `tests/roundtrip.rs::fuzz_counter_monotonicity`, sim replay-attack rejection |
+| 05-3474-23-434-01 | implemented + verified | `NvmStore` + `RamStore`, `COUNTER_STRIDE` resume rule, watermark checkpoints (§4.3.4, anchor p0425-L10232-L10236: counters survive factory reset) | `tests/vectors.rs::vector_nvm_resume_stride`, sim `key_rotation_and_counter_persist_across_reboot` |
+| 05-3474-23-446-01 | implemented + verified | `KeySet` two-phase rotation, `select` covers in-flight frames (§4.4.6, anchor p0446-L10756-L10759) | `tests/vectors.rs::vector_key_lifecycle`, sim rotation test |
+| 05-3474-23-451-01 | implemented + verified | `AuxHeader` control/counter/ext-source/key-id codec (§4.5.1, anchors p0479-L11436-L11440 + p0480-L11461-L11462) | `tests/vectors.rs::vector_aux_*`, `vector_aux_truncation`, `tests/roundtrip.rs::fuzz_aux_header_roundtrip`, sim secured-frame E2E |
+| 05-3474-23-451-02 | implemented + verified | `KeyIdMode` 2-bit selector, `KeyIdentifier` shapes (§4.5.1.1.2–1.1.3, anchors p0480-L11453-L11457) | `tests/vectors.rs::vector_aux_index`, `vector_aux_source4`, `vector_aux_source8_ext_nonce` |
+| 05-3474-23-453-01 | implemented + verified | `NetworkKey` 16-octet descriptor + sequence (§4.5.3, anchor p0481-L11490) | `tests/vectors.rs::vector_key_lifecycle` |
+| 05-3474-23-462-01 | implemented + verified | `LinkKeyEntry` + `LinkKeyTable` per-device keys with directional counters (§4.6.2, anchor p0482-L11530-L11534) | `tests/vectors.rs::vector_link_key_table_*` |
+| 07-5356-C4224-01 | implemented + verified | `ImplicitCert` opaque 48-octet type (ICU layout anchor p0169-L4365-L4368; CBKE concept anchors p0149-L3853-L3857 + p0167-L4302-L4306) | `tests/vectors.rs::vector_host_handshake_known_answers` (cert bytes in transcript), unit `cert_is_opaque_48_octets` |
+| 07-5356-C4224-02 | implemented + verified | `PeerIdentity` cert + 8-octet subject + reconstruction point (field anchors p0169-L4370-L4374) | `tests/vectors.rs::vector_host_handshake_known_answers`, `vector_mock_determinism` |
+| 07-5356-C42-03 | implemented + verified | `reconstruct_static` SEC4-style pure logic over `EccBackend` (anchor p0169-L4370-L4372) | `tests/vectors.rs::vector_host_handshake_known_answers` (`REC_*` == `base_mul(W_*)`) |
+| 07-5356-C42-04 | implemented + verified | `mqv_agree` two-pass combination, implicit-signature scalars (anchors p0168-L4321-L4322 shared key, L4325-L4326 no unilateral control) | `tests/vectors.rs::vector_host_handshake_known_answers` (`KEY_I` == `KEY_R`) |
+| 07-5356-C42-05 | implemented + verified | `session_keys` domain separation + `confirm_tag` MACU/MACV (anchor p0168-L4323-L4325; failure anchor p0167-L4278) | `tests/vectors.rs::vector_host_handshake_known_answers` (`MACU`/`MACV` pins + tamper wipe), unit `session_keys_are_domain_separated` |
+| 07-5356-C42-06 | implemented + verified | `CbkeSession` explicit state machine, canonical transcript, fallible errors (anchor p0167-L4302-L4306) | `tests/vectors.rs::vector_host_handshake_known_answers` (two-sided Done), unit `full_mock_handshake_single_side`, `responder_role_uses_mac_v_first`, sim secured-frame E2E (keys installed by this flow) |

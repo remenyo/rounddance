@@ -4,3 +4,18 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+
+[features]
+default = []
+host = ["dep:p256", "dep:sha2", "dep:hmac"]
+
+[dependencies]
+p256 = { version = "0.14", optional = true }
+sha2 = { version = "0.11", optional = true }
+hmac = { version = "0.13", optional = true }
+
+[dev-dependencies]
+rounddance-aps = { path = "../rounddance-aps" }
+rounddance-mac-sap = { path = "../rounddance-mac-sap" }
+rounddance-nwk = { path = "../rounddance-nwk" }
+rounddance-sim = { path = "../rounddance-sim" }
