@@ -538,3 +538,17 @@ never spec text (D1).
 | RD-RCP-09 | implemented + verified | `lib.rs::MAX_TX_POWER_DBM` (+10 dBm standing cap) refused by driver *and* emulated firmware before anything applies | `driver.rs::form_handshake_and_provisioning` (cap leg), `peer.rs::guards_reject_out_of_policy`, `vectors.rs::scripted_exchange_transcript` (firmware mirror leg) |
 | RD-RCP-10 | implemented + verified | Full OTBR stack over scripted RCP UART: form → install-code join + DeviceAnnce → APS-secured ZCL On applied to a live server + replay rejection; disturbed runs replay exactly | sim `rcp_otbr_path.rs` all 6 tests (form, join, secured On, loss, timeout, desync+replay) |
 | RD-RCP-11 | implemented + verified | `docs/otbr/topology.md` (S3-GPIO18/17/7/8 ↔ H2-GPIO23/24/EN/GPIO9, 460800 8N1, roles, bring-up) + `docs/otbr/protocol.md` (framing/classes/discipline/v0 non-goals); pin constants in `lib.rs` | doc review (constants `S3_UART_TX_GPIO`…`RCP_UART_BAUD` compile-checked) |
+
+## Wave-19 traceability — browser path (`rounddance-browser`)
+
+All IDs below are repo-minted (`RD-BROWSER-<seq>`), MINTED-pending-confirm:
+no corpus requirement covers the browser/WASM harness (tooling, same
+standing as `ARB-LEASE-*`). Wording in code/tests is paraphrase only,
+never spec text (D1).
+
+| Requirement ID | State | Implementing code | Verifying test |
+|----------------|-------|-------------------|----------------|
+| RD-BROWSER-01 | implemented + verified | `rounddance-browser`: same `run_first_transaction(ScenarioConfig::first_transaction())` scenario as the host leg, built for `wasm32-unknown-unknown` | `tools/browser-check.sh` builds the bundle; `browser_decisions.rs::browser_getters_match_native_pin` |
+| RD-BROWSER-02 | implemented + verified | 13 `pub mod exports` getters (digest hi/lo + 6 bools + cmd/report/resume counters + tsn + trace_lines), zero-import shape (no bindgen, no new deps) | `harness/browser/check_imports.py` (zero imports gate in `browser-check.sh`); `index.html` reads all 13 via empty-import instantiate |
+| RD-BROWSER-03 | implemented + verified (wasmtime leg) | `tools/browser-check.sh`: native `host_transaction` output vs `wasmtime --invoke` getter dump, digest + every field + trace_lines compared | `browser-check.sh` exit 0 with `DECISION-MATCH: digest 0x3ea31047e1933c90`; `harness/browser/expected.txt` pins the excerpt |
+| RD-BROWSER-04 | implemented, browser execution open | `harness/browser/index.html`: real-browser driver (fetch + `instantiateStreaming` with `{}` imports, unsigned compare, PASS/MISMATCH verdict) | NOT run on-box — no browser engine (chromium/firefox/webkit) or JS engine (node/deno) installed; engine present = wasmtime 36.0.2 only. First box with a browser runs it and records the verdict here. |

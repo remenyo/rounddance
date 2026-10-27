@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>rounddance browser path — first-transaction decision check</title>
+<style>
+  body { font-family: monospace; max-width: 70em; margin: 2em auto; }
+  #verdict { font-size: 1.5em; font-weight: bold; }
+  .pass { color: #0a0; } .fail { color: #c00; }
+  table { border-collapse: collapse; }
+  td, th { border: 1px solid #999; padding: 2px 8px; text-align: right; }
+</style>
+</head>
+<body>
+<h1>rounddance browser path — decision-determinism check</h1>
+<p>
+  Instantiates <code>rounddance_browser.wasm</code> (the
+  <code>wasm32-unknown-unknown</code> bundle of the host first
+  transaction: form → install-code join → secured ZCL On → report)
+  with an <strong>empty import object</strong> and asserts every
+  exported decision getter equals the native-pinned constant.
+  Bundle must sit next to this file as
+  <code>rounddance_browser.wasm</code> (copied by
+  <code>tools/browser-check.sh</code>).
+</p>
+<div id="verdict">running…</div>
+<table id="rows"><tr><th>getter</th><th>expected</th><th>actual</th></tr></table>
+<script>
+"use strict";
+// Native-pinned constants (crates/rounddance-browser/tests/browser_decisions.rs).
+const EXPECTED = {
+  digest_hi: 1050873927,   // 0x3EA31047
+  digest_lo: 3784522896,   // 0xE1933C90 (unsigned; digest 0x3ea31047e1933c90)
+  formed: 1,
+  tc_verified: 1,
+  joiner_joined: 1,
+  server_onoff: 1,
+  reported_onoff: 1,
+  aps_security_on: 1,
+  cmd_counter: 1024,
+  report_counter: 1025,
+  resume_next: 1024,
+  tsn: 0x64,
+  trace_lines: 35,
+};
+const GETTERS = {
+  digest_hi: "rd_digest_hi",
+  digest_lo: "rd_digest_lo",
+  formed: "rd_formed",
+  tc_verified: "rd_tc_verified",
+  joiner_joined: "rd_joiner_joined",
+  server_onoff: "rd_server_onoff",
+  reported_onoff: "rd_reported_onoff",
+  aps_security_on: "rd_aps_security_on",
+  cmd_counter: "rd_cmd_counter",
+  report_counter: "rd_report_counter",
+  resume_next: "rd_resume_next",
+  tsn: "rd_tsn",
+  trace_lines: "rd_trace_lines",
+};
+
+(async () => {
+  const verdict = document.getElementById("verdict");
+  const rows = document.getElementById("rows");
+  try {
+    // Empty import object: the bundle must carry zero imports.
+    const { instance } = await WebAssembly.instantiateStreaming(
+      fetch("rounddance_browser.wasm"), {});
+    let ok = true;
+    for (const [key, sym] of Object.entries(GETTERS)) {
+      const actual = instance.exports[sym]();
+      // i32 exports arrive as signed numbers; compare unsigned.
+      const got = actual >>> 0;
+      const want = EXPECTED[key] >>> 0;
+      const pass = got === want;
+      ok = ok && pass;
+      rows.insertAdjacentHTML("beforeend",
+        `<tr><td>${sym}</td><td>${want}</td><td>${got}</td>` +
+        `<td class="${pass ? "pass" : "fail"}">${pass ? "ok" : "MISMATCH"}</td></tr>`);
+    }
+    verdict.textContent = ok
+      ? "DECISION-MATCH: wasm == native"
+      : "MISMATCH: wasm != native";
+    verdict.className = ok ? "pass" : "fail";
+  } catch (e) {
+    verdict.textContent = "LOAD FAIL: " + e;
+    verdict.className = "fail";
+  }
+})();
+</script>
+</body>
+</html>

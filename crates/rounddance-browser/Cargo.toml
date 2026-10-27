@@ -1,0 +1,13 @@
+[package]
+name = "rounddance-browser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Browser-shape WASM bundle of the first complete transaction (form→join→ZCL, same scenario as host)"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rounddance-hal-host = { path = "../rounddance-hal-host" }

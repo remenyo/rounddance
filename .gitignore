@@ -3,3 +3,4 @@
 *.log
 *.pcap
 .DS_Store
+harness/browser/rounddance_browser.wasm

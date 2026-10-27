@@ -1013,6 +1013,13 @@ name = "rounddance-aps"
 version = "0.1.0"
 
 [[package]]
+name = "rounddance-browser"
+version = "0.1.0"
+dependencies = [
+ "rounddance-hal-host",
+]
+
+[[package]]
 name = "rounddance-commission"
 version = "0.1.0"
 dependencies = [

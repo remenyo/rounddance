@@ -1,0 +1,31 @@
+# Expected output excerpt — tools/browser-check.sh (wave-19)
+# Captured 2026-10-27 on Pi (aarch64), wasmtime 36.0.2, no browser or
+# JS engine on box: the browser-shape bundle executes under wasmtime
+# --invoke. Full outputs live in /tmp/browser-txn-native.txt and
+# /tmp/browser-txn-wasm.txt at check time; this file pins the head.
+
+== native (cargo run -p rounddance-hal-host --example host_transaction) ==
+DIGEST=0x3ea31047e1933c90
+DECISIONS formed=true tc_verified=true joiner_joined=true server_onoff=true reported_onoff=true aps_security_on=true cmd_counter=1024 report_counter=1025 resume_next=1024 tsn=0x64
+TRACE_LINES=35
+
+== bundle (cargo build -p rounddance-browser --target wasm32-unknown-unknown) ==
+BROWSER-SHAPE OK: target/wasm32-unknown-unknown/debug/rounddance_browser.wasm has zero imports
+
+== executed (wasmtime run --invoke <getter> rounddance_browser.wasm) ==
+digest_hi=1050873927
+digest_lo=3784522896
+formed=1
+tc_verified=1
+joiner_joined=1
+server_onoff=1
+reported_onoff=1
+aps_security_on=1
+cmd_counter=1024
+report_counter=1025
+resume_next=1024
+tsn=100
+trace_lines=35
+
+== verdict ==
+DECISION-MATCH: digest 0x3ea31047e1933c90, trace_lines=35, all 13 getters == native
