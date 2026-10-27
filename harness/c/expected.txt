@@ -1,0 +1,16 @@
+# Expected output excerpt — tools/c-check.sh (wave-21)
+# Captured 2026-10-27 on Pi (aarch64), gcc/g++ 14.2.0. The C and C++
+# harnesses drive the rounddance-ffi staticlib through the first
+# transaction and assert these pinned values; c-check.sh additionally
+# compares the digest against a fresh native run every time.
+
+== native (cargo run -p rounddance-hal-host --example host_transaction) ==
+DIGEST=0x3ea31047e1933c90
+DECISIONS formed=true tc_verified=true joiner_joined=true server_onoff=true reported_onoff=true aps_security_on=true cmd_counter=1024 report_counter=1025 resume_next=1024 tsn=0x64
+TRACE_LINES=35
+
+== C harness (gcc harness/c/txn.c + librounddance_ffi.a) ==
+C-DECISION-MATCH: digest 0x3ea31047e1933c90, trace_lines=35
+
+== C++ harness (g++ harness/c/txn.cpp + librounddance_ffi.a) ==
+CPP-DECISION-MATCH: digest 0x3ea31047e1933c90, trace_lines=35

@@ -576,3 +576,19 @@ code/tests is paraphrase only, never spec text (D1).
 | 22-65816-030-1211-02 | implemented + verified | transaction binding on every order/response; stale frames refused with `StaleTransaction`, machines stay in state | `tests/vectors.rs::vector_stale_transactions_rejected_22_65816_030_1211_02`, sim negatives (stale join leg) |
 | 22-65816-030-122-03 | implemented + verified | `TouchlinkTarget`: `respond_full` (latches response id), `on_network_start`/`on_network_join` (role + steal + key gates), `on_reset`/`on_identify`/`on_device_info` discipline, `tick_ms` lifetime → `Expired`, `take_pending` | `tests/vectors.rs::vector_bad_key_index_flow_*`, `vector_refuse_steal_and_role_gates_*`, `vector_auxiliary_order_discipline_*`, `vector_timeout_and_abandon_rules`, sim negatives |
 | 22-65816-030-122-04 | implemented + verified | `TouchlinkTarget::on_network_update` + `PendingUpdate`/`UpdateDisposition` | `tests/vectors.rs::vector_network_update_flow_22_65816_030_122_04` |
+
+## Wave-21 traceability — C ABI bindings + C/C++ harnesses (`rounddance-ffi`)
+
+All IDs below are repo-minted (`RD-FFI-<seq>`), MINTED-pending-confirm:
+no corpus requirement covers the C ABI harness (tooling, same standing
+as `RD-BROWSER-*` / `ARB-LEASE-*`). Wording in code/tests is paraphrase
+only, never spec text (D1).
+
+| Requirement ID | State | Implementing code | Verifying test |
+|----------------|-------|-------------------|----------------|
+| RD-FFI-01 | implemented + verified | `rounddance-ffi` (crate-type staticlib + rlib): same `run_first_transaction(ScenarioConfig::first_transaction())` scenario as the host leg, run to completion inside `rd_create` | `tools/c-check.sh` builds the staticlib; `tests/ffi_surface.rs::ffi_decisions_match_native` |
+| RD-FFI-02 | implemented + verified | Opaque `RdContext` handle (`rd_create`/`rd_destroy`, null-tolerant destroy); 12 decision getters (digest hi/lo + 6 bools + cmd/report/resume counters + tsn + trace_lines) + nul-free bounded `rd_trace_line` (length out-param, `RD_ERR_SMALL` on truncation) | `tests/ffi_surface.rs` (byte-exact trace round-trip, null/range/small-buffer error statuses) |
+| RD-FFI-03 | implemented + verified | `RD_OK`/`RD_ERR_*` status codes on every export; `catch_unwind` at each boundary mapping panics to `RD_ERR_PANIC` (panic=abort documented as FFI-safe termination); `unsafe` confined to `pub mod ffi` under crate `#![deny(unsafe_code)]`, each block with a SAFETY comment (hal-esp precedent); std-based like hal-host/browser, documented not-`no_std` | `tests/ffi_surface.rs::ffi_null_and_range_errors_are_statuses`; `cargo clippy --all-targets` 0 warnings (incl. `not_unsafe_ptr_arg_deref` + `missing_safety_doc`) |
+| RD-FFI-04 | implemented + verified | `harness/c/txn.c` (gcc `-std=c11 -Wall -Wextra -Werror -O2`) asserting all 13 values + digest + trace_lines against the pinned native run | `tools/c-check.sh` exit 0 with `C-DECISION-MATCH: digest 0x3ea31047e1933c90, trace_lines=35`; `harness/c/expected.txt` pins the excerpt |
+| RD-FFI-05 | implemented + verified | `harness/c/txn.cpp` (g++ `-std=c++17 -Wall -Wextra -Werror -O2`): same asserts as `txn.c` through the `extern "C"`-guarded `harness/c/rd_ffi.h`, proving C++ linkage compat | `tools/c-check.sh` exit 0 with `CPP-DECISION-MATCH: digest 0x3ea31047e1933c90, trace_lines=35` |
+| RD-FFI-06 | implemented + verified (native leg) | `tools/c-check.sh`: fresh native `host_transaction` output vs both harness verdicts, digest + trace_lines compared, pin re-verified | `c-check.sh` exit 0 with `DECISION-MATCH: digest 0x3ea31047e1933c90, trace_lines=35, C + C++ == native` |

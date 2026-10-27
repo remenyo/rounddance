@@ -17,6 +17,7 @@ members = [
     "crates/rounddance-browser",
     "crates/rounddance-hal-esp",
     "crates/rounddance-rcp",
+    "crates/rounddance-ffi",
     "tools/arbitrator",
 ]
 

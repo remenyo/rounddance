@@ -1041,6 +1041,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rounddance-ffi"
+version = "0.1.0"
+dependencies = [
+ "rounddance-hal-host",
+]
+
+[[package]]
 name = "rounddance-gp"
 version = "0.1.0"
 dependencies = [

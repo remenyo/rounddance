@@ -1,0 +1,13 @@
+[package]
+name = "rounddance-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "C ABI over the first complete host transaction (adapter shim, not a protocol crate)"
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+rounddance-hal-host = { path = "../rounddance-hal-host" }
