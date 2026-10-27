@@ -71,6 +71,212 @@ fn fuzz_malformed_frames_never_panic() {
 }
 
 #[test]
+fn fuzz_touchlink_flows_round_trip() {
+    let mut rng = Fuzz(0x7011);
+    let mut buf = [0u8; MAX_TOUCHLINK_FRAME];
+    for _ in 0..CASES {
+        // New payload codecs round-trip through arbitrary bytes.
+        let len = rng.below(60) as usize;
+        for slot in buf[..len].iter_mut() {
+            *slot = rng.below(0x100) as u8;
+        }
+        let _ = ScanRequestBody::decode(&buf[..len]);
+        let _ = ScanResponseBody::decode(&buf[..len]);
+        let _ = NetworkStartRequest::decode(&buf[..len]);
+        let _ = NetworkJoinRequest::decode(&buf[..len]);
+        let _ = NetworkStartResponse::decode(&buf[..len]);
+        let _ = NetworkJoinResponse::decode(&buf[..len]);
+        let _ = NetworkUpdateRequest::decode(&buf[..len]);
+        let _ = DeviceInfoRequest::decode(&buf[..len]);
+        let _ = IdentifyRequest::decode(&buf[..len]);
+        // Random bodies re-encode to the decoded value (the tail only
+        // survives when exactly one sub-device is reported).
+        let sub_devices = rng.below(2) as u8;
+        let tail = sub_devices == 1;
+        let body = ScanResponseBody {
+            rssi_correction: rng.below(0x100) as u8,
+            zigbee_info: rng.below(0x100) as u8,
+            touchlink_info: rng.below(0x100) as u8,
+            key_bitmask: rng.below(0x1_0000) as u16,
+            response_id: rng.next() as u32,
+            extended_pan: [rng.below(0x100) as u8; 8],
+            network_update_id: rng.below(0x100) as u8,
+            channel: rng.below(0x100) as u8,
+            pan_id: rng.below(0x1_0000) as u16,
+            network_address: rng.below(0x1_0000) as u16,
+            sub_devices,
+            total_groups: rng.below(0x100) as u8,
+            endpoint: if tail { rng.below(0x100) as u8 } else { 0 },
+            profile_id: if tail { rng.below(0x1_0000) as u16 } else { 0 },
+            device_id: if tail { rng.below(0x1_0000) as u16 } else { 0 },
+            version: if tail { rng.below(0x100) as u8 } else { 0 },
+            group_count: if tail { rng.below(0x100) as u8 } else { 0 },
+        };
+        if let Ok(n) = body.encode_into(&mut buf) {
+            let back = ScanResponseBody::decode(&buf[..n]).unwrap();
+            assert_eq!(back, body);
+        }
+        let start = NetworkStartRequest {
+            extended_pan: [rng.below(0x100) as u8; 8],
+            key_index: rng.below(0x100) as u8,
+            encrypted_key: [rng.below(0x100) as u8; 16],
+            channel: rng.below(0x100) as u8,
+            pan_id: rng.below(0x1_0000) as u16,
+            network_address: rng.below(0x1_0000) as u16,
+            group_begin: rng.below(0x1_0000) as u16,
+            group_end: rng.below(0x1_0000) as u16,
+            free_nwk_begin: rng.below(0x1_0000) as u16,
+            free_nwk_end: rng.below(0x1_0000) as u16,
+            free_group_begin: rng.below(0x1_0000) as u16,
+            free_group_end: rng.below(0x1_0000) as u16,
+            initiator_ieee: [rng.below(0x100) as u8; 8],
+            initiator_nwk: rng.below(0x1_0000) as u16,
+        };
+        if let Ok(n) = start.encode_into(&mut buf) {
+            let back = NetworkStartRequest::decode(&buf[..n]).unwrap();
+            assert_eq!(back, start);
+        }
+        // Key transport is an involution for any transport + key.
+        let t = [rng.below(0x100) as u8; 16];
+        let k = [rng.below(0x100) as u8; 16];
+        let enc = encrypt_network_key(&t, &k);
+        assert_eq!(decrypt_network_key(&t, &enc), k);
+        // Key-index negotiation never panics and agrees on the top bit.
+        let a = rng.below(0x1_0000) as u16;
+        let b = rng.below(0x1_0000) as u16;
+        match select_key_index(a, b) {
+            Ok(i) => {
+                assert!(i <= MAX_KEY_INDEX);
+                assert_ne!((a & b) & (1u16 << i), 0);
+            }
+            Err(TouchlinkError::BadKeyIndex) => assert_eq!(a & b, 0),
+            Err(_) => panic!("unexpected select error"),
+        }
+    }
+}
+
+#[test]
+fn fuzz_touchlink_flow_machines_reject_arbitrary_events() {
+    struct Drop;
+    impl InterPanTx for Drop {
+        type Error = TouchlinkError;
+        fn send(&mut self, _channel: u8, _frame: &TouchlinkFrame) -> Result<(), TouchlinkError> {
+            Ok(())
+        }
+    }
+    let mut rng = Fuzz(0xF10E);
+    for _ in 0..CASES {
+        let mut init = TouchlinkInitiator::new();
+        init.begin_scan(rng.next() as u32 | 1).ok();
+        init.note_response(rng.below(2) == 0);
+        init.proceed(rng.below(2) == 0).ok();
+        let key_index = rng.below(0x100) as u8;
+        let start = NetworkStartRequest {
+            extended_pan: [0x11; 8],
+            key_index,
+            encrypted_key: [0x22; 16],
+            channel: rng.below(0x100) as u8,
+            pan_id: rng.below(0x1_0000) as u16,
+            network_address: rng.below(0x1_0000) as u16,
+            group_begin: 0,
+            group_end: 0,
+            free_nwk_begin: 0,
+            free_nwk_end: 0,
+            free_group_begin: 0,
+            free_group_end: 0,
+            initiator_ieee: [0x33; 8],
+            initiator_nwk: 0,
+        };
+        let join = NetworkJoinRequest {
+            extended_pan: [0x11; 8],
+            key_index,
+            encrypted_key: [0x22; 16],
+            network_update_id: rng.below(0x100) as u8,
+            channel: rng.below(0x100) as u8,
+            pan_id: rng.below(0x1_0000) as u16,
+            network_address: rng.below(0x1_0000) as u16,
+            group_begin: 0,
+            group_end: 0,
+            free_nwk_begin: 0,
+            free_nwk_end: 0,
+            free_group_begin: 0,
+            free_group_end: 0,
+        };
+        let mut tx = Drop;
+        init.send_start(&mut tx, 15, &start, &[0x44; 16]).ok();
+        let kind = if rng.below(2) == 0 {
+            JoinKind::Router
+        } else {
+            JoinKind::EndDevice
+        };
+        init.send_join(&mut tx, 15, kind, &join, &[0x44; 16]).ok();
+        let ok = rng.below(2) == 0;
+        let txid = rng.next() as u32;
+        init.on_start_response(&NetworkStartResponse::success([0x11; 8], 0, 15, 1), txid)
+            .ok();
+        init.on_join_response(
+            &if ok {
+                NetworkJoinResponse::success()
+            } else {
+                NetworkJoinResponse::failure()
+            },
+            txid,
+        )
+        .ok();
+        init.tick_ms(rng.below(20_000) as u32);
+        init.finish(ok);
+        let _ = init.take_handoff();
+
+        let mut target = TouchlinkTarget::new();
+        let frame = TouchlinkFrame::new(rng.next() as u32, rng.below(0x100) as u8, &[]).unwrap();
+        target.on_scan_request(&frame);
+        let rsp = ScanResponseBody {
+            rssi_correction: 0,
+            zigbee_info: 0,
+            touchlink_info: 0,
+            key_bitmask: rng.below(0x1_0000) as u16,
+            response_id: rng.next() as u32,
+            extended_pan: [0x11; 8],
+            network_update_id: 0,
+            channel: 15,
+            pan_id: 1,
+            network_address: 2,
+            sub_devices: 0,
+            total_groups: 0,
+            endpoint: 0,
+            profile_id: 0,
+            device_id: 0,
+            version: 0,
+            group_count: 0,
+        };
+        target.respond_full(&mut tx, 15, &rsp).ok();
+        let ctx = TargetOrderCtx {
+            is_router: rng.below(2) == 0,
+            accept: rng.below(2) == 0,
+            key: TouchlinkKey::Certification,
+            supported_keys: rng.below(0x1_0000) as u16,
+        };
+        let _ = target.on_network_start(&start, rng.next() as u32, &ctx);
+        let _ = target.on_network_join(&join, rng.next() as u32, kind, rng.below(2) == 0, &ctx);
+        let update = NetworkUpdateRequest {
+            extended_pan: [0x11; 8],
+            network_update_id: rng.below(0x100) as u8,
+            channel: 15,
+            pan_id: 1,
+            network_address: 2,
+        };
+        let _ = target.on_network_update(&update, rng.next() as u32, &[0x11; 8], 1, 0);
+        let _ = target.on_reset(rng.next() as u32);
+        let _ = target.on_identify(rng.next() as u32, &IdentifyRequest { duration_s: 5 });
+        let _ = target.on_device_info(rng.next() as u32, &DeviceInfoRequest { start_index: 0 });
+        target.tick_ms(rng.below(20_000) as u32);
+        target.finish(ok);
+        let _ = target.take_pending();
+        let _ = target.take_update();
+    }
+}
+
+#[test]
 fn fuzz_machines_reject_arbitrary_events() {
     let mut rng = Fuzz(0xBDB);
     for _ in 0..CASES {

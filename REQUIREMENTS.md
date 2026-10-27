@@ -552,3 +552,27 @@ never spec text (D1).
 | RD-BROWSER-02 | implemented + verified | 13 `pub mod exports` getters (digest hi/lo + 6 bools + cmd/report/resume counters + tsn + trace_lines), zero-import shape (no bindgen, no new deps) | `harness/browser/check_imports.py` (zero imports gate in `browser-check.sh`); `index.html` reads all 13 via empty-import instantiate |
 | RD-BROWSER-03 | implemented + verified (wasmtime leg) | `tools/browser-check.sh`: native `host_transaction` output vs `wasmtime --invoke` getter dump, digest + every field + trace_lines compared | `browser-check.sh` exit 0 with `DECISION-MATCH: digest 0x3ea31047e1933c90`; `harness/browser/expected.txt` pins the excerpt |
 | RD-BROWSER-04 | implemented, browser execution open | `harness/browser/index.html`: real-browser driver (fetch + `instantiateStreaming` with `{}` imports, unsigned compare, PASS/MISMATCH verdict) | NOT run on-box — no browser engine (chromium/firefox/webkit) or JS engine (node/deno) installed; engine present = wasmtime 36.0.2 only. First box with a browser runs it and records the verdict here. |
+
+## Wave-20 traceability — Touchlink commissioning completion (`rounddance-commission`)
+
+All IDs below either reuse corpus requirements (touchlink command
+tables + BDB procedures, anchors name the private-corpus page + line)
+or are repo-minted (dots stripped), MINTED-pending-confirm. Wording in
+code/tests is paraphrase only, never spec text (D1).
+
+| Requirement ID | State | Implementing code | Verifying test |
+|----------------|-------|-------------------|----------------|
+| 07-5123-08-13322-01 | implemented + verified (extended) | `touchlink.rs`: `ScanRequestBody` field-correct form, `DeviceInfoRequest`, `IdentifyRequest` codecs; `info`/`zigbee` bit builders; wave-10 skeleton kept byte-compatible | `tests/vectors.rs::vector_scan_request_body_wire`, `vector_responses_and_update_wire` (identify/device-info legs) |
+| 07-5123-08-133225-01 | implemented + verified | `touchlink.rs::NetworkStartRequest` 52-octet codec (new-network params + wrapped key + initiator identity) | `tests/vectors.rs::vector_network_start_wire_07_5123_08_133225_01` (frozen 52-byte wire + frame shape) |
+| 07-5123-08-133226-01 | implemented + verified | `touchlink.rs::NetworkJoinRequest` 43-octet codec (router leg) | `tests/vectors.rs::vector_network_join_wire_07_5123_08_133226_01` (frozen 43-byte wire + `JoinKind` command mapping) |
+| 07-5123-08-133227-01 | implemented + verified | same codec via `JoinKind::EndDevice` (`0x14`/`0x15`) | `vector_network_join_wire_*` (kind mapping leg) + sim `touchlink_join_existing_network` |
+| 07-5123-08-133228-01 | implemented + verified | `touchlink.rs::NetworkUpdateRequest` 14-octet codec; initiator `send_update`, target `on_network_update` | `tests/vectors.rs::vector_responses_and_update_wire`, `vector_network_update_flow_22_65816_030_122_04`, sim negatives (pre-response ignore leg) |
+| 07-5123-08-133231-01 | implemented + verified | `touchlink.rs::ScanResponseBody` 25-octet + 7-octet single-sub-device tail codec | `tests/vectors.rs::vector_scan_response_body_wire_07_5123_08_133231_01` (frozen 32-byte + 25-byte wires, 2-sub-device reject) |
+| 07-5123-08-133233-01 | implemented + verified | `touchlink.rs::NetworkStartResponse` 13-octet codec (status + verified params) | `tests/vectors.rs::vector_responses_and_update_wire` (frozen 13-byte wire) |
+| 07-5123-08-133234-01 | implemented + verified | `touchlink.rs::NetworkJoinResponse` 1-octet codec (router leg) | `tests/vectors.rs::vector_responses_and_update_wire` |
+| 07-5123-08-133235-01 | implemented + verified | same codec via `JoinKind::EndDevice` | sim `touchlink_join_existing_network` (end-device response leg) |
+| 07-5123-08-1333411-01 | implemented + verified | `touchlink.rs`: `KEY_INDEX_*` consts, `CERTIFICATION_KEY`, `TouchlinkKey`, `transport_block`/`development_block`, `transport_key_for`, `encrypt/decrypt_network_key` (local ECB decrypt), `select_key_index` | `tests/vectors.rs::vector_transport_certification_worked_07_5123_08_1333411_01` (worked derivation input + transport key + wrap/unwrap pin), `vector_decrypt_published_cipher_check` (cipher cross-check), `vector_key_index_selection_*`, roundtrip involution fuzz |
+| 22-65816-030-121-04 | implemented + verified | `TouchlinkInitiator`: `send_start`/`send_join`/`send_update`, `on_start/join_response`, `tick_ms` (receive window + startup delay + lifetime), `take_handoff` | `tests/vectors.rs::vector_full_start_transcript_*`, `vector_full_join_transcript_*`, `vector_timeout_and_abandon_rules`, sim `touchlink_complete_commissioning` + replay |
+| 22-65816-030-1211-02 | implemented + verified | transaction binding on every order/response; stale frames refused with `StaleTransaction`, machines stay in state | `tests/vectors.rs::vector_stale_transactions_rejected_22_65816_030_1211_02`, sim negatives (stale join leg) |
+| 22-65816-030-122-03 | implemented + verified | `TouchlinkTarget`: `respond_full` (latches response id), `on_network_start`/`on_network_join` (role + steal + key gates), `on_reset`/`on_identify`/`on_device_info` discipline, `tick_ms` lifetime → `Expired`, `take_pending` | `tests/vectors.rs::vector_bad_key_index_flow_*`, `vector_refuse_steal_and_role_gates_*`, `vector_auxiliary_order_discipline_*`, `vector_timeout_and_abandon_rules`, sim negatives |
+| 22-65816-030-122-04 | implemented + verified | `TouchlinkTarget::on_network_update` + `PendingUpdate`/`UpdateDisposition` | `tests/vectors.rs::vector_network_update_flow_22_65816_030_122_04` |

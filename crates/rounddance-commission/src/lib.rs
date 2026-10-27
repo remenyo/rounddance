@@ -52,10 +52,20 @@ pub use steering::{
     SteeringState, SurveyError, SurveyTable, MAX_SURVEY_ENTRIES,
 };
 pub use touchlink::{
-    InterPanTx, SapInterPan, ScanRequestPayload, TouchlinkError, TouchlinkFrame,
-    TouchlinkInitiator, TouchlinkInitiatorState, TouchlinkTarget, TouchlinkTargetState,
-    MAX_TOUCHLINK_FRAME, MAX_TOUCHLINK_PAYLOAD, TOUCHLINK_CLUSTER, TOUCHLINK_PROFILE,
-    TOUCHLINK_UTILITY_PROFILE,
+    decrypt_network_key, development_block, encrypt_network_key, select_key_index, transport_block,
+    transport_key_for,
+};
+pub use touchlink::{
+    CommissionedNetwork, DeviceInfoRequest, IdentifyRequest, InterPanTx, JoinKind,
+    NetworkJoinRequest, NetworkJoinResponse, NetworkStartRequest, NetworkStartResponse,
+    NetworkUpdateRequest, PendingUpdate, SapInterPan, ScanRequestBody, ScanRequestPayload,
+    ScanResponseBody, TargetOrderCtx, TouchlinkError, TouchlinkFrame, TouchlinkInitiator,
+    TouchlinkInitiatorState, TouchlinkKey, TouchlinkTarget, TouchlinkTargetState,
+    UpdateDisposition, CERTIFICATION_KEY, KEY_INDEX_CERTIFICATION, KEY_INDEX_DEVELOPMENT,
+    KEY_INDEX_MASTER, MAX_KEY_INDEX, MAX_TOUCHLINK_FRAME, MAX_TOUCHLINK_PAYLOAD,
+    MIN_STARTUP_DELAY_MS, RX_WINDOW_MS, SCAN_BASE_MS, STATUS_FAILURE, STATUS_SUCCESS,
+    TOUCHLINK_CHANNEL_MAX, TOUCHLINK_CHANNEL_MIN, TOUCHLINK_CLUSTER, TOUCHLINK_PROFILE,
+    TOUCHLINK_UTILITY_PROFILE, TRANSACTION_LIFETIME_MS,
 };
 
 /// Crate identifier.

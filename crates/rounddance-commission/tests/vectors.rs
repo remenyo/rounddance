@@ -805,3 +805,822 @@ fn vector_leave_forms() {
     assert!(req.rejoin);
     assert!(!req.remove_children);
 }
+
+// ---------------------------------------------------------------------------
+// Touchlink commissioning completion (wave-20).
+// ---------------------------------------------------------------------------
+
+/// In-memory inter-PAN seam for the completion vectors.
+struct VecTx {
+    frames: Vec<(u8, Vec<u8>)>,
+}
+
+impl VecTx {
+    fn new() -> Self {
+        Self { frames: Vec::new() }
+    }
+}
+
+impl InterPanTx for VecTx {
+    type Error = TouchlinkError;
+
+    fn send(&mut self, channel: u8, frame: &TouchlinkFrame) -> Result<(), TouchlinkError> {
+        let mut buf = [0u8; MAX_TOUCHLINK_FRAME];
+        let n = frame.encode_into(&mut buf)?;
+        self.frames.push((channel, buf[..n].to_vec()));
+        Ok(())
+    }
+}
+
+/// Fixed completion fixtures: certification-key transport inputs and
+/// the wrapped/unwrapped network key pair.
+const CERT_TID: u32 = 0x3eaa_2009;
+const CERT_RSID: u32 = 0x8876_2fb1;
+const CERT_TRANSPORT: [u8; 16] = [
+    0x66, 0x9e, 0x08, 0xe4, 0x02, 0x77, 0xed, 0x9a, 0xb3, 0x6b, 0x25, 0x80, 0x45, 0x6b, 0x41, 0x76,
+];
+const PLAIN_KEY: [u8; 16] = [
+    0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00,
+];
+const WRAPPED_KEY: [u8; 16] = [
+    0x83, 0x22, 0x63, 0x68, 0x73, 0xa7, 0xbb, 0x2a, 0x18, 0x9a, 0x53, 0x70, 0x8c, 0x60, 0x7b, 0xd0,
+];
+
+fn completion_ext_pan() -> [u8; 8] {
+    [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]
+}
+
+fn completion_start_req() -> NetworkStartRequest {
+    NetworkStartRequest {
+        extended_pan: completion_ext_pan(),
+        key_index: KEY_INDEX_CERTIFICATION,
+        encrypted_key: WRAPPED_KEY,
+        channel: 15,
+        pan_id: 0x1a2b,
+        network_address: 0x0001,
+        group_begin: 0x0001,
+        group_end: 0x0008,
+        free_nwk_begin: 0x0002,
+        free_nwk_end: 0x7fff,
+        free_group_begin: 0x000b,
+        free_group_end: 0x000c,
+        initiator_ieee: [0xaa; 8],
+        initiator_nwk: 0x0000,
+    }
+}
+
+fn completion_join_req() -> NetworkJoinRequest {
+    NetworkJoinRequest {
+        extended_pan: completion_ext_pan(),
+        key_index: KEY_INDEX_CERTIFICATION,
+        encrypted_key: WRAPPED_KEY,
+        network_update_id: 0x03,
+        channel: 15,
+        pan_id: 0x1a2b,
+        network_address: 0x0002,
+        group_begin: 0x0001,
+        group_end: 0x0008,
+        free_nwk_begin: 0x0002,
+        free_nwk_end: 0x7fff,
+        free_group_begin: 0x000b,
+        free_group_end: 0x000c,
+    }
+}
+
+/// Timer, status, and key-index constants.
+#[test]
+fn vector_touchlink_completion_constants() {
+    assert_eq!(TRANSACTION_LIFETIME_MS, 8_000);
+    assert_eq!(RX_WINDOW_MS, 5_000);
+    assert_eq!(MIN_STARTUP_DELAY_MS, 2_000);
+    assert_eq!(SCAN_BASE_MS, 250);
+    assert_eq!(STATUS_SUCCESS, 0x00);
+    assert_eq!(STATUS_FAILURE, 0x01);
+    assert_eq!(KEY_INDEX_DEVELOPMENT, 0);
+    assert_eq!(KEY_INDEX_MASTER, 4);
+    assert_eq!(KEY_INDEX_CERTIFICATION, 15);
+    assert_eq!(
+        CERTIFICATION_KEY,
+        [
+            0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 0xc8, 0xc9, 0xca, 0xcb, 0xcc, 0xcd,
+            0xce, 0xcf
+        ]
+    );
+}
+
+// 07-5123-08-1333411-01: key-index negotiation picks the highest
+// common bit; disjoint masks fail.
+#[test]
+fn vector_key_index_selection_07_5123_08_1333411_01() {
+    assert_eq!(select_key_index(0x8010, 0x8010).unwrap(), 15);
+    assert_eq!(select_key_index(0x0010, 0x8010).unwrap(), 4);
+    assert_eq!(select_key_index(0x0001, 0x0001).unwrap(), 0);
+    assert_eq!(
+        select_key_index(0x0001, 0x8010 & !0x0001).unwrap_err(),
+        TouchlinkError::BadKeyIndex
+    );
+    assert_eq!(
+        transport_key_for(16, CERT_TID, CERT_RSID, &[0u8; 16]).unwrap_err(),
+        TouchlinkError::BadKeyIndex
+    );
+}
+
+// 07-5123-08-1333411-01: certification-key worked vector —
+// derivation input, transport key, wrap, and unwrap.
+#[test]
+fn vector_transport_certification_worked_07_5123_08_1333411_01() {
+    assert_eq!(
+        transport_block(CERT_TID, CERT_RSID),
+        [
+            0x3e, 0xaa, 0x20, 0x09, 0x3e, 0xaa, 0x20, 0x09, 0x88, 0x76, 0x2f, 0xb1, 0x88, 0x76,
+            0x2f, 0xb1
+        ]
+    );
+    let transport =
+        transport_key_for(KEY_INDEX_CERTIFICATION, CERT_TID, CERT_RSID, &[0u8; 16]).unwrap();
+    assert_eq!(transport, CERT_TRANSPORT);
+    assert_eq!(encrypt_network_key(&transport, &PLAIN_KEY), WRAPPED_KEY);
+    assert_eq!(decrypt_network_key(&transport, &WRAPPED_KEY), PLAIN_KEY);
+    // Development input wraps the two fixed markers around the ids.
+    assert_eq!(
+        development_block(CERT_TID, CERT_RSID),
+        [
+            b'P', b'h', b'L', b'i', 0x3e, 0xaa, 0x20, 0x09, b'C', b'L', b'S', b'N', 0x88, 0x76,
+            0x2f, 0xb1
+        ]
+    );
+    let dev = transport_key_for(KEY_INDEX_DEVELOPMENT, CERT_TID, CERT_RSID, &[0u8; 16]).unwrap();
+    assert_eq!(dev, development_block(CERT_TID, CERT_RSID));
+}
+
+// Local ECB decryption agrees with the published cipher check:
+// decrypting the reference ciphertext returns the reference
+// plaintext.
+#[test]
+fn vector_decrypt_published_cipher_check() {
+    let key: [u8; 16] = [
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+        0x0f,
+    ];
+    let ciphertext: [u8; 16] = [
+        0x69, 0xc4, 0xe0, 0xd8, 0x6a, 0x7b, 0x04, 0x30, 0xd8, 0xcd, 0xb7, 0x80, 0x70, 0xb4, 0xc5,
+        0x5a,
+    ];
+    let plaintext: [u8; 16] = [
+        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee,
+        0xff,
+    ];
+    assert_eq!(decrypt_network_key(&key, &ciphertext), plaintext);
+}
+
+// 07-5123-08-13322-01: full scan-request body wire shape.
+#[test]
+fn vector_scan_request_body_wire() {
+    let body = ScanRequestBody {
+        zigbee_info: 0x05,
+        touchlink_info: 0x83,
+    };
+    let mut buf = [0u8; 2];
+    assert_eq!(body.encode_into(&mut buf).unwrap(), 2);
+    assert_eq!(&buf, &[0x05, 0x83]);
+    assert_eq!(ScanRequestBody::decode(&buf).unwrap(), body);
+    assert_eq!(
+        ScanRequestBody::decode(&buf[..1]).unwrap_err(),
+        TouchlinkError::Truncated
+    );
+}
+
+// 07-5123-08-133231-01: full scan-response body wire shape, with and
+// without the single-sub-device tail.
+#[test]
+fn vector_scan_response_body_wire_07_5123_08_133231_01() {
+    let rsp = ScanResponseBody {
+        rssi_correction: 0x05,
+        zigbee_info: 0x05,
+        touchlink_info: 0x83,
+        key_bitmask: 0x8010,
+        response_id: CERT_RSID,
+        extended_pan: completion_ext_pan(),
+        network_update_id: 0x00,
+        channel: 15,
+        pan_id: 0x1a2b,
+        network_address: 0xffff,
+        sub_devices: 1,
+        total_groups: 0x02,
+        endpoint: 0x0a,
+        profile_id: 0x0104,
+        device_id: 0x0005,
+        version: 0x01,
+        group_count: 0x02,
+    };
+    let mut buf = [0u8; 64];
+    let n = rsp.encode_into(&mut buf).unwrap();
+    assert_eq!(n, 32);
+    assert_eq!(
+        &buf[..n],
+        &[
+            0x05, 0x05, 0x83, 0x10, 0x80, 0xb1, 0x2f, 0x76, 0x88, 0x01, 0x02, 0x03, 0x04, 0x05,
+            0x06, 0x07, 0x08, 0x00, 0x0f, 0x2b, 0x1a, 0xff, 0xff, 0x01, 0x02, 0x0a, 0x04, 0x01,
+            0x05, 0x00, 0x01, 0x02,
+        ]
+    );
+    assert_eq!(ScanResponseBody::decode(&buf[..n]).unwrap(), rsp);
+    // Bare form: no tail.
+    let mut bare = rsp;
+    bare.sub_devices = 0;
+    bare.endpoint = 0;
+    bare.profile_id = 0;
+    bare.device_id = 0;
+    bare.version = 0;
+    bare.group_count = 0;
+    let m = bare.encode_into(&mut buf).unwrap();
+    assert_eq!(m, 25);
+    assert_eq!(ScanResponseBody::decode(&buf[..m]).unwrap(), bare);
+    // Two sub-devices are outside the bounded codec.
+    let mut bad = rsp;
+    bad.sub_devices = 2;
+    assert_eq!(
+        bad.encode_into(&mut buf).unwrap_err(),
+        TouchlinkError::InvalidField
+    );
+    let mut over = [0u8; 25];
+    over[23] = 2;
+    assert_eq!(
+        ScanResponseBody::decode(&over).unwrap_err(),
+        TouchlinkError::InvalidField
+    );
+    assert_eq!(
+        ScanResponseBody::decode(&buf[..10]).unwrap_err(),
+        TouchlinkError::Truncated
+    );
+}
+
+// 07-5123-08-133225-01: network start request wire shape.
+#[test]
+fn vector_network_start_wire_07_5123_08_133225_01() {
+    let req = completion_start_req();
+    let mut buf = [0u8; 64];
+    assert_eq!(req.encode_into(&mut buf).unwrap(), 52);
+    let mut want = vec![0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x0f];
+    want.extend_from_slice(&WRAPPED_KEY);
+    want.extend_from_slice(&[
+        0x0f, 0x2b, 0x1a, 0x01, 0x00, 0x01, 0x00, 0x08, 0x00, 0x02, 0x00, 0xff, 0x7f, 0x0b, 0x00,
+        0x0c, 0x00, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0x00, 0x00,
+    ]);
+    assert_eq!(&buf[..52], &want[..]);
+    assert_eq!(NetworkStartRequest::decode(&buf[..52]).unwrap(), req);
+    // Full frame wire: transaction + command + body.
+    let frame = TouchlinkFrame::new(0x1234_5678, 0x10, &buf[..52]).unwrap();
+    let mut wire = [0u8; MAX_TOUCHLINK_FRAME];
+    let n = frame.encode_into(&mut wire).unwrap();
+    assert_eq!(n, 57);
+    assert_eq!(&wire[..5], &[0x78, 0x56, 0x34, 0x12, 0x10]);
+    assert_eq!(&wire[5..n], &buf[..52]);
+    assert_eq!(
+        NetworkStartRequest::decode(&buf[..51]).unwrap_err(),
+        TouchlinkError::Truncated
+    );
+}
+
+// 07-5123-08-133226-01 / 133227-01: network join request wire shape
+// (shared by router and end-device kinds).
+#[test]
+fn vector_network_join_wire_07_5123_08_133226_01() {
+    let req = completion_join_req();
+    let mut buf = [0u8; 64];
+    assert_eq!(req.encode_into(&mut buf).unwrap(), 43);
+    let mut want = vec![0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x0f];
+    want.extend_from_slice(&WRAPPED_KEY);
+    want.extend_from_slice(&[
+        0x03, 0x0f, 0x2b, 0x1a, 0x02, 0x00, 0x01, 0x00, 0x08, 0x00, 0x02, 0x00, 0xff, 0x7f, 0x0b,
+        0x00, 0x0c, 0x00,
+    ]);
+    assert_eq!(&buf[..43], &want[..]);
+    assert_eq!(NetworkJoinRequest::decode(&buf[..43]).unwrap(), req);
+    assert_eq!(JoinKind::Router.request_command(), 0x12);
+    assert_eq!(JoinKind::Router.response_command(), 0x13);
+    assert_eq!(JoinKind::EndDevice.request_command(), 0x14);
+    assert_eq!(JoinKind::EndDevice.response_command(), 0x15);
+}
+
+// 07-5123-08-133233-01 / 133234-01 / 133235-01 + 133228-01:
+// response and update wire shapes.
+#[test]
+fn vector_responses_and_update_wire() {
+    let rsp = NetworkStartResponse::success(completion_ext_pan(), 0x00, 15, 0x1a2b);
+    assert!(rsp.is_success());
+    let mut buf = [0u8; 16];
+    assert_eq!(rsp.encode_into(&mut buf).unwrap(), 13);
+    assert_eq!(
+        &buf[..13],
+        &[0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x00, 0x0f, 0x2b, 0x1a]
+    );
+    assert_eq!(NetworkStartResponse::decode(&buf[..13]).unwrap(), rsp);
+    assert!(!NetworkStartResponse::failure().is_success());
+
+    let join = NetworkJoinResponse::success();
+    let mut one = [0u8; 1];
+    assert_eq!(join.encode_into(&mut one).unwrap(), 1);
+    assert_eq!(&one, &[0x00]);
+    assert_eq!(NetworkJoinResponse::decode(&one).unwrap(), join);
+    assert!(!NetworkJoinResponse::failure().is_success());
+
+    let update = NetworkUpdateRequest {
+        extended_pan: completion_ext_pan(),
+        network_update_id: 0x04,
+        channel: 20,
+        pan_id: 0x1a2b,
+        network_address: 0x0002,
+    };
+    let mut ubuf = [0u8; 16];
+    assert_eq!(update.encode_into(&mut ubuf).unwrap(), 14);
+    assert_eq!(
+        &ubuf[..14],
+        &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x04, 0x14, 0x2b, 0x1a, 0x02, 0x00]
+    );
+    assert_eq!(NetworkUpdateRequest::decode(&ubuf[..14]).unwrap(), update);
+
+    let ident = IdentifyRequest { duration_s: 10 };
+    let mut ibuf = [0u8; 2];
+    assert_eq!(ident.encode_into(&mut ibuf).unwrap(), 2);
+    assert_eq!(&ibuf, &[0x0a, 0x00]);
+    assert_eq!(IdentifyRequest::decode(&ibuf).unwrap(), ident);
+    let dev = DeviceInfoRequest { start_index: 2 };
+    let mut dbuf = [0u8; 1];
+    assert_eq!(dev.encode_into(&mut dbuf).unwrap(), 1);
+    assert_eq!(&dbuf, &[0x02]);
+    assert_eq!(DeviceInfoRequest::decode(&dbuf).unwrap(), dev);
+}
+
+fn completion_scan_response() -> ScanResponseBody {
+    ScanResponseBody {
+        rssi_correction: 0x05,
+        zigbee_info: 0x05,
+        touchlink_info: 0x83,
+        key_bitmask: 0x8010,
+        response_id: CERT_RSID,
+        extended_pan: [0; 8],
+        network_update_id: 0x00,
+        channel: 0,
+        pan_id: 0x0000,
+        network_address: 0xffff,
+        sub_devices: 0,
+        total_groups: 0x00,
+        endpoint: 0,
+        profile_id: 0,
+        device_id: 0,
+        version: 0,
+        group_count: 0,
+    }
+}
+
+fn completion_target_ctx() -> TargetOrderCtx {
+    TargetOrderCtx {
+        is_router: true,
+        accept: true,
+        key: TouchlinkKey::Certification,
+        supported_keys: 0x8010,
+    }
+}
+
+// 22-65816-030-121-04 / 122-03: full scan→start transcript —
+// initiator forms a new network via touchlink, the target unwraps
+// the transported key, both sides hand the same parameters to the
+// classical layer.
+#[test]
+fn vector_full_start_transcript_22_65816_030_121_04() {
+    let mut initiator = TouchlinkInitiator::new();
+    let mut target = TouchlinkTarget::new();
+    let mut air = VecTx::new();
+    initiator.begin_scan(CERT_TID).unwrap();
+
+    // Scan exchange on the heard channel.
+    let scan = TouchlinkFrame::new(CERT_TID, 0x00, &[0x05, 0x83]).unwrap();
+    target.on_scan_request(&scan);
+    target
+        .respond_full(&mut air, 15, &completion_scan_response())
+        .unwrap();
+    assert_eq!(target.state(), TouchlinkTargetState::Responded);
+    let (_, rsp_wire) = air.frames.pop().unwrap();
+    let rsp_frame = TouchlinkFrame::decode(&rsp_wire).unwrap();
+    assert_eq!(rsp_frame.command, 0x01);
+    let body = ScanResponseBody::decode(rsp_frame.payload_bytes()).unwrap();
+    assert_eq!(body.response_id, CERT_RSID);
+
+    // Initiator selects the highest common protection and wraps.
+    initiator.note_response(rsp_frame.transaction == CERT_TID);
+    let index = select_key_index(0x8010, body.key_bitmask).unwrap();
+    assert_eq!(index, KEY_INDEX_CERTIFICATION);
+    let transport = transport_key_for(index, CERT_TID, body.response_id, &[0u8; 16]).unwrap();
+    assert_eq!(transport, CERT_TRANSPORT);
+    let wrapped = encrypt_network_key(&transport, &PLAIN_KEY);
+    assert_eq!(wrapped, WRAPPED_KEY);
+    initiator.proceed(true).unwrap();
+
+    // Start order over the air; the target unwraps and accepts.
+    let mut req = completion_start_req();
+    req.encrypted_key = wrapped;
+    let mut order_air = VecTx::new();
+    initiator
+        .send_start(&mut order_air, 15, &req, &PLAIN_KEY)
+        .unwrap();
+    assert_eq!(
+        initiator.state(),
+        TouchlinkInitiatorState::AwaitingStartResponse
+    );
+    let (_, order_wire) = order_air.frames.pop().unwrap();
+    let order_frame = TouchlinkFrame::decode(&order_wire).unwrap();
+    assert_eq!(order_frame.command, 0x10);
+    let order = NetworkStartRequest::decode(order_frame.payload_bytes()).unwrap();
+    let reply = target
+        .on_network_start(&order, order_frame.transaction, &completion_target_ctx())
+        .unwrap();
+    assert!(reply.is_success());
+    assert_eq!(target.state(), TouchlinkTargetState::Applying);
+    assert_eq!(reply.pan_id, 0x1a2b);
+
+    // Success response closes the initiator leg after the delay.
+    initiator.on_start_response(&reply, CERT_TID).unwrap();
+    assert_eq!(initiator.state(), TouchlinkInitiatorState::StartupWait);
+    assert!(!initiator.tick_ms(1_999));
+    assert_eq!(initiator.state(), TouchlinkInitiatorState::StartupWait);
+    assert!(initiator.tick_ms(1));
+    assert_eq!(initiator.state(), TouchlinkInitiatorState::Done);
+
+    // Both sides hand the same network to the classical layer (the
+    // addresses differ by role: initiator keeps its own short).
+    let init_handoff = initiator.take_handoff().unwrap();
+    let target_handoff = target.take_pending().unwrap();
+    assert_eq!(init_handoff.network_key, PLAIN_KEY);
+    assert_eq!(target_handoff.network_key, PLAIN_KEY);
+    assert_eq!(init_handoff.extended_pan, completion_ext_pan());
+    assert_eq!(target_handoff.extended_pan, completion_ext_pan());
+    assert_eq!(init_handoff.pan_id, target_handoff.pan_id);
+    assert_eq!(init_handoff.channel, target_handoff.channel);
+    assert_eq!(init_handoff.key_index, KEY_INDEX_CERTIFICATION);
+    assert!(init_handoff.formed_new && target_handoff.formed_new);
+    assert_eq!(target_handoff.network_address, 0x0001);
+    target.finish(true);
+    assert_eq!(target.state(), TouchlinkTargetState::Done);
+}
+
+// 22-65816-030-121-04 / 122-03: full scan→join transcript — an
+// on-network initiator adds an end-device target to its network.
+#[test]
+fn vector_full_join_transcript_22_65816_030_121_04() {
+    let mut initiator = TouchlinkInitiator::new();
+    let mut target = TouchlinkTarget::new();
+    let mut air = VecTx::new();
+    initiator.begin_scan(CERT_TID).unwrap();
+    let scan = TouchlinkFrame::new(CERT_TID, 0x00, &[0x05, 0x83]).unwrap();
+    target.on_scan_request(&scan);
+    target
+        .respond_full(&mut air, 15, &completion_scan_response())
+        .unwrap();
+    let (_, rsp_wire) = air.frames.pop().unwrap();
+    let rsp_frame = TouchlinkFrame::decode(&rsp_wire).unwrap();
+    initiator.note_response(rsp_frame.transaction == CERT_TID);
+    initiator.proceed(false).unwrap();
+
+    let mut req = completion_join_req();
+    req.encrypted_key = encrypt_network_key(&CERT_TRANSPORT, &PLAIN_KEY);
+    let mut order_air = VecTx::new();
+    initiator
+        .send_join(&mut order_air, 15, JoinKind::EndDevice, &req, &PLAIN_KEY)
+        .unwrap();
+    assert_eq!(
+        initiator.state(),
+        TouchlinkInitiatorState::AwaitingJoinResponse
+    );
+    let (_, order_wire) = order_air.frames.pop().unwrap();
+    let order_frame = TouchlinkFrame::decode(&order_wire).unwrap();
+    assert_eq!(order_frame.command, JoinKind::EndDevice.request_command());
+    let order = NetworkJoinRequest::decode(order_frame.payload_bytes()).unwrap();
+    let ctx = TargetOrderCtx {
+        is_router: false,
+        ..completion_target_ctx()
+    };
+    let reply = target
+        .on_network_join(
+            &order,
+            order_frame.transaction,
+            JoinKind::EndDevice,
+            true,
+            &ctx,
+        )
+        .unwrap();
+    assert!(reply.is_success());
+    initiator.on_join_response(&reply, CERT_TID).unwrap();
+    assert!(initiator.tick_ms(MIN_STARTUP_DELAY_MS));
+    assert_eq!(initiator.state(), TouchlinkInitiatorState::Done);
+    let handoff = target.take_pending().unwrap();
+    assert_eq!(handoff.network_key, PLAIN_KEY);
+    assert!(!handoff.formed_new);
+    assert_eq!(handoff.network_update_id, 0x03);
+}
+
+// 22-65816-030-1211-02: stale transactions never advance either
+// machine.
+#[test]
+fn vector_stale_transactions_rejected_22_65816_030_1211_02() {
+    // Initiator leg.
+    let mut initiator = TouchlinkInitiator::new();
+    let mut air = VecTx::new();
+    initiator.begin_scan(CERT_TID).unwrap();
+    initiator.note_response(true);
+    initiator.proceed(true).unwrap();
+    initiator
+        .send_start(&mut air, 15, &completion_start_req(), &PLAIN_KEY)
+        .unwrap();
+    let good = NetworkStartResponse::success(completion_ext_pan(), 0, 15, 0x1a2b);
+    assert_eq!(
+        initiator.on_start_response(&good, 0xDEAD_BEEF).unwrap_err(),
+        TouchlinkError::StaleTransaction
+    );
+    assert_eq!(
+        initiator.state(),
+        TouchlinkInitiatorState::AwaitingStartResponse
+    );
+    let join_rsp = NetworkJoinResponse::success();
+    assert_eq!(
+        initiator
+            .on_join_response(&join_rsp, 0xDEAD_BEEF)
+            .unwrap_err(),
+        TouchlinkError::BadState
+    );
+
+    // Target leg.
+    let mut target = TouchlinkTarget::new();
+    let scan = TouchlinkFrame::new(CERT_TID, 0x00, &[0x05, 0x83]).unwrap();
+    target.on_scan_request(&scan);
+    target
+        .respond_full(&mut air, 15, &completion_scan_response())
+        .unwrap();
+    assert_eq!(
+        target
+            .on_network_start(
+                &completion_start_req(),
+                0xDEAD_BEEF,
+                &completion_target_ctx()
+            )
+            .unwrap_err(),
+        TouchlinkError::StaleTransaction
+    );
+    assert_eq!(target.state(), TouchlinkTargetState::Responded);
+    assert!(!target.on_reset(0xDEAD_BEEF));
+    assert_eq!(
+        target
+            .on_identify(0xDEAD_BEEF, &IdentifyRequest { duration_s: 5 })
+            .unwrap_err(),
+        TouchlinkError::StaleTransaction
+    );
+    assert_eq!(
+        target
+            .on_device_info(0xDEAD_BEEF, &DeviceInfoRequest { start_index: 0 })
+            .unwrap_err(),
+        TouchlinkError::StaleTransaction
+    );
+}
+
+// 22-65816-030-122-03: unusable key index fails cleanly — the target
+// answers failure and terminates, the initiator fails the leg.
+#[test]
+fn vector_bad_key_index_flow_22_65816_030_122_03() {
+    let mut initiator = TouchlinkInitiator::new();
+    let mut air = VecTx::new();
+    initiator.begin_scan(CERT_TID).unwrap();
+    initiator.note_response(true);
+    initiator.proceed(true).unwrap();
+    initiator
+        .send_start(&mut air, 15, &completion_start_req(), &PLAIN_KEY)
+        .unwrap();
+    // Target holds development material but the order names the
+    // certification index: failure, terminated.
+    let mut target = TouchlinkTarget::new();
+    let scan = TouchlinkFrame::new(CERT_TID, 0x00, &[0x05, 0x83]).unwrap();
+    target.on_scan_request(&scan);
+    target
+        .respond_full(&mut air, 15, &completion_scan_response())
+        .unwrap();
+    let dev_ctx = TargetOrderCtx {
+        is_router: true,
+        accept: true,
+        key: TouchlinkKey::Development,
+        supported_keys: 0x0001,
+    };
+    let reply = target
+        .on_network_start(&completion_start_req(), CERT_TID, &dev_ctx)
+        .unwrap();
+    assert!(!reply.is_success());
+    assert_eq!(target.state(), TouchlinkTargetState::Restarted);
+    assert!(target.take_pending().is_none());
+    // Initiator fails the leg on the failure status.
+    initiator.on_start_response(&reply, CERT_TID).unwrap();
+    assert_eq!(initiator.state(), TouchlinkInitiatorState::Failed);
+    assert!(initiator.take_handoff().is_none());
+}
+
+// 22-65816-030-121-04 / 122-03: receive-window, startup-delay, and
+// transaction-lifetime rules on the injected clock.
+#[test]
+fn vector_timeout_and_abandon_rules() {
+    // Silent target: the order leg fails when the receive window lapses.
+    let mut initiator = TouchlinkInitiator::new();
+    let mut air = VecTx::new();
+    initiator.begin_scan(CERT_TID).unwrap();
+    initiator.note_response(true);
+    initiator.proceed(false).unwrap();
+    initiator
+        .send_join(
+            &mut air,
+            15,
+            JoinKind::Router,
+            &completion_join_req(),
+            &PLAIN_KEY,
+        )
+        .unwrap();
+    assert!(!initiator.tick_ms(RX_WINDOW_MS - 1));
+    assert!(initiator.tick_ms(1));
+    assert_eq!(initiator.state(), TouchlinkInitiatorState::Failed);
+
+    // Silent exchange: the whole procedure abandons at the lifetime.
+    let mut slow = TouchlinkInitiator::new();
+    slow.begin_scan(CERT_TID).unwrap();
+    assert!(!slow.tick_ms(TRANSACTION_LIFETIME_MS - 1));
+    assert!(slow.tick_ms(1));
+    assert_eq!(slow.state(), TouchlinkInitiatorState::Failed);
+
+    // Target with no orders: abandoned at the lifetime.
+    let mut target = TouchlinkTarget::new();
+    let scan = TouchlinkFrame::new(CERT_TID, 0x00, &[0x05, 0x83]).unwrap();
+    target.on_scan_request(&scan);
+    target
+        .respond_full(&mut air, 15, &completion_scan_response())
+        .unwrap();
+    assert!(!target.tick_ms(TRANSACTION_LIFETIME_MS - 1));
+    assert_eq!(target.state(), TouchlinkTargetState::Responded);
+    assert!(target.tick_ms(1));
+    assert_eq!(target.state(), TouchlinkTargetState::Expired);
+    // Expired exchanges take no orders.
+    assert_eq!(
+        target
+            .on_network_start(&completion_start_req(), CERT_TID, &completion_target_ctx())
+            .unwrap_err(),
+        TouchlinkError::BadState
+    );
+}
+
+// 22-65816-030-122-04: network update adoption and discard rules.
+#[test]
+fn vector_network_update_flow_22_65816_030_122_04() {
+    let mut target = TouchlinkTarget::new();
+    let mut air = VecTx::new();
+    let scan = TouchlinkFrame::new(CERT_TID, 0x00, &[0x05, 0x83]).unwrap();
+    target.on_scan_request(&scan);
+    target
+        .respond_full(&mut air, 15, &completion_scan_response())
+        .unwrap();
+    let stored = completion_ext_pan();
+    let mk = |update, channel, pan| NetworkUpdateRequest {
+        extended_pan: completion_ext_pan(),
+        network_update_id: update,
+        channel,
+        pan_id: pan,
+        network_address: 0x0002,
+    };
+    // Stale transaction, foreign network, and non-newer identifiers
+    // are all ignored without state change.
+    assert_eq!(
+        target.on_network_update(&mk(0x04, 20, 0x1a2b), 0xDEAD_BEEF, &stored, 0x1a2b, 0x03),
+        UpdateDisposition::Ignored
+    );
+    let mut foreign = mk(0x04, 20, 0x1a2b);
+    foreign.extended_pan = [0x09; 8];
+    assert_eq!(
+        target.on_network_update(&foreign, CERT_TID, &stored, 0x1a2b, 0x03),
+        UpdateDisposition::Ignored
+    );
+    assert_eq!(
+        target.on_network_update(&mk(0x03, 20, 0x1a2b), CERT_TID, &stored, 0x1a2b, 0x03),
+        UpdateDisposition::Ignored
+    );
+    assert_eq!(target.state(), TouchlinkTargetState::Responded);
+    // A newer identifier on the same network adopts channel + id.
+    assert_eq!(
+        target.on_network_update(&mk(0x04, 20, 0x1a2b), CERT_TID, &stored, 0x1a2b, 0x03),
+        UpdateDisposition::Applied(PendingUpdate {
+            network_update_id: 0x04,
+            channel: 20,
+        })
+    );
+    assert_eq!(
+        target.take_update(),
+        Some(PendingUpdate {
+            network_update_id: 0x04,
+            channel: 20,
+        })
+    );
+    // Initiator side sends the update while selecting.
+    let mut initiator = TouchlinkInitiator::new();
+    initiator.begin_scan(CERT_TID).unwrap();
+    initiator.note_response(true);
+    initiator
+        .send_update(&mut air, 15, &mk(0x04, 20, 0x1a2b))
+        .unwrap();
+    let (_, wire) = air.frames.pop().unwrap();
+    let frame = TouchlinkFrame::decode(&wire).unwrap();
+    assert_eq!(frame.command, 0x16);
+    assert_eq!(
+        NetworkUpdateRequest::decode(frame.payload_bytes()).unwrap(),
+        mk(0x04, 20, 0x1a2b)
+    );
+}
+
+// 22-65816-030-122-03: refused steal fails the exchange; start needs
+// a router and join kinds must match the logical type.
+#[test]
+fn vector_refuse_steal_and_role_gates_22_65816_030_122_03() {
+    let mut air = VecTx::new();
+    let mut latch = |target: &mut TouchlinkTarget| {
+        let scan = TouchlinkFrame::new(CERT_TID, 0x00, &[0x05, 0x83]).unwrap();
+        target.on_scan_request(&scan);
+        target
+            .respond_full(&mut air, 15, &completion_scan_response())
+            .unwrap();
+    };
+    // Refused steal: failure answer, exchange terminated.
+    let mut stolen = TouchlinkTarget::new();
+    latch(&mut stolen);
+    let mut refuse = completion_target_ctx();
+    refuse.accept = false;
+    let reply = stolen
+        .on_network_join(
+            &completion_join_req(),
+            CERT_TID,
+            JoinKind::Router,
+            true,
+            &refuse,
+        )
+        .unwrap();
+    assert!(!reply.is_success());
+    assert_eq!(stolen.state(), TouchlinkTargetState::Restarted);
+
+    // Only routers start new networks.
+    let mut end_device = TouchlinkTarget::new();
+    latch(&mut end_device);
+    let mut ed_ctx = completion_target_ctx();
+    ed_ctx.is_router = false;
+    assert_eq!(
+        end_device
+            .on_network_start(&completion_start_req(), CERT_TID, &ed_ctx)
+            .unwrap_err(),
+        TouchlinkError::WrongRole
+    );
+    assert_eq!(end_device.state(), TouchlinkTargetState::Responded);
+
+    // Join kind must match the target logical type.
+    let mut mismatch = TouchlinkTarget::new();
+    latch(&mut mismatch);
+    assert_eq!(
+        mismatch
+            .on_network_join(
+                &completion_join_req(),
+                CERT_TID,
+                JoinKind::Router,
+                false,
+                &completion_target_ctx(),
+            )
+            .unwrap_err(),
+        TouchlinkError::WrongRole
+    );
+    assert_eq!(mismatch.state(), TouchlinkTargetState::Responded);
+}
+
+// 22-65816-030-122-03: transaction discipline for the auxiliary
+// orders — identify and device-info accept the latched transaction
+// with no state change; reset terminates on a match.
+#[test]
+fn vector_auxiliary_order_discipline_22_65816_030_122_03() {
+    let mut target = TouchlinkTarget::new();
+    let mut air = VecTx::new();
+    let scan = TouchlinkFrame::new(CERT_TID, 0x00, &[0x05, 0x83]).unwrap();
+    target.on_scan_request(&scan);
+    target
+        .respond_full(&mut air, 15, &completion_scan_response())
+        .unwrap();
+    assert_eq!(
+        target
+            .on_identify(CERT_TID, &IdentifyRequest { duration_s: 30 })
+            .unwrap(),
+        30
+    );
+    assert_eq!(
+        target
+            .on_device_info(CERT_TID, &DeviceInfoRequest { start_index: 1 })
+            .unwrap(),
+        1
+    );
+    assert_eq!(target.state(), TouchlinkTargetState::Responded);
+    assert!(target.on_reset(CERT_TID));
+    assert_eq!(target.state(), TouchlinkTargetState::Restarted);
+}
