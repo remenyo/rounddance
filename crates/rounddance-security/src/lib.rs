@@ -42,6 +42,7 @@ pub mod cbke;
 pub mod cert;
 pub mod classical;
 pub mod ecc;
+pub mod keyupdate;
 pub mod mmo;
 pub mod mock;
 pub mod store;
@@ -59,6 +60,7 @@ pub use ecc::{
     mqv_agree, reconstruct_static, scalar_from_kdf, session_keys, EccBackend, EccError, MAC_LEN,
     MAX_KDF_OUT, POINT_LEN, SCALAR_LEN,
 };
+pub use keyupdate::{derive_update_key, derive_update_mask, install_link_key, UPDATE_LABEL};
 pub use mmo::{mmo_hash_128, MmoError, MMO_DIGEST_LEN, MMO_MAX_MSG_LEN};
 pub use store::{NvmStore, PersistedState, RamStore, StoreError, COUNTER_STRIDE};
 

@@ -395,3 +395,38 @@ fn vector_install_code_mmo_worked_key_22_65816_030_56_08() {
     );
     assert_eq!(mmo_hash_128(&[0u8; 32]).unwrap_err(), MmoError::TooLong);
 }
+
+// 07-5356-C41-02: MMO-derived link-key update. Mask for ieee [9;8],
+// nonce 42 is pinned (AES-MMO-128 of 55 AA || ieee || nonce LE);
+// rotation xors the old key, installs with reset counters, and a
+// repeat install of the identical key is refused.
+#[test]
+fn vector_link_key_update_07_5356_c41_02() {
+    let mask = derive_update_mask(&[9; 8], 42).unwrap();
+    assert_eq!(
+        mask,
+        [
+            0x61, 0xed, 0x53, 0xda, 0x9f, 0x04, 0xdd, 0x22, 0x76, 0x33, 0x40, 0xcd, 0x71, 0x78,
+            0xba, 0x3f
+        ]
+    );
+    let old = [0x11u8; 16];
+    let new = derive_update_key(&old, &[9; 8], 42);
+    let mut expect = [0u8; 16];
+    let mut i = 0;
+    while i < 16 {
+        expect[i] = old[i] ^ mask[i];
+        i += 1;
+    }
+    assert_eq!(new, expect);
+    assert_ne!(new, old);
+    let mut table = LinkKeyTable::<4>::new();
+    install_link_key(&mut table, [9; 8], new).unwrap();
+    let entry = table.find(&[9; 8]).unwrap();
+    assert_eq!(entry.key, new);
+    assert_eq!((entry.tx_counter, entry.rx_counter), (0, 0));
+    assert_eq!(
+        install_link_key(&mut table, [9; 8], new),
+        Err(SecError::DuplicateKey)
+    );
+}

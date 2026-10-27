@@ -5,8 +5,12 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[dependencies]
+rounddance-security = { path = "../rounddance-security" }
+
 [dev-dependencies]
 rounddance-aps = { path = "../rounddance-aps" }
 rounddance-nwk = { path = "../rounddance-nwk" }
 rounddance-mac-sap = { path = "../rounddance-mac-sap" }
+rounddance-security = { path = "../rounddance-security", features = ["host"] }
 rounddance-sim = { path = "../rounddance-sim" }

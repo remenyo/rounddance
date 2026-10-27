@@ -444,6 +444,7 @@ dependencies = [
  "rounddance-aps",
  "rounddance-mac-sap",
  "rounddance-nwk",
+ "rounddance-security",
  "rounddance-sim",
 ]
 
