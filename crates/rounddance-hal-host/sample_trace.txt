@@ -1,0 +1,35 @@
+t=0 seq=0 run=0xb0577ea1 mod=hal-host dev=0xffff note medium pair up ch=15
+t=0 seq=1 run=0xb0577ea1 mod=roles dev=0x0000 transition forming->formed
+t=0 seq=2 run=0xb0577ea1 mod=roles dev=0x0000 txn=0x0 phase=permit-open
+t=0 seq=3 run=0xb0577ea1 mod=commission dev=0x0001 transition scanning->candidate-selected
+t=0 seq=4 run=0xb0577ea1 mod=commission dev=0x0001 transition candidate->associating
+t=0 seq=5 run=0xb0577ea1 mod=commission dev=0x0001 transition key-transport->verifying
+t=0 seq=6 run=0xb0577ea1 mod=commission dev=0x0001 transition verifying->announced
+t=0 seq=7 run=0xb0577ea1 mod=commission dev=0x0001 txn=0x64 phase=announce-tx
+t=81 seq=8 run=0xb0577ea1 mod=hal-host dev=0xffff txn=0x64 phase=announce-rx
+t=81 seq=9 run=0xb0577ea1 mod=commission dev=0x0001 transition announced->joined
+t=81 seq=10 run=0xb0577ea1 mod=security dev=0x0000 txn=0x64 phase=counter-resume
+t=81 seq=11 run=0xb0577ea1 mod=zcl dev=0x0000 txn=0x64 phase=on-tx
+t=159 seq=12 run=0xb0577ea1 mod=hal-host dev=0xffff txn=0x64 phase=on-rx
+t=159 seq=13 run=0xb0577ea1 mod=zcl dev=0x0001 transition off->on
+t=159 seq=14 run=0xb0577ea1 mod=hal-host dev=0x0001 txn=0x64 phase=report-armed
+t=503 seq=15 run=0xb0577ea1 mod=hal-host dev=0x0001 txn=0x64 phase=report-fired
+t=503 seq=16 run=0xb0577ea1 mod=zcl dev=0x0001 txn=0x64 phase=report-tx
+t=587 seq=17 run=0xb0577ea1 mod=hal-host dev=0xffff txn=0x64 phase=report-rx
+t=587 seq=18 run=0xb0577ea1 mod=security dev=0x0000 txn=0x64 phase=replay-rejected
+t=0 tx handle=0 node=B len=12
+t=81 medium deliver handle=0 B->peer len=12 queued_us=81
+t=81 rx at=A len=12
+t=81 confirm handle=0 status=Delivered
+t=81 tx handle=0 node=A len=25
+t=159 medium deliver handle=0 A->peer len=25 queued_us=78
+t=159 rx at=B len=25
+t=159 confirm handle=0 status=Delivered
+t=252 medium idle
+t=337 medium idle
+t=425 medium idle
+t=503 medium idle
+t=503 tx handle=1 node=B len=29
+t=587 medium deliver handle=1 B->peer len=29 queued_us=84
+t=587 rx at=A len=29
+t=587 confirm handle=1 status=Delivered

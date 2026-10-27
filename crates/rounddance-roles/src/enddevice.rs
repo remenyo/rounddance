@@ -18,7 +18,12 @@ pub const END_DEVICE_POLL_MS: u64 = 1_000;
 
 /// Missed polls that declare the parent lost.
 ///
-/// Requirement `05-3474-23-3613-02` (MINTED-pending-confirm).
+/// Requirement `05-3474-23-3613-02` (MINTED-pending-confirm): the
+/// value 3 is the implementation default for the configurable
+/// parent-link retry threshold — the specification leaves the loss
+/// declaration scheme to the implementation, so a fixed bound here
+/// is conformant as long as it stays a provisioning-time constant
+/// (never tuned mid-transaction).
 pub const END_DEVICE_MAX_MISSED: u32 = 3;
 
 /// Failures from the end-device machine.

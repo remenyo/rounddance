@@ -384,6 +384,17 @@ version = "0.1.0"
 [[package]]
 name = "rounddance-hal-host"
 version = "0.1.0"
+dependencies = [
+ "rounddance-aps",
+ "rounddance-commission",
+ "rounddance-mac-sap",
+ "rounddance-nwk",
+ "rounddance-roles",
+ "rounddance-security",
+ "rounddance-sim",
+ "rounddance-zcl",
+ "rounddance-zdo",
+]
 
 [[package]]
 name = "rounddance-ifc"

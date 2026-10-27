@@ -4,3 +4,26 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Host HAL backends (Linux/Pi + WASM): clock, timer, entropy, persistent store, log, loopback radio"
+
+[dependencies]
+rounddance-mac-sap = { path = "../rounddance-mac-sap" }
+rounddance-sim = { path = "../rounddance-sim" }
+rounddance-nwk = { path = "../rounddance-nwk" }
+rounddance-aps = { path = "../rounddance-aps" }
+rounddance-zdo = { path = "../rounddance-zdo" }
+rounddance-security = { path = "../rounddance-security" }
+rounddance-zcl = { path = "../rounddance-zcl" }
+rounddance-commission = { path = "../rounddance-commission" }
+rounddance-roles = { path = "../rounddance-roles" }
+
+[dev-dependencies]
+rounddance-mac-sap = { path = "../rounddance-mac-sap" }
+rounddance-sim = { path = "../rounddance-sim" }
+rounddance-nwk = { path = "../rounddance-nwk" }
+rounddance-aps = { path = "../rounddance-aps" }
+rounddance-zdo = { path = "../rounddance-zdo" }
+rounddance-security = { path = "../rounddance-security" }
+rounddance-zcl = { path = "../rounddance-zcl" }
+rounddance-commission = { path = "../rounddance-commission" }
+rounddance-roles = { path = "../rounddance-roles" }
