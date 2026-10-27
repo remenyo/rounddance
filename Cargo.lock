@@ -102,6 +102,12 @@ version = "0.1.0"
 [[package]]
 name = "rounddance-zdo"
 version = "0.1.0"
+dependencies = [
+ "rounddance-aps",
+ "rounddance-mac-sap",
+ "rounddance-nwk",
+ "rounddance-sim",
+]
 
 [[package]]
 name = "serde"
