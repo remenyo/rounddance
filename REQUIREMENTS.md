@@ -328,3 +328,38 @@ Consumed inputs (implemented by earlier waves, not re-implemented):
 | 05-3474-23-3615-01 | implemented + verified | `classical.rs`: `RejoinMachine` orphan→rejoin with checks gate (anchors p0223-L5334-L5349 + p0225-L5380-L5382) | `tests/vectors.rs::vector_rejoin_checks_*` |
 | 05-3474-23-36111-01 | implemented + verified | `classical.rs`: `LeaveMachine::mgmt_leave_for` self-remove form (anchor p0266-L6285) | `tests/vectors.rs::vector_leave_forms` |
 | 05-3474-23-36113-01 | implemented + verified | `classical.rs`: `LeaveMachine::mgmt_leave_for` parent-evict form (anchor p0146-L3540) | `tests/vectors.rs::vector_leave_forms` |
+
+## Wave-11 traceability — Green Power proxy + sink (doc 14-0563-19 Green Power Basic v1.1.2)
+
+All IDs below are corpus-mined (`corpus/requirements-wave-full-corpus.md`,
+§Green Power). Anchors name the private-corpus page + line. Wording in
+code/tests is paraphrase only, never spec text (D1). No repo-minted IDs
+this wave. Bidirectional commissioning completion (replies to the GPD)
+is structures + explicit stubs — the reply path is a follow-up wave.
+
+| Requirement ID | State | Implementing code | Verifying test |
+|----------------|-------|-------------------|----------------|
+| 14-0563-19-A11-01 | implemented + verified | `frame.rs`: `GP_ENDPOINT` 0xF2 | vector sink/proxy flows address the GP endpoint |
+| 14-0563-19-A11-02 | implemented + verified | `frame.rs`: LE encode/decode throughout | every vector byte string |
+| 14-0563-19-A141-01 | implemented + verified | `frame.rs`: `FrameType`/`AppId` discriminants, reserved/foreign rejection (anchor p0041-L778-L779 + p0041-L803-L804 + p0044-L897-L900) | `vector_minimal_data_srcid_*`, `vector_reserved_frame_type_*`, `vector_foreign_app_id_*` |
+| 14-0563-19-A141-02 | implemented + verified | `frame.rs`: `ingress_check` RxAfterTx+auto-commissioning conflict (anchor p0041-L786-L787) | `vector_rx_after_tx_auto_comm_conflict_*` |
+| 14-0563-19-A141-03 | implemented + verified | `frame.rs`: direction coding, GPD-originated default (anchor p0043-L844-L846) | `vector_proxy_direction_dropped_*`, `vector_minimal_data_srcid_*` |
+| 14-0563-19-A141-04 | implemented + verified | `frame.rs`: maintenance bare shape, no ext/identity/security (anchor p0044-L886-L889) | `vector_maintenance_travels_bare_*` |
+| 14-0563-19-A152-01 | implemented + verified | `proxy.rs`: `GpTxQueue` one pending per GPD + bounded lifetime, `MIN_BASIC_TX_QUEUE`/`MIN_FULL_TX_QUEUE` (anchor p0046-L960-L972) | `vector_tx_queue_single_per_gpd_*` |
+| 14-0563-19-A152-02 | implemented + verified | `proxy.rs`: `TX_OFFSET_MS` 20 / `TX_OFFSET_MAX_MS` 25 / `TX_DURATION_MS` 10 (anchor p0046-L974-L990) | code inspection (tick-clocked queue honors the window) |
+| 14-0563-19-A152-03 | implemented + verified | `frame.rs`: `ingress_check` level gating + commissioning-range drops (anchor p0047-L1019-L1023 + p0160-L4322-L4323) | `vector_reserved_security_level_*`, `vector_unsecured_commissioning_*`, `vector_maintenance_commissioning_range_*` |
+| 14-0563-19-A153-01 | implemented + verified | `security.rs`: `GpNonce` address/counter/control construction, `GpKeyType` wire mapping (anchor p0048-L1063-L1068 + p0049-L1081-L1109) | `vector_nonce_construction_*`, `vector_key_type_wire_bits_*` |
+| 14-0563-19-A162-01 | implemented + verified | `frame.rs`: `GpdId::check` reserved-identity rejection (anchor p0065-L1772-L1780) | `vector_reserved_srcid_*` |
+| 14-0563-19-A163-01 | accounted-for, N-A at this layer | GPD-side receive capability is GPD-firmware-owned; infra side records the triggering `rx_after_tx` in notifications | `vector_rx_after_tx_request_passes_*` (flag survives to the sink) |
+| 14-0563-19-A34-01 | implemented + verified | `proxy.rs`: `Blocklist` (≥10), `BASIC_PROXY_FUNCTIONALITY` fixed subset (anchor p0150-L4020 + p0151-L4030-L4033) | `vector_blocklist_capacity_*` |
+| 14-0563-19-A34-02 | implemented + verified | `proxy.rs`: `ProxyTable::read_page` complete-entries-only pagination (anchor p0155-L4147-L4168) | `vector_proxy_table_read_pages_*` |
+| 14-0563-19-A36-01 | implemented + verified | `proxy.rs`: alias/sink mapping fields on `ProxyTableEntry` (anchor p0158-L4222-L4230) | `vector_proxy_passing_frame_notifies_*` (alias carried on the notification) |
+| 14-0563-19-A36-02 | implemented + verified | `proxy.rs`: `upsert`/`pair_remove` endpoint-scoped lifecycle (anchor p0158-L4246-L4270 + p0159-L4268-L4270) | `vector_proxy_pairing_lifecycle_*` |
+| 14-0563-19-A36-03 | implemented + verified | `proxy.rs`: `ProxyCommissioning` commanded/windowed/pairing-sensitive mode (anchor p0158-L4231-L4239 + p0168-L4613-L4622) | `vector_proxy_commissioning_mode_*` |
+| 14-0563-19-A36-04 | implemented + verified | `proxy.rs`: `ProxyNotification` cleartext command, no MIC, options bits (anchor p0161-L4355-L4366) | `vector_proxy_passing_frame_notifies_*`, sim `gp_proxy_sink_forwarding_two_node` |
+| 14-0563-19-A36-05 | implemented + verified | `security.rs`: `GpReplay` strict-advance counters over `ReplayTable` (anchor p0184-L5227-L5231) | `vector_counter_monotonic_no_rollover_*`, `vector_proxy_replay_drops_fresh_advances_*` |
+| 14-0563-19-A36-06 | implemented + verified | `sink.rs`: `SinkMachine::accept` counter+level gate, group forward, translate (anchor p0181-L5121-L5143) | `vector_sink_generic_translation_*`, `vector_sink_group_forward_*`, sim forwarding leg |
+| 14-0563-19-A36-07 | implemented + verified | `sink.rs`: `TranslationTable::lookup` specific-supersedes-generic; `commissioning.rs`: `TranslationSeed` population (anchor p0191-L5377-L5384) | `vector_sink_compact_and_specific_rules_*`, `vector_uni_commissioning_populates_table_*` |
+| 14-0563-19-A36-08 | implemented + verified | `sink.rs`: compact-group/all-commands matching rules (anchor p0189-L5329-L5332) | `vector_sink_compact_and_specific_rules_*` |
+| 14-0563-19-A36-09 | implemented + verified | `sink.rs`: `VectorOption::matches` masked contact check (anchor p0192-L5419-L5434) | `vector_sink_contact_mask_match_*` |
+| 14-0563-19-A38-01 | implemented + verified | `proxy.rs`: `BasicProxy::process` table→security→notify flow (anchor p0213-Fig97) | `vector_proxy_passing_frame_notifies_*`, `vector_proxy_no_entry_drops_*`, sim `gp_proxy_sink_forwarding_two_node` + `gp_forwarding_replay_is_deterministic` |

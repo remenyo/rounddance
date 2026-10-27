@@ -371,6 +371,11 @@ dependencies = [
 [[package]]
 name = "rounddance-gp"
 version = "0.1.0"
+dependencies = [
+ "rounddance-mac-sap",
+ "rounddance-security",
+ "rounddance-sim",
+]
 
 [[package]]
 name = "rounddance-hal-esp"
@@ -414,6 +419,7 @@ version = "0.1.0"
 dependencies = [
  "rounddance-aps",
  "rounddance-commission",
+ "rounddance-gp",
  "rounddance-mac-sap",
  "rounddance-nwk",
  "rounddance-security",
