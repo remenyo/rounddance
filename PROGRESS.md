@@ -6,8 +6,9 @@
 | Frozen scope (SCOPE.md from D1–D5) | Done |
 | Standards corpus page/section coverage | In progress (parallel stream) |
 | MAC SAP trait boundary | Done (wave-2: TX/RX types, capability discovery, error taxonomy, cancel/backpressure; spec-area docs, seed coverage pending) |
-| NWK / APS / ZDO bring-up | In progress (wave-3: NWK frame codec done — header encode/decode, NLDE construction guards, spec vectors, sim transport, bounded fuzz; routing/commands/APS/ZDO not started) |
+| NWK / APS / ZDO bring-up | In progress (wave-3: NWK frame codec done; wave-4: APS frame codec + fragmentation done — APDU codec, retry/dup machines, binding/group table stubs, spec vectors, bounded fuzz, sim transport; NWK routing/commands/ZDO not started) |
 | NWK frame codec (wave-3) | Done (rounddance-nwk: Fig. 3-4/3-5 header codec + §3.2.1.1.3 NLDE guards; tests/vectors.rs 16 spec vectors, tests/roundtrip.rs 8k-case bounded fuzz, sim nwk_transport loopback + 2-node + replay) |
+| APS layer + fragmentation (wave-4) | Done (rounddance-aps: §2.2.5 data/command/ack codec + extended header, Fig 2-2 transmit planner with ASDU_TOO_LONG/PEER_CANNOT_FRAGMENT/UNKNOWN_FRAGMENT_SUPPORT mined from the PDF render, tick-clocked TxBlocks/Reassembler + RetrySession/DupRejector, binding/group table stubs with budgets; tests/vectors.rs 19 spec vectors, tests/roundtrip.rs 8k-case bounded fuzz, sim aps_transport loopback + fragmented-E2E + 2-node + replay) |
 | Security incl. SE + CBKE | Not started |
 | ZCL engine + clusters | Not started |
 | Green Power | Not started |

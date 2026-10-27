@@ -9,4 +9,5 @@ repository.workspace = true
 rounddance-mac-sap = { path = "../rounddance-mac-sap" }
 
 [dev-dependencies]
+rounddance-aps = { path = "../rounddance-aps" }
 rounddance-nwk = { path = "../rounddance-nwk" }
