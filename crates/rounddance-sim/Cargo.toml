@@ -13,5 +13,6 @@ rounddance-aps = { path = "../rounddance-aps" }
 rounddance-commission = { path = "../rounddance-commission" }
 rounddance-gp = { path = "../rounddance-gp" }
 rounddance-nwk = { path = "../rounddance-nwk" }
+rounddance-roles = { path = "../rounddance-roles" }
 rounddance-security = { path = "../rounddance-security" }
 rounddance-zdo = { path = "../rounddance-zdo" }

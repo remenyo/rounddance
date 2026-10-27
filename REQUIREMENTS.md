@@ -363,3 +363,30 @@ is structures + explicit stubs — the reply path is a follow-up wave.
 | 14-0563-19-A36-08 | implemented + verified | `sink.rs`: compact-group/all-commands matching rules (anchor p0189-L5329-L5332) | `vector_sink_compact_and_specific_rules_*` |
 | 14-0563-19-A36-09 | implemented + verified | `sink.rs`: `VectorOption::matches` masked contact check (anchor p0192-L5419-L5434) | `vector_sink_contact_mask_match_*` |
 | 14-0563-19-A38-01 | implemented + verified | `proxy.rs`: `BasicProxy::process` table→security→notify flow (anchor p0213-Fig97) | `vector_proxy_passing_frame_notifies_*`, `vector_proxy_no_entry_drops_*`, sim `gp_proxy_sink_forwarding_two_node` + `gp_forwarding_replay_is_deterministic` |
+
+## Wave-12 traceability — device roles + router/app simultaneity (doc 05-3474-23 R23.2 §3.6.1 family)
+
+All IDs below are repo-minted (`05-3474-23-<clause>-<seq>` / `-ROLES-<seq>`,
+dots stripped) with anchors to the private corpus
+(`text/zigbee-spec-r23-05-3474-23/p*.txt`, trailing spec line numbers),
+MINTED-pending-confirm like the wave-3/4/7/10 minted IDs. Wording in
+code/tests is paraphrase only, never spec text (D1).
+
+| Requirement ID | State | Implementing code | Verifying test |
+|----------------|-------|-------------------|----------------|
+| 05-3474-23-3612-01 | implemented + verified | `rounddance-roles/src/lib.rs`: `DeviceRole` four-variant enum | `tests/vectors.rs` (each role exercised), `rounddance-sim/tests/roles_network.rs` |
+| 05-3474-23-3612-02 | implemented + verified | `children.rs`: `ChildTable` bounded admit (dup/full refusal) | `coordinator_table_full_refuses_*`, fuzz `fuzz_child_table_never_panics` |
+| 05-3474-23-3612-03 | implemented + verified | `children.rs`: `heard` keepalive + `age` lapse drop | `coordinator_child_aging_*`, `tick` keepalive path |
+| 05-3474-23-3612-04 | implemented + verified | `indirect.rs`: `IndirectQueue` bounded hold + `expire` | `router_indirect_hold_and_poll_*` (hold path), tick expiry leg |
+| 05-3474-23-3612-05 | implemented + verified | `indirect.rs`: `poll_deliver` oldest-first; `router.rs::serve_poll` empty-ack path | `router_indirect_hold_and_poll_*`, sim `indirect-delivered` leg |
+| 05-3474-23-3612-06 | implemented + verified | `coordinator.rs`: `CoordinatorMachine` form/permit/admit lifecycle | `coordinator_formation_permit_admit_*` |
+| 05-3474-23-3612-07 | implemented + verified | `coordinator.rs`: `open_permit` window + `tick` close-out gating | `coordinator_formation_permit_admit_*` (permit-expiry leg) |
+| 05-3474-23-3612-08 | implemented + verified | `router.rs`: `RouterMachine` join/forward/admit/serve lifecycle | `router_join_forward_children_*`, sim roles run |
+| 05-3474-23-3612-09 | implemented + verified | `enddevice.rs`: `EndDeviceMachine` poll/acked/missed cycle | `enddevice_poll_loss_rejoin_leave_*` (poll legs) |
+| 05-3474-23-3612-10 | implemented + verified | `sleepy.rs`: `SleepyEndDeviceMachine` duty-cycle + agreed interval + sleep/wake on injected clock | `sleepy_duty_cycle_rejoin_*`, sim sleepy legs |
+| 05-3474-23-3613-01 | implemented + verified | `router.rs`: `parent_lost`/`rejoin_done` (child table survives) | `router_rejoin_and_leave_*` |
+| 05-3474-23-3613-02 | implemented + verified | `enddevice.rs`/`sleepy.rs`: 3-miss loss → rejoin (secured + trust-center paths via commission `RejoinMachine`) | `enddevice_poll_loss_rejoin_leave_*`, `sleepy_duty_cycle_rejoin_*`, sim `sleepy-rejoined` leg |
+| 05-3474-23-3613-03 | implemented + verified | `enddevice.rs`/`sleepy.rs`: `rejoin_done` optional new-parent adoption | `enddevice_poll_loss_rejoin_leave_*` (0x0002 adoption), sim rejoin-through-router leg |
+| 05-3474-23-3616-01 | implemented + verified | `children.rs::remove`, `coordinator.rs`/`router.rs::remove_child`, `enddevice.rs::leave`, `sleepy.rs::leave` | `router_rejoin_and_leave_*`, `enddevice_poll_loss_rejoin_leave_*`, `sleepy_duty_cycle_rejoin_*` (leave legs) |
+| 05-3474-23-2325-ROLES-01 | implemented + verified | `endpoint.rs`: `AppEndpoint` host interface + role-agnostic `EndpointTable` | `endpoint_attach_rejects_bad_ids_*`, sim thermostat registration |
+| 05-3474-23-2325-ROLES-02 | implemented + verified | `endpoint.rs`: `RouterApp` route/app fairness pair, per-tick budgets `MAX_ROUTE_PER_TICK`/`MAX_APP_PER_TICK` | `router_serves_own_endpoint_while_forwarding_*`, `fairness_budgets_hold_under_flood_*`, sim `tick1 fwd=1 app=1` leg |
