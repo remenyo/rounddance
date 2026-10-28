@@ -29,6 +29,14 @@
 //! Requirement IDs `07-5123-08-832-01..04` corpus-mined and reused;
 //! `07-5123-08-831-01`, `07-5123-08-833-01/02`,
 //! `07-5123-08-834-01` repo-minted, MINTED-pending-confirm.
+//!
+//! Inference label (`07-5123-08-834-01`): the corpus names the
+//! Emergency/Fire/Panic commands and lists the Alarm Status values,
+//! but states no effect sentence linking receipt to a panel/alarm
+//! transition — the Alarm Status table corroborates the mapping only.
+//! Raising panel to in-alarm with the matching alarm value on receipt
+//! is therefore implementation inference, marked as such wherever the
+//! requirement is cited.
 
 use crate::attrs::{AttrDef, AttrStore, ATTR_CLUSTER_REVISION};
 use crate::behavior::{AppEvent, Behavior, Ctx, EventQueue, HandleOutcome};
@@ -819,7 +827,8 @@ impl ServerBehavior {
     /// Application-side zone-status fan-out: records the zone's
     /// new status and emits the Zone Status Changed command.
     ///
-    /// Requirement `07-5123-08-834-01` (MINTED-pending-confirm).
+    /// Requirement `07-5123-08-834-01` (MINTED-pending-confirm,
+    /// implementation inference — see module docs).
     pub fn report_zone_status(
         &mut self,
         events: &mut EventQueue,
@@ -905,6 +914,11 @@ impl Behavior for ServerBehavior {
                     .map_err(|_| ZclStatus::InsufficientSpace)?;
                 Ok(HandleOutcome::no_reply())
             }
+            // `07-5123-08-834-01` implementation inference (see module
+            // docs): the corpus names these commands and lists the
+            // Alarm Status values but states no effect sentence, so
+            // raising panel to in-alarm with the matching alarm value
+            // is our inferred mapping, corroborated by Alarm Status only.
             CMD_EMERGENCY | CMD_FIRE | CMD_PANIC => {
                 if !payload.is_empty() {
                     return Err(ZclStatus::MalformedCommand);
@@ -1025,7 +1039,8 @@ impl Behavior for ServerBehavior {
 /// a panel-status-changed emission. Arming states re-emit every
 /// tick while counting down.
 ///
-/// Requirement `07-5123-08-834-01` (MINTED-pending-confirm).
+/// Requirement `07-5123-08-834-01` (MINTED-pending-confirm,
+/// implementation inference — see module docs).
 pub fn tick_1s(behavior: &mut ServerBehavior, events: &mut EventQueue, tsn: u8, elapsed_s: u8) {
     if behavior.panel != PANEL_EXIT_DELAY && behavior.panel != PANEL_ENTRY_DELAY {
         return;

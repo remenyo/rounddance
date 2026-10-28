@@ -1032,6 +1032,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "rounddance-compat"
+version = "0.1.0"
+dependencies = [
+ "rounddance-aps",
+ "rounddance-commission",
+ "rounddance-gp",
+ "rounddance-nwk",
+ "rounddance-security",
+ "rounddance-zcl",
+]
+
+[[package]]
 name = "rounddance-direct"
 version = "0.1.0"
 dependencies = [
@@ -1131,6 +1143,7 @@ version = "0.1.0"
 dependencies = [
  "rounddance-aps",
  "rounddance-commission",
+ "rounddance-compat",
  "rounddance-direct",
  "rounddance-gp",
  "rounddance-mac-sap",

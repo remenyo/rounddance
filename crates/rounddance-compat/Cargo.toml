@@ -1,0 +1,16 @@
+[package]
+name = "rounddance-compat"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+rounddance-aps = { path = "../rounddance-aps" }
+rounddance-commission = { path = "../rounddance-commission" }
+rounddance-gp = { path = "../rounddance-gp" }
+rounddance-nwk = { path = "../rounddance-nwk" }
+rounddance-security = { path = "../rounddance-security" }
+rounddance-zcl = { path = "../rounddance-zcl" }

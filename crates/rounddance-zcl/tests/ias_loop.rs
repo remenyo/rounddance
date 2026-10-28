@@ -8,7 +8,7 @@
 //! (zone CIE gating + handshake), `07-5123-08-832-01/03/04`
 //! (arm verdicts, mask query, panel fan-out + disarm reset),
 //! `07-5123-08-833-01/02`, `07-5123-08-834-01` (codecs +
-//! emitters), `07-5123-08-841-01`, `07-5123-08-842-01/03`
+//! emitters; 834-01 is implementation inference — see `ace.rs`), `07-5123-08-841-01`, `07-5123-08-842-01/03`
 //! (warning codec, preemption, duty quantization),
 //! `SCOPE.md` §8 (decision determinism).
 

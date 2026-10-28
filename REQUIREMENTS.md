@@ -613,7 +613,7 @@ expanded-point profile stays the wire form).
 | 07-5123-08-831-01 | implemented + verified | `ace.rs`: cluster id 0x0501 + revision + received/generated tables + store (anchor p0536-L12218-L12221) | `tests/ias_vectors.rs::vector_ace_store_shape_*`, `roundtrip.rs` definition contract |
 | 07-5123-08-833-01 | implemented + verified | `ace.rs`: Arm + Bypass received codecs (mode/code/zone-id + count/ids/code shapes; anchors p0537-L12224-L12225 + p0538-L12253-L12255) | `tests/ias_vectors.rs::vector_arm_codec_*`, `vector_bypass_results_*`, `roundtrip.rs::fuzz_ias_codec_roundtrip` |
 | 07-5123-08-833-02 | implemented + verified | `ace.rs`: query codecs (zone-status/info/map/panel/bypassed-list) + response emitters (map/info/status/panel/bypass-list/bypass-response shapes; anchors p0539-L12273-L12282 + p0541-L12344-L12353 + p0542-L12359-L12365 + p0546-L12441-L12481 + p0548-L12489-L12496) | `tests/ias_vectors.rs::vector_zone_info_answers_*`, `vector_zone_id_map_*`, `vector_ace_client_frames_*` |
-| 07-5123-08-834-01 | implemented + verified | `ace.rs`: emergency/fire/panic → in-alarm panel, delay `start_delay` + `tick_1s` countdown with per-second fan-out, `report_zone_status` fan-out (anchors p0538-L12264-L12265 + p0543-L12378-L12393 + p0544-L12409-L12435) | `tests/ias_vectors.rs::vector_panic_raises_alarm_*`, `vector_panel_delay_tick_*`, `vector_zone_status_fanout_*`, sim `ias_loop.rs` trip leg |
+| 07-5123-08-834-01 | implemented + verified (implementation inference — see `ace.rs` module docs) | `ace.rs`: emergency/fire/panic → in-alarm panel, delay `start_delay` + `tick_1s` countdown with per-second fan-out, `report_zone_status` fan-out (anchors p0538-L12264-L12265 + p0543-L12378-L12393 + p0544-L12409-L12435). Inference: the corpus names these commands and lists the Alarm Status values but states no effect sentence linking receipt to a panel/alarm transition — Alarm Status corroborates only | `tests/ias_vectors.rs::vector_panic_raises_alarm_*`, `vector_panel_delay_tick_*`, `vector_zone_status_fanout_*`, sim `ias_loop.rs` trip leg |
 | 07-5123-08-842-01 | implemented + verified | `wd.rs`: new starts preempt the live warning, stop/stop silences, durations tick out, MaxDuration clamp (anchors p0551-L12540-L12541 + p0550-L12531-L12532) | `tests/ias_vectors.rs::vector_warning_preemption_*`, `vector_warning_duration_cap_*`, sim `ias_loop.rs` warn/preempt/expiry legs |
 | 07-5123-08-842-02 | implemented + verified | `wd.rs::SIREN_LEVELS`/`STROBE_LEVELS` non-empty supported sets (anchors p0552-L12558-L12559 + p0552-L12573-L12574) | `tests/ias_vectors.rs::vector_wd_store_shape_*` |
 | 07-5123-08-842-03 | implemented + verified | `wd.rs::quantize_duty`: out-of-step values round to the nearest valid step over a one-second ON-first cycle (anchors p0552-L12564-L12570) | `tests/ias_vectors.rs::vector_duty_quantize_*` |
@@ -643,3 +643,34 @@ command, never the standard transport-key command).
 | 05-3474-23-4312-01 | implemented + verified (extended) | counter-less frames take no replay slot — enforced by the `Plaintext` shape (carries no counter to check; §4.3.1.2, anchor p0422-L10156-L10164) | type shape (nothing to feed `ReplayTable::check`); sim replay decodes the same capture twice with no replay state |
 | 22-65816-030-91-02 | implemented + verified (extended) | `JoinerMachine::note_unsecured` counts/classifies vendor frames with no transition and no key latch (command-id-only signature); `UNSECURED_VENDOR_CMD` names the observed id (anchors p0061-L1307-L1334) | commission `tests/vectors.rs::vector_join_tolerates_unsecured_then_no_transport`, `vector_join_unsecured_keywait_leg_and_edges`, sim `join_unsecured_tc.rs` |
 | 22-65816-030-56-04 | implemented + verified (extended) | `JoinError::NoTransport` names the transport-missing outcome (TC talked but never delivered keys vs never admitted); existing tick/window behavior unchanged (anchors p0032-L525-L561) | `vector_join_*_no_transport` legs, sim `unsecured_tc_challenge_then_no_transport` |
+
+## Wave-24 traceability — 3.0-compat proof + inference labeling (`rounddance-compat`)
+
+Corpus IDs below are reused verbatim (extended with 3.0-compat
+coverage); `RD-COMPAT-*` rows are repo-minted, MINTED-pending-confirm.
+Wording in code/tests is paraphrase only, never spec text (D1).
+
+The audit result: the 3.0 profile and the R23.2 core share the NWK
+protocol-version value (`2`), the GP version (`3`), the APS codec
+(no version field), the security-level numbering with level 5 as the
+transmitted baseline, the preconfigured/install-code key paths, and
+the ZCL frame shape (reserved bits ignored on receipt). The compat
+crate owns the admission/negotiation gates so no join path can skip
+them; downgrade policy is never-silent (refusal is typed, see
+`negotiate::CompatError`).
+
+| Requirement ID | State | Implementing code | Verifying test |
+|----------------|-------|-------------------|----------------|
+| 05-3474-23-331-02 | implemented + verified (extended: 3.0 compat) | `compat::negotiate::admit_nwk_version` admits only the shared value 2; steering gate pairs `min_version: 2` with the compat refusal so unknown versions never reach the join machine (Fig. 3-5) | `compat/tests/vectors.rs::vector_nwk_30_data_header_wire`, `vector_nwk_unknown_version_refused`, sim `compat_30_join.rs::compat_unknown_nwk_version_never_joins` |
+| 05-3474-23-22511-16 | implemented + verified (extended: 3.0 compat) | 3.0 APS unicast data shape decodes through the unchanged codec (Fig. 2-7) | `compat/tests/vectors.rs::vector_aps_30_data_shape_wire`, sim secured-toggle APS leg |
+| 05-3474-23-451-01 | implemented + verified (extended: 3.0 compat) | baseline level-5 aux shape both profiles transmit; `agree_security_level` refuses anything under the floor instead of downgrading (§4.5.1) | `compat/tests/vectors.rs::vector_aux_30_baseline_level_wire`, `vector_aux_level_below_floor_refused`, sim replay-refusal leg |
+| 05-3474-23-4312-01 | implemented + verified (extended: 3.0 compat) | captured 3.0-profile secured frame replayed by an attacker fails `ReplayTable::check` (§4.3.1.2) | sim `compat_30_join.rs::compat_30_join_and_secured_toggle` (replay leg) |
+| 22-65816-030-91-02 | implemented + verified (extended: 3.0 compat) | 3.0-profile joiner completes the symmetric exchange over the MMO-derived install-code key (no mock KDF on this path) | sim `compat_30_join.rs::compat_30_join_and_secured_toggle` |
+| 22-65816-030-56-03 | implemented + verified (extended: 3.0 compat) | install-code key via `MmoJoinKdf` (real derivation, what a 3.0 device computes) | sim join leg + `compat_30_replays_deterministically` |
+| 07-5123-08-241-01 | implemented + verified (extended: 3.0 compat) | 3.0 Toggle shape decodes through the unchanged ZCL codec and applies on a live server via `dispatch` | `compat/tests/vectors.rs::vector_zcl_30_toggle_wire`, sim toggle-applies leg |
+| 07-5123-08-231-02 | implemented + verified (extended: 3.0 compat) | ZCL reserved bits need no negotiation (zeroed on transmit, ignored on receipt, both sides) | `compat::negotiate::zcl_reserved_bits_need_no_negotiation`, vector `vector_zcl_30_toggle_wire` |
+| 14-0563-19-A141-01 | implemented + verified (extended: 3.0 compat) | GP version gate mirrored in `admit_gp_version` (shared value 3) | `compat/tests/vectors.rs::vector_gp_version_gate` |
+| RD-COMPAT-01 | implemented + verified | `negotiate::select_key_method`: negotiation preferred, install-code before preconfigured fallback, refusal under the strict posture | `compat/tests/vectors.rs::vector_key_method_selection`, sim `compat_strict_posture_refuses_30_peer` |
+| RD-COMPAT-02 | implemented + verified | `negotiate::admit_30_peer`: full 3.0 admission (version + method + level) in one call | `compat/tests/vectors.rs::vector_admit_30_peer_bundle` |
+| RD-COMPAT-03 | implemented + verified | `negotiate::highest_common_key_index`: bounded highest-common key-transport index | `compat/tests/vectors.rs::vector_highest_common_key_index` |
+| RD-COMPAT-04 | implemented + verified | forward-compat corners: touchlink sub-device versions carried verbatim, higher ClusterRevisions tolerated | `compat/tests/vectors.rs::vector_forward_compat_corners` |

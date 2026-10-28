@@ -569,7 +569,7 @@ fn vector_zone_id_map_07_5123_08_833_02() {
     assert!(out[0].3[2..32].iter().all(|b| *b == 0));
 }
 
-// 07-5123-08-834-01: emergency/fire/panic raise panel alarm.
+// 07-5123-08-834-01 (implementation inference): emergency/fire/panic raise panel alarm.
 #[test]
 fn vector_panic_raises_alarm_07_5123_08_834_01() {
     let (mut beh, mut store, mut eng, mut events) = ace_harness();
@@ -609,7 +609,7 @@ fn vector_panic_raises_alarm_07_5123_08_834_01() {
     );
 }
 
-// 07-5123-08-834-01: panel-status query + delay countdown.
+// 07-5123-08-834-01 (implementation inference): panel-status query + delay countdown.
 #[test]
 fn vector_panel_delay_tick_07_5123_08_834_01() {
     let (mut beh, mut store, mut eng, mut events) = ace_harness();
@@ -652,7 +652,7 @@ fn vector_panel_delay_tick_07_5123_08_834_01() {
     );
 }
 
-// 07-5123-08-834-01: zone-status fan-out carries id + status + label.
+// 07-5123-08-834-01 (implementation inference): zone-status fan-out carries id + status + label.
 #[test]
 fn vector_zone_status_fanout_07_5123_08_834_01() {
     let (mut beh, mut _store, mut _eng, mut events) = ace_harness();
