@@ -76,6 +76,15 @@ fn fuzz_se_codecs_reject_without_panic() {
         let _ = price::decode_publish_tier_labels(slice, &mut slots);
         let _ = keyest::decode_initiate(slice);
         let _ = keyest::decode_terminate(slice);
+        // Mirror + snapshot decoders never panic on any input.
+        let _ = mirror::decode_mirror_endpoint(slice);
+        let _ = mirror::decode_empty_setup(slice);
+        let mut rep = mirror::MirrorReport::new(0);
+        let _ = mirror::decode_mirror_report(slice, &mut rep);
+        let _ = snapshot::decode_take_snapshot(slice);
+        let _ = snapshot::decode_take_snapshot_response(slice);
+        let _ = snapshot::decode_get_snapshot(slice);
+        let _ = snapshot::decode_publish_snapshot(slice);
         let _ = price::display_parts(fz.next() as u32, fz.next() as u8);
         i += 1;
     }
@@ -207,6 +216,86 @@ fn fuzz_block_codecs_stay_bounded() {
         }
         let _ = price::threshold_count_for_tariff(fz.next() & 1 == 0, fz.next() as u8);
         let _ = price::scaled_threshold(fz.next(), fz.next(), fz.next());
+        i += 1;
+    }
+}
+
+// Mirror table + snapshot store never panic; tables stay bounded,
+// grants stay idempotent, encodes round-trip.
+#[test]
+fn fuzz_mirror_snapshot_stay_bounded() {
+    let mut fz = Fuzz(0x5EED_1044);
+    let mut table = mirror::MirrorTable::new();
+    let mut store = snapshot::SnapshotStore::new();
+    let mut sub = [0u8; snapshot::MAX_SNAPSHOT_SUB];
+    let mut i = 0;
+    while i < CASES {
+        let meter = fz.next();
+        let ep = table.request(meter);
+        assert!(table.len() <= mirror::MAX_MIRRORS);
+        if ep != mirror::ENDPOINT_REFUSED {
+            assert!(mirror::endpoint_is_grantable(ep));
+            assert_eq!(table.endpoint_for(meter), Some(ep));
+            assert!(table.may_push(ep, meter).is_ok());
+            assert_eq!(
+                table.may_push(ep, meter.wrapping_add(1)),
+                Err(ZclStatus::NotAuthorized)
+            );
+            // Idempotent re-request keeps the same endpoint.
+            assert_eq!(table.request(meter), ep);
+            // Release by owner or ESI; strangers are refused.
+            if fz.next() & 1 == 0 {
+                if fz.next() & 1 == 0 {
+                    assert_eq!(
+                        table.remove(ep, mirror::ReleaseRequester::Meter(meter)),
+                        Ok(ep)
+                    );
+                    assert_eq!(table.endpoint_for(meter), None);
+                } else {
+                    assert_eq!(table.remove(ep, mirror::ReleaseRequester::Esi), Ok(ep));
+                }
+            } else {
+                assert_eq!(
+                    table.remove(ep, mirror::ReleaseRequester::Meter(meter.wrapping_add(1))),
+                    Err(ZclStatus::NotAuthorized)
+                );
+            }
+        } else {
+            assert!(!table.has_capacity());
+        }
+        // Snapshot takes over random causes/subs; queries stay sound.
+        fz.fill(&mut sub);
+        let sub_len = fz.below((snapshot::MAX_SNAPSHOT_SUB + 1) as u64) as usize;
+        let cause = fz.next() as u32;
+        let (id, conf) = store.take(fz.next() as u32, cause, fz.next() as u8, &sub[..sub_len]);
+        assert!(store.len() <= snapshot::MAX_SNAPSHOTS);
+        if conf == snapshot::CONFIRM_ACCEPTED {
+            if let Ok(got) = store.query(0, 0xFFFF_FFFF, 0, snapshot::CAUSE_ALL) {
+                assert!(got.id <= id);
+                // Encode-then-decode of a publish round-trips.
+                let hdr = snapshot::PublishSnapshot {
+                    snapshot_id: got.id,
+                    snapshot_time: got.time,
+                    total_found: 1,
+                    command_index: 0,
+                    total_commands: 1,
+                    cause: got.cause,
+                    payload_type: got.payload_type,
+                };
+                let mut wire = [0u8; 64];
+                let n =
+                    snapshot::encode_publish_snapshot(&hdr, got.sub_payload(), &mut wire).unwrap();
+                let back = snapshot::decode_publish_snapshot(&wire[..n]).unwrap();
+                assert_eq!(back.header, hdr);
+                assert_eq!(back.sub_payload(), got.sub_payload());
+            }
+        } else {
+            assert_eq!(conf, snapshot::CONFIRM_CAUSE_NOT_SUPPORTED);
+        }
+        // Meter-side record absorbs any response shape.
+        let mut client = mirror::MirrorClient::new();
+        let _ = client.on_response(fz.next() as u16);
+        client.on_removed(fz.next() as u16);
         i += 1;
     }
 }

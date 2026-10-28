@@ -712,3 +712,32 @@ against `MockDriver`.
 | RD-APP-C6-06 | implemented + verified | Error taxonomy `AppError` (BadRole/BadState/BadFrame/Replay/WrongCluster/BadStatus, no key material) | replay test (`AppError::Replay` on both legs) |
 | RD-APP-C6-07 | implemented + verified | End-to-end proof shape: two `EspAdapter<MockDriver>` with mock-to-mock air shuttling + `Delivered` confirms | all 4 `c6_standalone.rs` tests, incl. determinism pin |
 | RD-APP-C6-08 | implemented + verified | ESP-target build of the app (`no_std`, no `unsafe`, new deps all no_std) | `cargo check -p rounddance-hal-esp --features esp --target riscv32imac-esp-espidf -Z build-std=std,panic_abort` PASS (this wave) |
+
+## Wave-26 traceability — metering mirrors + snapshots (`rounddance-zcl`)
+
+Corpus IDs below are reused verbatim (`07-5123-08-104-01`,
+`17-05019-012-422-02`, `17-05019-012-423-01/02`); the rest are
+repo-minted (`07-5123-08-1044-*` mirror, `07-5123-08-1045-*`
+snapshot, dots stripped), MINTED-pending-confirm. Wording in
+code/tests is paraphrase only, never spec text (D1). Deferred with
+cause: schedule/sampling/supply commands (ScheduleSnapshot,
+StartSampling family, ChangeSupply family) — command shapes only,
+no behavior; and the TOU/block sub-payload typed builders cover the
+common delivered/received sets while rarer payload shapes travel as
+bounded opaque bytes.
+
+| Requirement ID | State | Implementing code | Verifying test |
+|----------------|-------|-------------------|----------------|
+| 07-5123-08-104-01 | implemented + verified | `mirror.rs::MirrorClient` keeps the meter-side grant record distinct from the ESI-side `MirrorTable` (mirrored-metering vs metering device types live on different ends, never merged) | `tests/se_mirror_vectors.rs::vector_meter_grant_intake_*` + sim `se_mirror_loop.rs` end-to-end |
+| 17-05019-012-422-02 | implemented + verified | `mirror.rs` direction model: physical meter hosts the server, ESI hosts client + one mirror server endpoint per granted meter | `tests/se_mirror_loop.rs::se_mirror_loop_end_to_end` (request → grant → push → release) |
+| 17-05019-012-423-01 | implemented + verified | `mirror.rs::MirrorTable::may_push` (only the granted meter pushes; violations `NOT_AUTHORIZED`, unknown endpoints `NOT_FOUND`) + `has_capacity` (capacity advertisement) + `AttrReadiness::classify` (unsupported → `UNSUPPORTED_ATTRIBUTE`, supported-but-empty → `NOT_FOUND` mapping, corpus term `ATTRIBUTE_UNAVAILABLE` noted) | `tests/se_mirror_vectors.rs::vector_mirror_push_gate_*`, `vector_mirror_readiness_*` |
+| 17-05019-012-423-02 | implemented + verified | `snapshot.rs::SnapshotStore::query` (single matching snapshot by offset in take order, time window `[earliest, latest)`, cause-overlap filter, `CAUSE_ALL` wildcard; miss → `NOT_FOUND`) | `tests/se_mirror_vectors.rs::vector_meter_get_snapshot_*`, `vector_snapshot_store_take_query_*`, sim `se_mirror_loop.rs` retrieve leg |
+| 07-5123-08-1044-01 | implemented + verified | `mirror.rs` empty `RequestMirror`/`RemoveMirror` codecs + `metering::ServerBehavior::request_mirror`/`remove_mirror` outbound emitters | `tests/se_mirror_vectors.rs::vector_empty_setup_codec_*`, `vector_meter_setup_outbound_*` |
+| 07-5123-08-1044-02 | implemented + verified | `mirror.rs` 2-octet LE `RequestMirrorResponse`/`MirrorRemoved` codecs (incl. `0xFFFF` refusal + grantable-range gate) + `MirrorClient::on_response`/`on_removed` | `tests/se_mirror_vectors.rs::vector_mirror_endpoint_codec_*`, `vector_mirror_client_record_*`, `vector_meter_grant_intake_*` |
+| 07-5123-08-1044-03 | implemented + verified | `mirror.rs::MirrorReport` (scheme + ≤8 flag words) codec + `MirrorClient::on_report` intake | `tests/se_mirror_vectors.rs::vector_mirror_report_codec_*`, `vector_mirror_client_report_*`, `vector_meter_report_intake_*` |
+| 07-5123-08-1044-04 | implemented + verified | `mirror.rs::endpoint_is_grantable` (`0x0001..=0x00F0` grantable, `0xFFFF` refusal, rest reserved) | `tests/se_mirror_vectors.rs::vector_mirror_endpoint_codec_*` |
+| 07-5123-08-1044-05 | implemented + verified | `mirror.rs::MirrorTable` (4-entry bounded ring, idempotent re-request, full → `0xFFFF` refusal, release only by granted meter or ESI) | `tests/se_mirror_vectors.rs::vector_mirror_table_grants_*`, `vector_mirror_table_remove_*`, `se_roundtrip.rs::fuzz_mirror_snapshot_stay_bounded` |
+| 07-5123-08-1045-01 | implemented + verified | `snapshot.rs` TakeSnapshot/TakeSnapshotResponse codecs + `metering::ServerBehavior` take leg (manual bit folded in, live-summation sub-payload, tariff-change pair takes, unsupported-cause refusal without storing) | `tests/se_mirror_vectors.rs::vector_take_snapshot_codec_*`, `vector_meter_take_snapshot_*`, `vector_meter_take_unsupported_*` |
+| 07-5123-08-1045-02 | implemented + verified | `snapshot.rs` GetSnapshot codec + PublishSnapshot header codec (16 octets) + bounded sub-payload carrier (≤48) + typed TOU builder (≤4 tiers) | `tests/se_mirror_vectors.rs::vector_get_snapshot_codec_*`, `vector_publish_snapshot_codec_*`, `vector_tou_sub_payload_*` |
+| 07-5123-08-1045-03 | implemented + verified | `snapshot.rs` cause bits (tariff-change 3, manual 10, scheduled 16, `SUPPORTED_CAUSES` mask) + `SnapshotStore::take_pair` (before/after pair around tariff changes) | `tests/se_mirror_vectors.rs::vector_snapshot_take_pair_*` |
+| 07-5123-08-1045-04 | implemented + verified | `snapshot.rs::SnapshotStore` (8-entry ring, consecutive ids, oldest evicted when full, `match_count` for `total_found`) | `tests/se_mirror_vectors.rs::vector_snapshot_store_take_query_*`, `se_roundtrip.rs::fuzz_mirror_snapshot_stay_bounded` |

@@ -11,15 +11,19 @@
 //! All wording here is paraphrase (D1).
 //!
 //! Requirement IDs below are repo-minted (`07-5123-08-<clause>-<seq>`,
-//! dots stripped), MINTED-pending-confirm. Mirror/snapshot commands
-//! (`RequestMirror`, `MirrorRemoved`, `GetSnapshot` family) are
-//! explicitly out of this MVP slice — follow-up work, not silent
-//! scope.
+//! dots stripped), MINTED-pending-confirm, except the corpus-reused
+//! mirror/snapshot rows named in `mirror.rs` / `snapshot.rs`. The
+//! mirror-table state, the mirror setup commands, and the
+//! take/get-snapshot commands live in those modules; this file wires
+//! them into the server behavior. Schedule/sampling/supply commands
+//! stay explicitly follow-up, not silent scope.
 
 use crate::attrs::{access, AttrDef, AttrStore, ATTR_CLUSTER_REVISION};
 use crate::behavior::{AppEvent, Behavior, Ctx, HandleOutcome};
 use crate::cluster::{ClusterDef, ClusterRole, CmdDef};
 use crate::frame::Header;
+use crate::mirror::{self, MirrorClient};
+use crate::snapshot::{self, SnapshotStore};
 use crate::types::{DataType, Value};
 use crate::{Error, ZclStatus};
 
@@ -161,27 +165,67 @@ pub static SERVER_ATTRS: &[AttrDef] = &[
     },
 ];
 
-/// Server received commands, ascending.
+/// Server received commands, ascending: the client-driven reads
+/// plus the ESI-side answers (`RequestMirrorResponse`,
+/// `MirrorRemoved`) and notification flags, which the meter's
+/// server receives from the ESI client.
 pub static SERVER_RX: &[CmdDef] = &[
     CmdDef {
         id: CMD_GET_PROFILE,
         name: "get-profile",
     },
     CmdDef {
+        id: mirror::CMD_REQUEST_MIRROR_RESPONSE,
+        name: "request-mirror-response",
+    },
+    CmdDef {
+        id: mirror::CMD_MIRROR_REMOVED,
+        name: "mirror-removed",
+    },
+    CmdDef {
         id: CMD_REQUEST_FAST_POLL,
         name: "request-fast-poll",
     },
+    CmdDef {
+        id: snapshot::CMD_TAKE_SNAPSHOT,
+        name: "take-snapshot",
+    },
+    CmdDef {
+        id: snapshot::CMD_GET_SNAPSHOT,
+        name: "get-snapshot",
+    },
+    CmdDef {
+        id: mirror::CMD_MIRROR_REPORT_ATTR_RESPONSE,
+        name: "mirror-report-attribute-response",
+    },
 ];
 
-/// Server generated commands, ascending.
+/// Server generated commands, ascending: the meter's answers plus
+/// the mirror-setup requests the meter's server sends toward the ESI.
 pub static SERVER_TX: &[CmdDef] = &[
     CmdDef {
         id: CMD_GET_PROFILE_RESPONSE,
         name: "get-profile-response",
     },
     CmdDef {
+        id: mirror::CMD_REQUEST_MIRROR,
+        name: "request-mirror",
+    },
+    CmdDef {
+        id: mirror::CMD_REMOVE_MIRROR,
+        name: "remove-mirror",
+    },
+    CmdDef {
         id: CMD_FAST_POLL_RESPONSE,
         name: "fast-poll-response",
+    },
+    CmdDef {
+        id: snapshot::CMD_TAKE_SNAPSHOT_RESPONSE,
+        name: "take-snapshot-response",
+    },
+    CmdDef {
+        id: snapshot::CMD_PUBLISH_SNAPSHOT,
+        name: "publish-snapshot",
     },
 ];
 
@@ -440,11 +484,13 @@ impl ProfileBuffer {
     }
 }
 
-/// Server behavior: reading updates plus GetProfile / fast-poll
-/// command handling.
+/// Server behavior: reading updates plus GetProfile / fast-poll /
+/// mirror-setup / snapshot command handling.
 pub struct ServerBehavior {
     profile: ProfileBuffer,
     fast_poll_until_s: u64,
+    mirror: MirrorClient,
+    snapshots: SnapshotStore,
 }
 
 impl Default for ServerBehavior {
@@ -454,12 +500,15 @@ impl Default for ServerBehavior {
 }
 
 impl ServerBehavior {
-    /// Fresh behavior: empty profile, no fast poll.
+    /// Fresh behavior: empty profile, no fast poll, no mirror
+    /// grant, no snapshots.
     #[must_use]
     pub const fn new() -> Self {
         Self {
             profile: ProfileBuffer::new(),
             fast_poll_until_s: 0,
+            mirror: MirrorClient::new(),
+            snapshots: SnapshotStore::new(),
         }
     }
 
@@ -471,6 +520,57 @@ impl ServerBehavior {
     /// Mutable profile backlog.
     pub fn profile_mut(&mut self) -> &mut ProfileBuffer {
         &mut self.profile
+    }
+
+    /// Borrow the meter-side mirror record (granted endpoint plus
+    /// latest waiting-command flags).
+    pub const fn mirror_client(&self) -> &MirrorClient {
+        &self.mirror
+    }
+
+    /// Mutable meter-side mirror record.
+    pub fn mirror_client_mut(&mut self) -> &mut MirrorClient {
+        &mut self.mirror
+    }
+
+    /// Borrow the snapshot store.
+    pub const fn snapshots(&self) -> &SnapshotStore {
+        &self.snapshots
+    }
+
+    /// Mutable snapshot store (tests/sim pre-load snapshots).
+    pub fn snapshots_mut(&mut self) -> &mut SnapshotStore {
+        &mut self.snapshots
+    }
+
+    /// Queue an outbound `RequestMirror` (empty body) for the
+    /// application to send toward the ESI.
+    ///
+    /// Requirement `07-5123-08-1044-01` (MINTED-pending-confirm).
+    pub fn request_mirror(&mut self, ctx: &mut Ctx<'_>) {
+        let payload = [0u8; crate::behavior::MAX_EVENT_PAYLOAD];
+        ctx.events.push(AppEvent::OutboundCommand {
+            cluster: CLUSTER_ID,
+            cmd: mirror::CMD_REQUEST_MIRROR,
+            tsn: 0,
+            len: 0,
+            payload,
+        });
+    }
+
+    /// Queue an outbound `RemoveMirror` (empty body) for the
+    /// application to send toward the ESI.
+    ///
+    /// Requirement `07-5123-08-1044-01` (MINTED-pending-confirm).
+    pub fn remove_mirror(&mut self, ctx: &mut Ctx<'_>) {
+        let payload = [0u8; crate::behavior::MAX_EVENT_PAYLOAD];
+        ctx.events.push(AppEvent::OutboundCommand {
+            cluster: CLUSTER_ID,
+            cmd: mirror::CMD_REMOVE_MIRROR,
+            tsn: 0,
+            len: 0,
+            payload,
+        });
     }
 
     /// Add a raw meter count to the delivered summation (saturating
@@ -555,6 +655,122 @@ impl Behavior for ServerBehavior {
                     payload,
                 });
                 Ok(HandleOutcome::no_reply())
+            }
+            mirror::CMD_REQUEST_MIRROR_RESPONSE => {
+                let endpoint = mirror::decode_mirror_endpoint(payload)
+                    .map_err(|_| ZclStatus::MalformedCommand)?;
+                self.mirror.on_response(endpoint)?;
+                let (from, to) = if endpoint == mirror::ENDPOINT_REFUSED {
+                    (1, 0)
+                } else {
+                    (0, 1)
+                };
+                ctx.events.push(AppEvent::StateChanged {
+                    cluster: CLUSTER_ID,
+                    from,
+                    to,
+                });
+                Ok(HandleOutcome::no_reply())
+            }
+            mirror::CMD_MIRROR_REMOVED => {
+                let endpoint = mirror::decode_mirror_endpoint(payload)
+                    .map_err(|_| ZclStatus::MalformedCommand)?;
+                self.mirror.on_removed(endpoint);
+                ctx.events.push(AppEvent::StateChanged {
+                    cluster: CLUSTER_ID,
+                    from: 1,
+                    to: 0,
+                });
+                Ok(HandleOutcome::no_reply())
+            }
+            mirror::CMD_MIRROR_REPORT_ATTR_RESPONSE => {
+                let mut report = mirror::MirrorReport::new(0);
+                mirror::decode_mirror_report(payload, &mut report)
+                    .map_err(|_| ZclStatus::MalformedCommand)?;
+                let count = self.mirror.on_report(&report);
+                ctx.events.push(AppEvent::StateChanged {
+                    cluster: CLUSTER_ID,
+                    from: 2,
+                    to: count.min(255) as u8,
+                });
+                Ok(HandleOutcome::no_reply())
+            }
+            snapshot::CMD_TAKE_SNAPSHOT => {
+                let req = snapshot::decode_take_snapshot(payload)
+                    .map_err(|_| ZclStatus::MalformedCommand)?;
+                // Command-driven takes additionally carry the manual
+                // bit on top of the requested cause.
+                let cause = req.cause | (1u32 << snapshot::CAUSE_MANUAL_BIT);
+                // Caller seconds seed the snapshot clock; the low 32
+                // bits are the on-wire timestamp.
+                #[allow(clippy::cast_possible_truncation)]
+                let now = ctx.now_s as u32;
+                let summation = get_u48(ctx.store, ATTR_SUMMATION_DELIVERED);
+                let mut sub = [0u8; snapshot::MAX_SNAPSHOT_SUB];
+                let sub_len =
+                    snapshot::encode_tou_sub_payload(summation, 0, 0, 0, 0, 0, &[], &mut sub)
+                        .map_err(|_| ZclStatus::InsufficientSpace)?;
+                // A tariff-change take lands as a before/after pair;
+                // the response carries the first id.
+                let (id, confirmation) = if cause & (1u32 << snapshot::CAUSE_TARIFF_CHANGE_BIT) != 0
+                {
+                    let (ids, conf) = self.snapshots.take_pair(
+                        now,
+                        cause,
+                        snapshot::PAYLOAD_TOU_DELIVERED,
+                        &sub[..sub_len],
+                        &sub[..sub_len],
+                    );
+                    (ids[0], conf)
+                } else {
+                    self.snapshots.take(
+                        now,
+                        cause,
+                        snapshot::PAYLOAD_TOU_DELIVERED,
+                        &sub[..sub_len],
+                    )
+                };
+                let mut body = [0u8; 5];
+                snapshot::encode_take_snapshot_response(
+                    &snapshot::TakeSnapshotResponse {
+                        snapshot_id: id,
+                        confirmation,
+                    },
+                    &mut body,
+                )
+                .map_err(|_| ZclStatus::InsufficientSpace)?;
+                HandleOutcome::reply(snapshot::CMD_TAKE_SNAPSHOT_RESPONSE, &body)
+                    .map_err(|_| ZclStatus::InsufficientSpace)
+            }
+            snapshot::CMD_GET_SNAPSHOT => {
+                let req = snapshot::decode_get_snapshot(payload)
+                    .map_err(|_| ZclStatus::MalformedCommand)?;
+                match self
+                    .snapshots
+                    .query(req.earliest, req.latest, req.offset, req.cause)
+                {
+                    Ok(snap) => {
+                        let total = self
+                            .snapshots
+                            .match_count(req.earliest, req.latest, req.cause);
+                        let hdr = snapshot::PublishSnapshot {
+                            snapshot_id: snap.id,
+                            snapshot_time: snap.time,
+                            total_found: total,
+                            command_index: 0,
+                            total_commands: 1,
+                            cause: snap.cause,
+                            payload_type: snap.payload_type,
+                        };
+                        let mut body = [0u8; crate::behavior::MAX_EVENT_PAYLOAD];
+                        let n =
+                            snapshot::encode_publish_snapshot(&hdr, snap.sub_payload(), &mut body)
+                                .map_err(|_| ZclStatus::InsufficientSpace)?;
+                        HandleOutcome::reply(snapshot::CMD_PUBLISH_SNAPSHOT, &body[..n])
+                            .map_err(|_| ZclStatus::InsufficientSpace)
+                    }
+                    Err(_) => Err(ZclStatus::NotFound),
+                }
             }
             _ => Err(ZclStatus::UnsupCommand),
         }
