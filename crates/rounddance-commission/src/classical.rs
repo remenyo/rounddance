@@ -47,6 +47,18 @@ pub const MAX_JOINED_DEVICES: usize = 32;
 /// join machine treats every unsecured command id the same way.
 pub const UNSECURED_VENDOR_CMD: u8 = 0x30;
 
+/// APS transport-key command id: the Trust Center's proactive
+/// key-delivery frame. A joiner that reached the post-association
+/// wait advances only on this command — never on vendor chatter or
+/// any other first frame.
+pub const TRANSPORT_KEY_CMD: u8 = 0x05;
+
+/// Key-type field selecting the standard network key inside the
+/// transport-key command. The TC-first delivery the lab coordinator
+/// sends carries this type; any other type is not the network-key
+/// delivery the joiner is waiting for.
+pub const TRANSPORT_KEY_TYPE_NETWORK: u8 = 0x01;
+
 /// Classical-join failures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JoinError {
@@ -401,6 +413,31 @@ impl JoinerMachine {
         ) {
             self.unsecured_count = self.unsecured_count.saturating_add(1);
             self.last_unsecured_cmd = Some(cmd);
+        }
+    }
+
+    /// Classify one post-association APS command frame by its
+    /// decrypted command id and key-type field: the TC-first flow the
+    /// lab coordinator speaks delivers the network key proactively —
+    /// no joiner request precedes it — so the wait ends on the
+    /// (`TRANSPORT_KEY_CMD`, `TRANSPORT_KEY_TYPE_NETWORK`) pair and
+    /// on nothing else. A matching frame moves `Authenticating` to
+    /// `KeyWait` (a repeat in `KeyWait` is tolerated without effect);
+    /// any other pair leaves the wait unchanged — it is counted
+    /// nowhere and latches nothing, so an update-device-first or
+    /// vendor-first peer can never promote the join. Outside the
+    /// post-association states the frame is ignored, like
+    /// [`JoinerMachine::note_unsecured`].
+    ///
+    /// Requirement `05-3474-23-4433-01` (repo-minted,
+    /// MINTED-pending-confirm).
+    pub fn note_transport_frame(&mut self, cmd_id: u8, key_type: u8) {
+        let genuine = cmd_id == TRANSPORT_KEY_CMD && key_type == TRANSPORT_KEY_TYPE_NETWORK;
+        match self.state {
+            JoinerState::Authenticating if genuine => {
+                self.state = JoinerState::KeyWait;
+            }
+            _ => {}
         }
     }
 

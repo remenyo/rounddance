@@ -675,6 +675,46 @@ fn vector_symmetric_join_transcript_22_65816_030_91_03() {
     assert_eq!(j.state(), JoinerState::Joined);
 }
 
+// 05-3474-23-4433-01: TC-first transport classification. Only the
+// (transport-key command, network key type) pair ends the
+// post-association wait; every other first frame — vendor chatter,
+// update-device-style commands, or a transport-key command naming a
+// different key type — leaves the wait unchanged and latches
+// nothing.
+#[test]
+fn vector_tc_first_transport_classification_05_3474_23_4433_01() {
+    let policy = JoinPolicy {
+        cbke_supported: false,
+        cbke_required: false,
+        interview_tc: false,
+        parent_is_r20_earlier: false,
+    };
+    // Pre-association frames are ignored, never a promotion.
+    let mut early = JoinerMachine::new(JoinMethod::InstallCode, policy);
+    early.note_transport_frame(TRANSPORT_KEY_CMD, TRANSPORT_KEY_TYPE_NETWORK);
+    assert_eq!(early.state(), JoinerState::Unjoined);
+
+    let mut j = JoinerMachine::new(JoinMethod::InstallCode, policy);
+    j.on_candidate();
+    j.on_assoc_confirm(true);
+    // Vendor chatter and foreign commands do not promote.
+    j.note_transport_frame(UNSECURED_VENDOR_CMD, 0x00);
+    j.note_transport_frame(0x00, 0x00);
+    j.note_transport_frame(TRANSPORT_KEY_CMD, 0x04);
+    assert_eq!(j.state(), JoinerState::Authenticating);
+    assert_eq!(j.unsecured_count(), 0);
+    // The genuine TC-first transport promotes to the key wait.
+    j.note_transport_frame(TRANSPORT_KEY_CMD, TRANSPORT_KEY_TYPE_NETWORK);
+    assert_eq!(j.state(), JoinerState::KeyWait);
+    // A repeat while waiting is tolerated without effect.
+    j.note_transport_frame(TRANSPORT_KEY_CMD, TRANSPORT_KEY_TYPE_NETWORK);
+    assert_eq!(j.state(), JoinerState::KeyWait);
+    j.on_verify_confirm(true, KeyAttributes::SYMMETRIC);
+    assert_eq!(j.state(), JoinerState::Announced);
+    j.close_out(false);
+    assert_eq!(j.state(), JoinerState::Joined);
+}
+
 // 22-65816-030-91-06: a required handshake that cannot run fails the join.
 #[test]
 fn vector_cbke_required_gate_22_65816_030_91_06() {

@@ -42,6 +42,7 @@ pub mod cbke;
 pub mod cert;
 pub mod classical;
 pub mod ecc;
+pub mod keyhierarchy;
 pub mod keyupdate;
 pub mod mmo;
 pub mod mock;
@@ -63,8 +64,14 @@ pub use ecc::{
     EccBackend, EccError, COMPRESSED_EVEN, COMPRESSED_LEN, COMPRESSED_ODD, MAC_LEN, MAX_KDF_OUT,
     POINT_LEN, SCALAR_LEN,
 };
+pub use keyhierarchy::{
+    data_key_is_link_key, derive_key_load_key, derive_key_transport_key, LOAD_KEY_INPUT,
+    TRANSPORT_KEY_INPUT,
+};
 pub use keyupdate::{derive_update_key, derive_update_mask, install_link_key, UPDATE_LABEL};
-pub use mmo::{mmo_hash_128, MmoError, MMO_DIGEST_LEN, MMO_MAX_MSG_LEN};
+pub use mmo::{
+    hmac_mmo_128, mmo_hash_128, MmoError, HMAC_MAX_MSG_LEN, MMO_DIGEST_LEN, MMO_MAX_MSG_LEN,
+};
 pub use store::{NvmStore, PersistedState, RamStore, StoreError, COUNTER_STRIDE};
 
 /// Crate identifier.

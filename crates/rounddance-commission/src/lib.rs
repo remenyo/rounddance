@@ -37,7 +37,7 @@ pub use classical::{
     EccJoinKdf, InstallCode, JoinError, JoinKdf, JoinMethod, JoinPolicy, JoinedDevice,
     JoinerMachine, JoinerState, KeyAttributes, LeaveMachine, MmoJoinKdf, RejoinMachine,
     RejoinState, TrustCenter, INSTALL_CODE_LENS, MAX_INSTALL_CODE_LEN, MAX_JOINED_DEVICES,
-    UNSECURED_VENDOR_CMD,
+    TRANSPORT_KEY_CMD, TRANSPORT_KEY_TYPE_NETWORK, UNSECURED_VENDOR_CMD,
 };
 pub use finding::{
     FinderInitiator, FinderTarget, FindingError, InitiatorState, Respondent, TargetState,

@@ -456,7 +456,7 @@ fn vector_install_code_mmo_worked_key_22_65816_030_56_08() {
             0x02, 0xBB
         ]
     );
-    assert_eq!(mmo_hash_128(&[0u8; 32]).unwrap_err(), MmoError::TooLong);
+    assert_eq!(mmo_hash_128(&[0u8; 65]).unwrap_err(), MmoError::TooLong);
 }
 
 // 07-5356-C41-02: MMO-derived link-key update. Mask for ieee [9;8],
@@ -970,4 +970,93 @@ fn vector_aux_counter_zero_first_accept_05_3474_23_4312_01() {
     let nonce = NwkNonce::from_header(&header).unwrap();
     assert_eq!(&nonce.bytes[8..12], &[0, 0, 0, 0]);
     assert_eq!(&nonce.bytes[8..12], &0u32.to_be_bytes());
+}
+
+// 05-3474-23-B11-01 (extended): the hash also covers the short
+// 16-octet form. Input C0..CF (the B.4 short-form worked example,
+// anchor p0550-L13551-L13565) must produce A7977E88BC0B61E8
+// 210827109A228F2D.
+#[test]
+fn vector_mmo_short_form_worked_05_3474_23_b11_01() {
+    let input = [
+        0xC0, 0xC1, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7, 0xC8, 0xC9, 0xCA, 0xCB, 0xCC, 0xCD, 0xCE,
+        0xCF,
+    ];
+    assert_eq!(
+        mmo_hash_128(&input).unwrap(),
+        [
+            0xA7, 0x97, 0x7E, 0x88, 0xBC, 0x0B, 0x61, 0xE8, 0x21, 0x08, 0x27, 0x10, 0x9A, 0x22,
+            0x8F, 0x2D
+        ]
+    );
+}
+
+// 05-3474-23-B14-01: keyed-hash worked example (128-bit key,
+// anchor p0554-L13638-L13667). Key 4041..4F with the one-octet
+// input C0 must hash the inner leg to 3C3D537529A7A9A03F66
+// 9DCD886CB52C and finish at 4512807BF94CB3400F0E2C
+// 25FB76E999 — the same construction the key hierarchy below
+// applies with its own one-octet domain inputs.
+#[test]
+fn vector_hmac_mmo_worked_05_3474_23_b14_01() {
+    let key = [
+        0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4A, 0x4B, 0x4C, 0x4D, 0x4E,
+        0x4F,
+    ];
+    assert_eq!(
+        hmac_mmo_128(&key, &[0xC0]).unwrap(),
+        [
+            0x45, 0x12, 0x80, 0x7B, 0xF9, 0x4C, 0xB3, 0x40, 0x0F, 0x0E, 0x2C, 0x25, 0xFB, 0x76,
+            0xE9, 0x99
+        ]
+    );
+}
+
+// 05-3474-23-B14-01 (extended): one-octet key-agreement KDF check
+// (anchor p0557-L13737-L13739). The agreement secret
+// AE466B75309D5C2D715F7E4431DF047A under the domain input 0x01
+// must produce 2547F3AF96391E1EBFF2A3B76D6A2929 — the same
+// one-octet-input shape the link-key hierarchy uses.
+#[test]
+fn vector_hmac_mmo_kdf_shape_05_3474_23_b14_01() {
+    let secret = [
+        0xAE, 0x46, 0x6B, 0x75, 0x30, 0x9D, 0x5C, 0x2D, 0x71, 0x5F, 0x7E, 0x44, 0x31, 0xDF, 0x04,
+        0x7A,
+    ];
+    assert_eq!(
+        hmac_mmo_128(&secret, &[0x01]).unwrap(),
+        [
+            0x25, 0x47, 0xF3, 0xAF, 0x96, 0x39, 0x1E, 0x1E, 0xBF, 0xF2, 0xA3, 0xB7, 0x6D, 0x6A,
+            0x29, 0x29
+        ]
+    );
+}
+
+// 05-3474-23-453-01: key-hierarchy derivation from the BDB worked
+// link key 66B6900981E1EE3CA4206B6B861C02BB. The transport key
+// (domain input 0x00) and the load key (0x02) are pinned below;
+// the values were cross-checked against an independent Python
+// model of the same clause before freezing. The data key is the
+// link key itself.
+#[test]
+fn vector_key_hierarchy_from_worked_link_05_3474_23_453_01() {
+    let link = [
+        0x66, 0xB6, 0x90, 0x09, 0x81, 0xE1, 0xEE, 0x3C, 0xA4, 0x20, 0x6B, 0x6B, 0x86, 0x1C, 0x02,
+        0xBB,
+    ];
+    assert_eq!(
+        derive_key_transport_key(&link).unwrap(),
+        [
+            0x3C, 0x6C, 0xCA, 0x89, 0x77, 0xEB, 0x18, 0x9E, 0xFD, 0x16, 0x14, 0xC3, 0xE7, 0xF7,
+            0x59, 0x89
+        ]
+    );
+    assert_eq!(
+        derive_key_load_key(&link).unwrap(),
+        [
+            0x11, 0x77, 0xA0, 0xEE, 0x26, 0x00, 0xD0, 0x02, 0x0D, 0xBA, 0x82, 0xD7, 0x04, 0x9F,
+            0x53, 0xBC
+        ]
+    );
+    assert_eq!(data_key_is_link_key(&link), &link);
 }

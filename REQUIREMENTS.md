@@ -1076,3 +1076,35 @@ captures were taken.
 | RD-INSPECT-16 | implemented + verified | `zcl::summarize_price` → `tree::ZclDetail::Price`: PublishPrice / PriceAck / GetScheduledPrices / GetBlockPeriods via cluster codecs + GetCurrentPrice 1-octet options + tariff-id 4-octet requests + PublishBlockPeriod / PublishBlockThresholds / PublishTierLabels (bounded 4-entry scratch) shapes, direction-disambiguated (0x00 GetCurrentPrice vs PublishPrice); `report` text/JSON gain the `price` kind | `se_price_publish_and_ack` (codec-built publish + ack, direction asserts) + `se_price_requests_and_direction_split` + `se_price_block_and_tier_publishes` (incl. zero-total thresholds and bad-count tier-label Unknown legs) |
 | RD-INSPECT-17 | implemented + verified | `zcl::summarize_keyest` → `tree::ZclDetail::{KeyInit, KeyMsg, KeyTerminate}`: Initiate/Terminate via cluster codecs (either direction, identical shapes), ephemeral 33/64-octet length gate + confirm 16-octet length gate, decode-only; `report` text/JSON gain the `keyinit`/`keymsg`/`keyterm` kinds | `se_keyest_initiate_and_terminate` (codec-built bodies both directions + truncated legs) + `se_keyest_ephemeral_and_confirm_shapes` (both wire forms both directions, 14 wrong-length Unknown legs, unmodeled command) |
 | RD-INSPECT-18 | implemented + verified | `report::session_from_json` (hand-rolled fixed-schema parser, schema-version gate → `SessionLoadError::BadSchema`, typed `Malformed` for truncation/mistype/range/over-capacity) + `SessionEngine::restore` + `KeySlots::restore` (zeroed placeholder slots, rotation counter restarts at slot count, member caches restart empty); schema stays v1, round trip re-renders byte-identically | `se_session_save_load_roundtrip` (windows + PAN rows + orphan/decryptable + 2 key slots + IEEE row, byte-identical re-render, whitespace leg, empty engine) + `se_session_load_rejects` (version/missing/type/range/slots/overflow/trailing legs + every-truncation-prefix sweep + 33-device over-capacity) |
+
+## Wave-45 traceability — spec-exact key-transport derivation + TC-first join (lane 2)
+
+Prior waves (w42/w44) burned 4.1M + 1.44M offline decrypts against the
+captured proactive `0x30` A-frames with two guessed inputs: the
+key-transport-key construction (`MMO(link || 0x00)`) and, in the crack
+scripts, the wrong device's install code. The exact clauses say
+otherwise: the install-code link key is the AES-MMO-128 hash of the
+full code (payload + LE check field, CRC-verified), and the
+key-transport / key-load keys are the B.1.4 keyed hash (HMAC over the
+MMO hash, 16-octet block) under the link key with the one-octet domain
+inputs `0x00` / `0x02`. The data key is the link key itself. This wave
+implements that chain exactly and re-runs the offline battery: the
+HMAC-derived transport key opens all five A-frames (w42 x2/x4/x5/x6 +
+w44 k1) with MIC-valid opens whose plaintexts carry the lab network
+key — SOLVED with zero residual gap (key ✓, nonce = source-EUI +
+counter LE + control restored `0x30`→`0x35`, AAD = APS header +
+restored aux, MIC-32; command `0x05` key-type `0x01` seq `0x00` +
+joiner/src EUIs in every frame). Long-form MMO padding (2^16-bit
+threshold) is not instantiated: every caller hashes at most 48 octets
+and over-cap inputs are refused, never hashed with the wrong form.
+On the join path, the solved TC-first flow is now classified in the
+machine: only the (`0x05`, `0x01`) pair ends the post-association
+wait — no update-device-first, no vendor-first. 3 repo-minted IDs
+(`05-3474-23-B14-01`, `05-3474-23-453-01`, `05-3474-23-4433-01`),
+MINTED-pending-confirm. Paraphrase only (D1).
+
+| Requirement ID | State | Implementing code | Verifying test |
+|----------------|-------|-------------------|----------------|
+| 05-3474-23-B14-01 | implemented + verified | `security::mmo::hmac_mmo_128` (HMAC over AES-MMO-128, 16-octet block, inner pad `0x36` / outer pad `0x5C`; §B.1.4 shape, anchor p0541-L13301-L13312; 48-octet input cap keeps both legs under the hash cap) | `security/tests/vectors.rs::vector_hmac_mmo_worked_05_3474_23_b14_01` (128-bit keyed-hash worked example incl. outer leg) + `vector_hmac_mmo_kdf_shape_05_3474_23_b14_01` (one-octet KDF shape) + `keyhierarchy::tests::keyed_input_too_long_is_refused` (over-cap refusal) |
+| 05-3474-23-453-01 | implemented + verified | `security::keyhierarchy::{derive_key_transport_key (0x00), derive_key_load_key (0x02), data_key_is_link_key}` (hierarchy clause, anchor p0481-L11489-L11497); `commission::MmoJoinKdf` + `TrustCenter::install_code_key` supply the link-key leg (full code incl. check field, BDB §6.11.1.2, pre-existing `22-65816-030-56-08` vector) | `security/tests/vectors.rs::vector_key_hierarchy_from_worked_link_05_3474_23_453_01` (transport/load pinned from the BDB worked link key, cross-checked against an independent Python model before freezing) + `keyhierarchy::tests::hierarchy_is_deterministic_and_domain_separated` + offline battery `~/hwscratch/w45/transport_open.py` (3 KATs + 5 A-frames × key battery; SOLVED report `~/hwscratch/w45/REPORT.md`) |
+| 05-3474-23-4433-01 | implemented + verified | `commission::classical::{TRANSPORT_KEY_CMD (0x05), TRANSPORT_KEY_TYPE_NETWORK (0x01)}` + `JoinerMachine::note_transport_frame` (exact-pair classification: genuine pair moves `Authenticating`→`KeyWait`, repeat in `KeyWait` tolerated, all other pairs and all other states leave the wait unchanged; transport-key receipt clause, anchors p0438-L10533-L10550) | `commission/tests/vectors.rs::vector_tc_first_transport_classification_05_3474_23_4433_01` (pre-association ignore + foreign-pair tolerance + genuine promotion + repeat tolerance + full path to Joined) + `rounddance-sim/tests/join_tc_first.rs` (real k1 capture envelope through the NWK codec + aux-shape asserts with opaque 39-octet tail, foreign-first tolerance, transport→verify→announce→join, wrong-type-first→NoTransport, deterministic replay) |
