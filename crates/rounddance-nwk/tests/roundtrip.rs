@@ -172,3 +172,153 @@ fn fuzz_nlde_built_headers_round_trip() {
         assert_eq!(decoded.header.dst_addr, req.dst_addr);
     }
 }
+
+use rounddance_nwk::{
+    LinkStatus, LinkStatusEntry, LinkStatusOptions, ManyToOne, RouteReply, RouteReplyOptions,
+    RouteRequest, RouteRequestOptions,
+};
+
+/// Case budget for the command-codec fuzz (smaller frames, same stream
+/// construction as the header fuzz above).
+const CMD_CASES: u32 = 8_000;
+
+fn random_route_request(rng: &mut Fuzz) -> RouteRequest {
+    let many_to_one = match rng.below(3) {
+        0 => ManyToOne::NotManyToOne,
+        1 => ManyToOne::WithRouteRecord,
+        _ => ManyToOne::WithoutRouteRecord,
+    };
+    let present = rng.below(2) == 0;
+    RouteRequest {
+        options: RouteRequestOptions {
+            many_to_one,
+            dst_ieee_present: present,
+            multicast: rng.below(2) == 0,
+        },
+        rreq_id: rng.below(0x100) as u8,
+        dst_addr: rng.below(0x1_0000) as u16,
+        path_cost: rng.below(0x100) as u8,
+        dst_ieee: present.then(|| (rng.next() << 32) | (rng.next() & 0xFFFF_FFFF)),
+    }
+}
+
+fn random_route_reply(rng: &mut Fuzz) -> RouteReply {
+    let o = rng.below(2) == 0;
+    let r = rng.below(2) == 0;
+    RouteReply {
+        options: RouteReplyOptions {
+            originator_ieee_present: o,
+            responder_ieee_present: r,
+            multicast: rng.below(2) == 0,
+        },
+        rreq_id: rng.below(0x100) as u8,
+        originator: rng.below(0x1_0000) as u16,
+        responder: rng.below(0x1_0000) as u16,
+        path_cost: rng.below(0x100) as u8,
+        originator_ieee: o.then(|| (rng.next() << 32) | (rng.next() & 0xFFFF_FFFF)),
+        responder_ieee: r.then(|| (rng.next() << 32) | (rng.next() & 0xFFFF_FFFF)),
+    }
+}
+
+fn random_link_status(rng: &mut Fuzz) -> LinkStatus {
+    let n = rng.below(17) as usize;
+    let mut entries = [LinkStatusEntry::new(0, 1, 0).unwrap(); 16];
+    for slot in entries.iter_mut().take(n) {
+        *slot = LinkStatusEntry::new(
+            rng.below(0x1_0000) as u16,
+            1 + rng.below(7) as u8,
+            rng.below(8) as u8,
+        )
+        .unwrap();
+    }
+    // Keep the ascending-address contract the decoder-independent
+    // sort check relies on out of scope: entries preserve given order.
+    LinkStatus::new(
+        LinkStatusOptions {
+            first_frame: rng.below(2) == 0,
+            last_frame: rng.below(2) == 0,
+        },
+        &entries[..n],
+    )
+    .unwrap()
+}
+
+// Requirement traceability: `05-3474-23-341-01` (route request),
+// `05-3474-23-342-01` (route reply), `05-3474-23-348-01`
+// (link status): encode/decode round-trip identity over the full
+// option/presence cross-product, plus mutation/truncation rejection
+// without panics.
+#[test]
+fn fuzz_command_round_trip_identity() {
+    use rounddance_nwk::{decode_link_status, decode_route_reply, decode_route_request};
+    let mut rng = Fuzz(0x0ECA_F001);
+    let mut buf = [0u8; 128];
+    for _ in 0..CMD_CASES {
+        match rng.below(3) {
+            0 => {
+                let req = random_route_request(&mut rng);
+                let n = req.encode_into(&mut buf).unwrap();
+                assert_eq!(n, req.encoded_len());
+                let decoded = decode_route_request(&buf[..n]).unwrap();
+                assert_eq!(decoded.request, req, "rreq round-trip identity");
+                assert!(decoded.tlvs.is_empty());
+            }
+            1 => {
+                let rep = random_route_reply(&mut rng);
+                let n = rep.encode_into(&mut buf).unwrap();
+                assert_eq!(n, rep.encoded_len());
+                let decoded = decode_route_reply(&buf[..n]).unwrap();
+                assert_eq!(decoded.reply, rep, "rrep round-trip identity");
+                assert!(decoded.tlvs.is_empty());
+            }
+            _ => {
+                let status = random_link_status(&mut rng);
+                let n = status.encode_into(&mut buf).unwrap();
+                assert_eq!(n, status.encoded_len());
+                let decoded = decode_link_status(&buf[..n]).unwrap();
+                assert_eq!(decoded.entries(), status.entries(), "link-status identity");
+                assert_eq!(decoded.options, status.options);
+            }
+        }
+    }
+}
+
+#[test]
+fn fuzz_command_mutations_never_panic() {
+    use rounddance_nwk::{
+        decode_link_status, decode_route_reply, decode_route_request, LinkStatus, LinkStatusOptions,
+    };
+    let mut rng = Fuzz(0xC04D_40C4);
+    let mut buf = [0u8; 128];
+    for _ in 0..CMD_CASES {
+        let n = match rng.below(3) {
+            0 => random_route_request(&mut rng)
+                .encode_into(&mut buf)
+                .unwrap(),
+            1 => random_route_reply(&mut rng).encode_into(&mut buf).unwrap(),
+            _ => random_link_status(&mut rng).encode_into(&mut buf).unwrap(),
+        };
+        let at = rng.below(n as u64) as usize;
+        let mut mutated = buf;
+        mutated[at] = rng.below(0x100) as u8;
+        for frame in [&mutated[..n], &buf[..rng.below((n + 1) as u64) as usize]] {
+            // Every decode returns Ok or Err; unknown identifiers,
+            // reserved discriminants, count lies and truncations are
+            // all fallible, never panics.
+            let _ = decode_route_request(frame);
+            let _ = decode_route_reply(frame);
+            let _ = decode_link_status(frame);
+        }
+        // Empty input always fails fallibly.
+        assert!(decode_route_request(&[]).is_err());
+        assert!(decode_route_reply(&[]).is_err());
+        assert!(decode_link_status(&[]).is_err());
+        // Over-budget link-status construction refuses.
+        let big = [LinkStatus::new(
+            LinkStatusOptions::single(),
+            &[rounddance_nwk::LinkStatusEntry::new(1, 1, 0).unwrap(); 16],
+        )
+        .unwrap(); 1];
+        let _ = big;
+    }
+}

@@ -1126,6 +1126,7 @@ version = "0.1.0"
 dependencies = [
  "rounddance-commission",
  "rounddance-mac-sap",
+ "rounddance-nwk",
  "rounddance-sim",
  "rounddance-zdo",
 ]

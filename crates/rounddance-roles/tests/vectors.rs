@@ -191,3 +191,56 @@ fn sleepy_duty_cycle_rejoin_05_3474_23_3612_10() {
     dev.leave().unwrap();
     assert_eq!(dev.state(), SleepState::Unjoined);
 }
+
+// 05-3474-23-3645-01/02 + 05-3474-23-348-02: the routing seam on the
+// router — discovery, reply resolution, loop suppression, link costs,
+// and aging, all gated on the Active state.
+#[test]
+fn router_routing_seam_discovery_and_aging() {
+    use rounddance_nwk::LinkStatusEntry;
+
+    let mut router = RouterMachine::new(AgingPolicy::default(), 7_500);
+    // Not active: every routing call refuses.
+    assert!(router.start_discovery(0x0003, 0x0001, 0).is_err());
+    assert!(router
+        .note_discovery_reply(1, 0x0003, 0x0002, 2, 0)
+        .is_err());
+    router.begin_join().unwrap();
+    router.join_done(true);
+
+    // Self-discovery refuses; real discovery stamps an identifier.
+    assert!(router.start_discovery(0x0001, 0x0001, 100).is_err());
+    let id = router.start_discovery(0x0003, 0x0001, 100).unwrap();
+    assert!(router.next_hop(0x0003, 100).is_none());
+    // Retry too early holds; late enough floods again.
+    assert_eq!(router.authorize_discovery_retry(0x0003, 100), Ok(false));
+    assert_eq!(router.authorize_discovery_retry(0x0003, 700), Ok(true));
+
+    // Loop suppression is per (originator, id).
+    assert!(!router.should_suppress_request(0x0002, 0x09, 200));
+    assert!(router.should_suppress_request(0x0002, 0x09, 250));
+
+    // Reply resolves and installs via the reported next hop.
+    assert_eq!(
+        router.note_discovery_reply(id, 0x0003, 0x0002, 2, 800),
+        Ok(true)
+    );
+    assert_eq!(router.next_hop(0x0003, 800), Some(0x0002));
+
+    // Link costs: neighbor reports incoming 2 for us.
+    router
+        .note_link_status(
+            0x0002,
+            0x0001,
+            &[LinkStatusEntry::new(0x0001, 2, 0).unwrap()],
+            900,
+        )
+        .unwrap();
+    assert_eq!(router.outgoing_cost(0x0002, 900), Some(2));
+
+    // Aging retires the route and the cost, never the live seam.
+    let (routes, sessions, links) = router.tick_routing(100_000);
+    assert_eq!((routes, sessions, links), (1, 0, 1));
+    assert_eq!(router.next_hop(0x0003, 100_000), None);
+    assert_eq!(router.outgoing_cost(0x0002, 100_000), None);
+}

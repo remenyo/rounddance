@@ -20,9 +20,18 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
+pub mod commands;
 pub mod frame;
 pub mod nlde;
+pub mod route;
 
+pub use commands::{
+    decode_link_status, decode_route_reply, decode_route_request, DecodedLinkStatus,
+    DecodedRouteReply, DecodedRouteRequest, Error as CommandError, LinkStatus, LinkStatusEntry,
+    LinkStatusOptions, ManyToOne, RouteReply, RouteReplyOptions, RouteRequest, RouteRequestOptions,
+    CMD_LINK_STATUS, CMD_ROUTE_REPLY, CMD_ROUTE_REQUEST, LINK_COST_MAX_AGE_MS,
+    MAX_LINK_STATUS_ENTRIES,
+};
 pub use frame::{
     decode, is_broadcast_addr, Decoded, DiscoverRoute, Error as NwkError, FrameControl, FrameType,
     NwkHeader, SourceRoute, BROADCAST_ALL_DEVICES, BROADCAST_LOW_POWER_ROUTERS,
@@ -33,6 +42,12 @@ pub use frame::{
 pub use nlde::{
     build_data_header, indication_for_local, radius_for_request, Error as NldeError,
     NldeDataRequest, TxPipeline,
+};
+pub use route::{
+    add_path_cost, DiscoverySession, DiscoveryTable, NeighborCosts, NeighborLink, RouteEntry,
+    RouteError as RoutingError, RouteTable, SeenRequests, DISCOVERY_RETRY_INTERVAL_MS,
+    DISCOVERY_TIMEOUT_MS, LINK_COST_AGE_MS, MAX_DISCOVERY_ATTEMPTS, MAX_NEIGHBOR_LINKS,
+    MAX_PENDING_DISCOVERIES, MAX_ROUTES, MAX_SEEN_REQUESTS, ROUTE_LIFETIME_MS, SEEN_LIFETIME_MS,
 };
 
 /// Crate identifier.

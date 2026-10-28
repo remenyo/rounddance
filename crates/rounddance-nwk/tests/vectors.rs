@@ -6,10 +6,14 @@
 //! §3.2.1.1.3 — never copied from spec text (D1, `SCOPE.md` §2).
 
 use rounddance_nwk::{
-    build_data_header, decode, indication_for_local, is_broadcast_addr, radius_for_request,
-    Decoded, DiscoverRoute, FrameControl, FrameType, NldeDataRequest, NldeError, NwkError,
-    NwkHeader, SourceRoute, TxPipeline, BROADCAST_ALL_DEVICES, BROADCAST_RESERVED_HIGH,
-    BROADCAST_RESERVED_LOW, BROADCAST_ROUTERS,
+    add_path_cost, build_data_header, decode, decode_link_status, decode_route_reply,
+    decode_route_request, indication_for_local, is_broadcast_addr, radius_for_request, Decoded,
+    DecodedLinkStatus, DiscoverRoute, DiscoveryTable, FrameControl, FrameType, LinkStatus,
+    LinkStatusEntry, LinkStatusOptions, ManyToOne, NeighborCosts, NldeDataRequest, NldeError,
+    NwkError, NwkHeader, RouteReply, RouteReplyOptions, RouteRequest, RouteRequestOptions,
+    RouteTable, RoutingError, SeenRequests, SourceRoute, TxPipeline, BROADCAST_ALL_DEVICES,
+    BROADCAST_RESERVED_HIGH, BROADCAST_RESERVED_LOW, BROADCAST_ROUTERS, CMD_LINK_STATUS,
+    CMD_ROUTE_REPLY, CMD_ROUTE_REQUEST, ROUTE_LIFETIME_MS,
 };
 
 // 05-3474-23-331-01: minimal data frame on the wire.
@@ -376,4 +380,254 @@ fn vector_command_headers_suppress_discovery_05_3474_23_34_01() {
     assert_eq!(fc.frame_type, FrameType::Command);
     assert_eq!(fc.discover_route, DiscoverRoute::Suppress);
     assert_eq!(fc.protocol_version, 2);
+}
+
+// 05-3474-23-341-01: route-request body on the wire (unicast, no IEEE).
+//
+// options = many-to-one 0 | no dst-ieee = 0x00.
+#[test]
+fn vector_route_request_unicast_05_3474_23_341_01() {
+    let req = RouteRequest {
+        options: RouteRequestOptions::unicast(),
+        rreq_id: 0x07,
+        dst_addr: 0x1234,
+        path_cost: 0,
+        dst_ieee: None,
+    };
+    let wire: &[u8] = &[0x01, 0x00, 0x07, 0x34, 0x12, 0x00];
+    let mut out = [0u8; 32];
+    let n = req.encode_into(&mut out).unwrap();
+    assert_eq!(&out[..n], wire);
+
+    let decoded = decode_route_request(wire).unwrap();
+    assert_eq!(decoded.request, req);
+    assert!(decoded.tlvs.is_empty());
+
+    // TLV tail rides opaquely: parsed prefix identical, tail borrowed.
+    let mut tailed = wire.to_vec();
+    tailed.extend_from_slice(&[0xAA, 0xBB]);
+    let decoded = decode_route_request(&tailed).unwrap();
+    assert_eq!(decoded.request, req);
+    assert_eq!(decoded.tlvs, &[0xAA, 0xBB]);
+}
+
+// 05-3474-23-341-01: route-request with destination IEEE + many-to-one.
+#[test]
+fn vector_route_request_many_to_one_ieee_05_3474_23_341_01() {
+    let req = RouteRequest {
+        options: RouteRequestOptions {
+            many_to_one: ManyToOne::WithRouteRecord,
+            dst_ieee_present: true,
+            multicast: false,
+        },
+        rreq_id: 0x42,
+        dst_addr: 0xFFFC,
+        path_cost: 5,
+        dst_ieee: Some(0x1122_3344_5566_7788),
+    };
+    // options = (1 << 3) | (1 << 5) = 0x28.
+    let wire: &[u8] = &[
+        0x01, 0x28, 0x42, 0xFC, 0xFF, 0x05, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11,
+    ];
+    let mut out = [0u8; 32];
+    let n = req.encode_into(&mut out).unwrap();
+    assert_eq!(&out[..n], wire);
+    assert_eq!(decode_route_request(wire).unwrap().request, req);
+
+    // Reserved many-to-one value 3 is rejected, never misread.
+    let mut bad = wire.to_vec();
+    bad[1] = 0x18 | 0x20;
+    assert!(decode_route_request(&bad).is_err());
+
+    // Presence-flag / field disagreement is refused both directions.
+    let mut mismatch = req;
+    mismatch.options.dst_ieee_present = false;
+    assert!(mismatch.encode_into(&mut out).is_err());
+}
+
+// 05-3474-23-342-01: route-reply body on the wire (both IEEE present).
+#[test]
+fn vector_route_reply_full_05_3474_23_342_01() {
+    let rep = RouteReply {
+        options: RouteReplyOptions::full(),
+        rreq_id: 0x07,
+        originator: 0x0001,
+        responder: 0x1234,
+        path_cost: 3,
+        originator_ieee: Some(0x0102_0304_0506_0708),
+        responder_ieee: Some(0x1122_3344_5566_7788),
+    };
+    // options = (1 << 4) | (1 << 5) = 0x30.
+    let wire: &[u8] = &[
+        0x02, 0x30, 0x07, 0x01, 0x00, 0x34, 0x12, 0x03, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02,
+        0x01, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11,
+    ];
+    let mut out = [0u8; 32];
+    let n = rep.encode_into(&mut out).unwrap();
+    assert_eq!(&out[..n], wire);
+    assert_eq!(decode_route_reply(wire).unwrap().reply, rep);
+}
+
+// 05-3474-23-348-01: link-status body on the wire.
+#[test]
+fn vector_link_status_two_entries_05_3474_23_348_01() {
+    let status = LinkStatus::new(
+        LinkStatusOptions::single(),
+        &[
+            LinkStatusEntry::new(0x0001, 3, 2).unwrap(),
+            LinkStatusEntry::new(0x0002, 1, 7).unwrap(),
+        ],
+    )
+    .unwrap();
+    // options = count 2 | first | last = 0x02 | 0x20 | 0x40 = 0x62;
+    // entry status octets: 3 | (2 << 4) = 0x23, 1 | (7 << 4) = 0x71.
+    let wire: &[u8] = &[0x08, 0x62, 0x01, 0x00, 0x23, 0x02, 0x00, 0x71];
+    let mut out = [0u8; 32];
+    let n = status.encode_into(&mut out).unwrap();
+    assert_eq!(&out[..n], wire);
+
+    let DecodedLinkStatus {
+        options, entries, ..
+    } = decode_link_status(wire).unwrap();
+    assert!(options.first_frame && options.last_frame);
+    assert_eq!(
+        &entries[..2],
+        &[
+            LinkStatusEntry::new(0x0001, 3, 2).unwrap(),
+            LinkStatusEntry::new(0x0002, 1, 7).unwrap(),
+        ]
+    );
+
+    // Declared count must match the entries present.
+    let mut lie = wire.to_vec();
+    lie[1] = 0x61;
+    assert!(decode_link_status(&lie).is_err());
+    // Zero incoming cost is unusable and rejected.
+    assert!(LinkStatusEntry::new(0x0003, 0, 1).is_err());
+    // Unknown command identifiers never decode as link status.
+    assert!(decode_link_status(&[0x03, 0x60]).is_err());
+    // Command identifier constants match the command table.
+    assert_eq!(
+        (CMD_ROUTE_REQUEST, CMD_ROUTE_REPLY, CMD_LINK_STATUS),
+        (0x01, 0x02, 0x08)
+    );
+}
+
+// 05-3474-23-341-01: path costs saturate instead of wrapping.
+#[test]
+fn vector_path_cost_saturates_05_3474_23_341_01() {
+    assert_eq!(add_path_cost(250, 7), 255);
+    assert_eq!(add_path_cost(3, 2), 5);
+}
+
+// 05-3474-23-3645-01: route install / lookup / expiry / exhaustion.
+#[test]
+fn vector_route_table_lifecycle_05_3474_23_3645_01() {
+    let mut table = RouteTable::new();
+    assert_eq!(table.next_hop(0x1234, 1_000), None);
+    table
+        .install(0x1234, 0x0002, 3, 1_000, ROUTE_LIFETIME_MS)
+        .unwrap();
+    assert_eq!(table.next_hop(0x1234, 2_000), Some(0x0002));
+    // A worse cost never displaces the installed route.
+    table
+        .install(0x1234, 0x0003, 6, 3_000, ROUTE_LIFETIME_MS)
+        .unwrap();
+    assert_eq!(table.next_hop(0x1234, 4_000), Some(0x0002));
+    // A cheaper cost does.
+    table
+        .install(0x1234, 0x0003, 1, 5_000, ROUTE_LIFETIME_MS)
+        .unwrap();
+    assert_eq!(table.next_hop(0x1234, 6_000), Some(0x0003));
+    // Expiry stops matching, then reclaims (installed at t=5_000).
+    assert_eq!(table.next_hop(0x1234, 5_000 + ROUTE_LIFETIME_MS + 1), None);
+    assert_eq!(table.expire(5_000 + ROUTE_LIFETIME_MS + 1), 1);
+
+    // Exhaustion is a refusal, never a silent drop.
+    for i in 0..16u16 {
+        table
+            .install(0x2000 + i, 0x0002, 1, 9_000, ROUTE_LIFETIME_MS)
+            .unwrap();
+    }
+    assert_eq!(
+        table.install(0x1234, 0x0002, 1, 9_000, ROUTE_LIFETIME_MS),
+        Err(RoutingError::TableFull)
+    );
+}
+
+// 05-3474-23-3645-02: discovery sessions — duplicates, storms, retries, timeouts.
+#[test]
+fn vector_discovery_session_guards_05_3474_23_3645_02() {
+    let mut d = DiscoveryTable::new();
+    let s = d.start(0x1234, 0x07, 1_000).unwrap();
+    assert_eq!(s.rreq_id, 0x07);
+    assert_eq!(
+        d.start(0x1234, 0x08, 1_100),
+        Err(RoutingError::DiscoveryPending)
+    );
+    // Too early to retry: hold.
+    assert_eq!(d.authorize_retry(0x1234, 1_100), Ok(false));
+    // Retry clock elapsed: flood again.
+    assert_eq!(d.authorize_retry(0x1234, 1_600), Ok(true));
+    // Unknown destinations / identifiers never resolve.
+    assert_eq!(
+        d.authorize_retry(0x9999, 1_700),
+        Err(RoutingError::UnknownReply)
+    );
+    assert_eq!(d.resolve(0xFF, 1_700), Err(RoutingError::UnknownReply));
+    // Matching reply resolves exactly once.
+    assert!(d.resolve(0x07, 1_700).unwrap().pending(1_700));
+    assert_eq!(d.resolve(0x07, 1_800), Err(RoutingError::UnknownReply));
+
+    // Storm cap: four concurrent destinations, the fifth refuses.
+    let mut storm = DiscoveryTable::new();
+    for i in 0..4u16 {
+        storm.start(0x3000 + i, i as u8, 2_000).unwrap();
+    }
+    assert_eq!(
+        storm.start(0x4000, 9, 2_000),
+        Err(RoutingError::DiscoveryFull)
+    );
+    // Past the deadline every session retires.
+    assert_eq!(storm.sweep(2_000 + 6_000), 4);
+}
+
+// 05-3474-23-3645-02: flooded repeats suppress, fresh floods pass.
+#[test]
+fn vector_loop_suppression_05_3474_23_3645_02() {
+    let mut seen = SeenRequests::new();
+    assert!(!seen.observe(0x0001, 0x07, 1_000));
+    assert!(seen.observe(0x0001, 0x07, 1_100));
+    // Same id from another originator is a different flood.
+    assert!(!seen.observe(0x0002, 0x07, 1_100));
+    // Past the lifetime the flood may pass again.
+    assert!(!seen.observe(0x0001, 0x07, 1_000 + 11_000));
+}
+
+// 05-3474-23-348-02: link costs fold in and age out.
+#[test]
+fn vector_link_cost_aging_05_3474_23_348_02() {
+    let mut links = NeighborCosts::new();
+    links.note_incoming(0x0002, 3, 1_000);
+    // No report from the neighbor yet: no outgoing cost.
+    assert_eq!(links.outgoing_to(0x0002, 1_100), None);
+    // Neighbor reports incoming cost 2 for us: our outgoing becomes 2.
+    links.note_link_status(
+        0x0002,
+        0x0001,
+        &[LinkStatusEntry::new(0x0001, 2, 0).unwrap()],
+        2_000,
+    );
+    assert_eq!(links.outgoing_to(0x0002, 2_100), Some(2));
+    // Entries for other neighbors do not touch our row.
+    links.note_link_status(
+        0x0002,
+        0x0001,
+        &[LinkStatusEntry::new(0x0009, 5, 0).unwrap()],
+        2_200,
+    );
+    assert_eq!(links.outgoing_to(0x0002, 2_300), Some(2));
+    // Aging drops the estimate; the count reports it.
+    assert_eq!(links.tick(2_000 + 61_000), 1);
+    assert_eq!(links.outgoing_to(0x0002, 2_000 + 61_001), None);
 }
