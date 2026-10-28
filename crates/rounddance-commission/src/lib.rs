@@ -49,8 +49,8 @@ pub use formation::{
     FORMATION_BEACON_ORDER, FORMATION_SUPERFRAME_ORDER, MAX_SCAN_CHANNELS,
 };
 pub use steering::{
-    BaselineSteeringPolicy, BeaconSurveyEntry, DiscoveryScan, SteeringMachine, SteeringPolicy,
-    SteeringState, SurveyError, SurveyTable, MAX_SURVEY_ENTRIES,
+    BaselineSteeringPolicy, BeaconSurveyEntry, DiscoveryScan, LinkEvidencePolicy, SteeringMachine,
+    SteeringPolicy, SteeringState, SurveyError, SurveyTable, MAX_SURVEY_ENTRIES,
 };
 pub use touchlink::{
     decrypt_network_key, development_block, encrypt_network_key, select_key_index, transport_block,

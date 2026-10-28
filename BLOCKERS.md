@@ -16,6 +16,7 @@ Status: NEEDS-HUMAN (remote diagnosis exhausted).
 - Lab policy meanwhile: ACM7/ACM8 are 15.4-ONLY units; no wifi-node duty. No AP/NM action needed — esp-lab healthy.
 - Non-LOW/LOW antenna combos on Xiao C6 are banned without human approval (suspected cause).
 - DIAGNOSTIC UPDATE (2026-10-27, BLE spike): deaf ACM7 hears 28 ambient BLE advertisers/60s + peer ESP OTA both directions (RSSI -35..-43). 2.4GHz RX path is fine — damage is wifi-path-specific. BLE is usable on deaf units, so they remain fully useful for 15.4 + BLE (Zigbee-Direct) work. Evidence: ~/hwscratch/ble/ (durable).
+- DIAGNOSTIC UPDATE (2026-10-28, repocode wave): 97A4 REJOINED post-restore and is helloing fresh (.47, rssi -50/-52, uptime counting). Deafness is INTERMITTENT, not permanent — a marginal/flaky wifi path now leads over the RF-death theory (consistent with e510's pre-death flake history). Policy unchanged (15.4-ONLY until human review — intermittent is not reliable); hello continuity under monitoring.
 
 ### B-002 (2026-10-27): C5 wifi-deaf on ACM2 — replug protocol + quarantine approval + txpower-cap ratification
 Status: NEEDS-HUMAN (remote recovery ladder exhausted: reflash x2, full erase_flash+reflash, uhubctl power-cycle).

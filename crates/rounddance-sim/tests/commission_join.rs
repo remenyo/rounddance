@@ -11,8 +11,8 @@
 //! Derived key bytes carry MOCK provenance (see commission vectors).
 
 use rounddance_commission::{
-    BaselineSteeringPolicy, BeaconSurveyEntry, ChannelMask, EccJoinKdf, InstallCode, JoinMethod,
-    JoinPolicy, JoinerMachine, KeyAttributes, SteeringMachine, TrustCenter,
+    BeaconSurveyEntry, ChannelMask, EccJoinKdf, InstallCode, JoinMethod, JoinPolicy, JoinerMachine,
+    KeyAttributes, LinkEvidencePolicy, SteeringMachine, TrustCenter,
 };
 use rounddance_mac_sap::{
     Channel, FramePayload, MacAddress, MacDataSap, MacMgmtSap, TxOptions, TxRequest, TxStatus,
@@ -53,16 +53,16 @@ fn secure_join(seed: u64, actions: Vec<ScriptAction>) -> JoinOutcome {
             pan_id: PAN,
             channel: 15,
             lqi: 220,
+            rssi: -40,
             permit_joining: true,
             router_capacity: true,
             end_device_capacity: true,
             protocol_version: 2,
         })
         .unwrap();
-    steering.finish_scan(&BaselineSteeringPolicy {
-        min_lqi: 100,
-        min_version: 2,
-    });
+    // Field admission (no absolute LQI gate — see
+    // `LinkEvidencePolicy`); the scripted beacon is strong.
+    steering.finish_scan(&LinkEvidencePolicy::default());
     assert_eq!(
         steering.state(),
         rounddance_commission::SteeringState::CandidateSelected

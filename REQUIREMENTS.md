@@ -310,7 +310,7 @@ Consumed inputs (implemented by earlier waves, not re-implemented):
 | 22-65816-030-111-02 | implemented + verified | `finding.rs`: `FinderInitiator` off-network fail, broadcast `0xffff`, answer logging (anchors p0082-L1725-L1736) | `tests/vectors.rs::vector_initiator_query_flow_*` |
 | 22-65816-030-111-03 | implemented + verified | `finding.rs`: `match_request_for` + `match_clusters` advance/skip (anchors p0082-L1737-L1750) | `tests/vectors.rs::vector_cluster_matching_*` |
 | 22-65816-030-111-04 | implemented + verified | `finding.rs`: `bind_entry_for` group 0x01 + push flag / unicast 0x03 + resolve-first (anchors p0082-L1750-L1765) | `tests/vectors.rs::vector_group_binding_*`, `vector_unicast_binding_needs_ieee_*` |
-| 22-65816-030-56-01 | accounted-for, N-A at this layer | Snap-back is TC policy config; no reduced-mode state lives here — `TrustCenter::close` restores the closed stance | code inspection (no reduced-mode state in this crate) |
+| 22-65816-030-56-01 | accounted-for, N-A at this layer | Snap-back is TC policy config; no reduced-mode state lives here — `TrustCenter::close` restores the closed stance (anchor p0033-L525-L529; wave-27 bonus-2 span correction: page p0033, not p0032) | code inspection (no reduced-mode state in this crate) |
 | 22-65816-030-56-02 | implemented + verified | `classical.rs`: `TrustCenter::set_allow_list` + `admitted` (anchor p0033-L534-L539) | `tests/vectors.rs::vector_allow_list_and_timeout_*` |
 | 22-65816-030-56-03 | implemented + verified | `classical.rs`: install-code-gated dynamic keys (anchor p0033-L542-L547); sweep-2 corrections applied: reflected CRC + LE check field, MMO derivation via `MmoJoinKdf` (`EccJoinKdf` retained as injection seam only) | `tests/vectors.rs::vector_install_code_validation`, `vector_install_code_derivation_mock` (MOCK provenance), `vector_install_code_crc_worked_22_65816_030_56_07`, `vector_install_code_mmo_worked_22_65816_030_56_08` |
 | 22-65816-030-56-07 | implemented + verified | `classical.rs`: install-code CRC parameter set — poly 0x1021, init 0xFFFF, XOR-out 0xFFFF, reflected in/out, LE check field (anchors p0041-L811-L827) | `tests/vectors.rs::vector_install_code_crc_worked_22_65816_030_56_07` (BDB worked example 0xB5C3 frozen; BE + non-reflected variants rejected) |
@@ -730,7 +730,7 @@ bounded opaque bytes.
 |----------------|-------|-------------------|----------------|
 | 07-5123-08-104-01 | implemented + verified | `mirror.rs::MirrorClient` keeps the meter-side grant record distinct from the ESI-side `MirrorTable` (mirrored-metering vs metering device types live on different ends, never merged) | `tests/se_mirror_vectors.rs::vector_meter_grant_intake_*` + sim `se_mirror_loop.rs` end-to-end |
 | 17-05019-012-422-02 | implemented + verified | `mirror.rs` direction model: physical meter hosts the server, ESI hosts client + one mirror server endpoint per granted meter | `tests/se_mirror_loop.rs::se_mirror_loop_end_to_end` (request → grant → push → release) |
-| 17-05019-012-423-01 | implemented + verified | `mirror.rs::MirrorTable::may_push` (only the granted meter pushes; violations `NOT_AUTHORIZED`, unknown endpoints `NOT_FOUND`) + `has_capacity` (capacity advertisement) + `AttrReadiness::classify` (unsupported → `UNSUPPORTED_ATTRIBUTE`, supported-but-empty → `NOT_FOUND` mapping, corpus term `ATTRIBUTE_UNAVAILABLE` noted) | `tests/se_mirror_vectors.rs::vector_mirror_push_gate_*`, `vector_mirror_readiness_*` |
+| 17-05019-012-423-01 | implemented + verified | `mirror.rs::MirrorTable::may_push` (only the granted meter pushes; violations `NOT_AUTHORIZED`, unknown endpoints `NOT_FOUND`) + `has_capacity` (capacity advertisement) + `AttrReadiness::classify` (unsupported → `UNSUPPORTED_ATTRIBUTE`, supported-but-empty → `NOT_FOUND` mapping, corpus term `ATTRIBUTE_UNAVAILABLE` noted; anchors p0105-L2333-L2339 + p0105-L2344-L2348 — wave-27 bonus-2 span correction extends the tail) | `tests/se_mirror_vectors.rs::vector_mirror_push_gate_*`, `vector_mirror_readiness_*` |
 | 17-05019-012-423-02 | implemented + verified | `snapshot.rs::SnapshotStore::query` (single matching snapshot by offset in take order, time window `[earliest, latest)`, cause-overlap filter, `CAUSE_ALL` wildcard; miss → `NOT_FOUND`) | `tests/se_mirror_vectors.rs::vector_meter_get_snapshot_*`, `vector_snapshot_store_take_query_*`, sim `se_mirror_loop.rs` retrieve leg |
 | 07-5123-08-1044-01 | implemented + verified | `mirror.rs` empty `RequestMirror`/`RemoveMirror` codecs + `metering::ServerBehavior::request_mirror`/`remove_mirror` outbound emitters | `tests/se_mirror_vectors.rs::vector_empty_setup_codec_*`, `vector_meter_setup_outbound_*` |
 | 07-5123-08-1044-02 | implemented + verified | `mirror.rs` 2-octet LE `RequestMirrorResponse`/`MirrorRemoved` codecs (incl. `0xFFFF` refusal + grantable-range gate) + `MirrorClient::on_response`/`on_removed` | `tests/se_mirror_vectors.rs::vector_mirror_endpoint_codec_*`, `vector_mirror_client_record_*`, `vector_meter_grant_intake_*` |
@@ -741,3 +741,31 @@ bounded opaque bytes.
 | 07-5123-08-1045-02 | implemented + verified | `snapshot.rs` GetSnapshot codec + PublishSnapshot header codec (16 octets) + bounded sub-payload carrier (≤48) + typed TOU builder (≤4 tiers) | `tests/se_mirror_vectors.rs::vector_get_snapshot_codec_*`, `vector_publish_snapshot_codec_*`, `vector_tou_sub_payload_*` |
 | 07-5123-08-1045-03 | implemented + verified | `snapshot.rs` cause bits (tariff-change 3, manual 10, scheduled 16, `SUPPORTED_CAUSES` mask) + `SnapshotStore::take_pair` (before/after pair around tariff changes) | `tests/se_mirror_vectors.rs::vector_snapshot_take_pair_*` |
 | 07-5123-08-1045-04 | implemented + verified | `snapshot.rs::SnapshotStore` (8-entry ring, consecutive ids, oldest evicted when full, `match_count` for `total_found`) | `tests/se_mirror_vectors.rs::vector_snapshot_store_take_query_*`, `se_roundtrip.rs::fuzz_mirror_snapshot_stay_bounded` |
+
+## Wave-27 traceability — LQI/RSSI metering fix + steering policy (`rounddance-hal-esp`, `rounddance-commission`)
+
+Corpus ID reused verbatim: `22-65816-030-91-01` (suitability is read
+from the discovery table by the application). One repo-minted ID
+(`RD-HAL-ESP-13`), MINTED-pending-confirm. Wording in code/tests is
+paraphrase only, never spec text (D1). No new corpus claims: the
+metering contract comes from the IDF header
+(`components/ieee802154/include/esp_ieee802154.h` §"reception" +
+`esp_ieee802154_types.h` `frame_info_t`), and the flat-LQI phenomenon
+is field evidence (bench logs `join_run5/6.log`: tail-LQI 10–11,
+tail-RSSI −28 dBm, nRF grading the same air 252/255 at ~100% decode),
+not a spec value.
+
+| Requirement ID | State | Implementing code | Verifying test |
+|----------------|-------|-------------------|----------------|
+| 22-65816-030-91-01 | implemented + verified (reused: application-side suitability) | `steering.rs::LinkEvidencePolicy` (decode-by-delivery + `min_rssi` sanity, default −90 dBm + `lqi_floor: None`; ranking stays relative, ties to lower PAN) + `JoinerApp::survey` + host `scenario.rs` switched from the absolute `min_lqi = 100` gate | `tests/vectors.rs::vector_field_policy_admits_flat_lqi_strong_link`, `vector_field_policy_reject_legs`, `vector_field_policy_ranking_and_opt_in_floor` + sim `commission_join.rs` end-to-end admit |
+| RD-HAL-ESP-13 | implemented + verified | `esp.rs::esp_ieee802154_receive_done` reads per-frame channel/RSSI/LQI from the callback `frame_info` (primary) with the FCS-replaced frame-tail fallback + null-info counter; `ffi.rs::EspFrameInfo` repr(C) binding; most-recent getters deliberately unbound (stale on air) | `tests/adapter_mock.rs::rx_meters_are_per_frame_not_stale` (back-to-back + reversed pairs keep their own meters) + `c6_standalone.rs` full run under the field policy |
+
+Bonus-2 span corrections applied (4, all mechanics, zero substance —
+see corpus `mining-log.md`, bonus batch 2): `22-65816-030-56-01`
+anchor is p0033-L525-L529 (embedded in its row above);
+`17-05019-012-423-01` anchors are p0105-L2333-L2339 +
+p0105-L2344-L2348 (embedded in its row above);
+`17-05019-012-422-03` anchor extends to p0033-L670-L673 (no repo
+implementing row — the alternative-unit claim lives in corpus only);
+`07-5356-22-C26-02` anchor extends to p0149-L3856-L3860 (no repo
+implementing row — method-selection claim lives in corpus only).

@@ -329,6 +329,37 @@ fn rx_pan_indication_parses_src_and_payload() {
     assert_eq!(ind.lqi, 210);
 }
 
+/// Per-frame attribution: consecutive frames with wildly different
+/// meters must each keep their own (wave-27: the old most-recent
+/// getters smeared one frame's meters onto the next — flat LQI 10/11
+/// on every beacon while RSSI swung floor-to-strong). Two beacons from
+/// the same sender, injected back-to-back with distinct (channel,
+/// RSSI, LQI), surface with exactly their own meters in order.
+#[test]
+fn rx_meters_are_per_frame_not_stale() {
+    let mut a = adapter();
+    // Two valid PAN frames addressed to us (0x0001 on PAN 0x1234).
+    let (first, first_len) = build_data_frame(9, 0x1234, 0x0001, 0x0002, &[0x01], false).unwrap();
+    let (second, second_len) = build_data_frame(9, 0x1234, 0x0001, 0x0002, &[0x02], false).unwrap();
+    // Wave-27 bench shape: flat LQI, swinging RSSI — plus a second
+    // frame with totally different meters to catch any smearing.
+    let rx_first = RxFrame::from_slice(&first[..first_len], 15, -28, 10).unwrap();
+    let rx_second = RxFrame::from_slice(&second[..second_len], 20, -61, 200).unwrap();
+    a.driver_mut().inject_rx(&[rx_first, rx_second]);
+    let ind_first = a.poll_indication().unwrap();
+    assert_eq!(ind_first.msdu.as_slice(), [0x01]);
+    assert_eq!(ind_first.lqi, 10);
+    let ind_second = a.poll_indication().unwrap();
+    assert_eq!(ind_second.msdu.as_slice(), [0x02]);
+    assert_eq!(ind_second.lqi, 200);
+    // The second frame's LQI must not leak backwards either: replay the
+    // same pair reversed and each frame still carries its own meters.
+    let mut b = adapter();
+    b.driver_mut().inject_rx(&[rx_second, rx_first]);
+    assert_eq!(b.poll_indication().unwrap().lqi, 200);
+    assert_eq!(b.poll_indication().unwrap().lqi, 10);
+}
+
 #[test]
 fn foreign_pan_routes_to_interpan() {
     let mut a = adapter();

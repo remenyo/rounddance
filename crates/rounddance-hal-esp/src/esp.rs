@@ -40,10 +40,17 @@ static RX_STATE: AtomicU8 = AtomicU8::new(0);
 static mut RX_BUF: [u8; MAX_AIR_FRAME] = [0; MAX_AIR_FRAME];
 /// Live length of `RX_BUF`.
 static RX_LEN: AtomicUsize = AtomicUsize::new(0);
-/// Snapshot RSSI / LQI / channel for the mailed frame.
+/// Snapshot RSSI / LQI / channel for the mailed frame. Every field is
+/// per-frame: the ISR fills all three from the callback's `frame_info`
+/// pointer (primary) or the FCS-replaced frame tail (fallback) — never
+/// from a most-recent getter, so consecutive frames cannot smear each
+/// other's meters.
 static RX_RSSI: AtomicI8 = AtomicI8::new(0);
 static RX_LQI: AtomicU8 = AtomicU8::new(0);
 static RX_CH: AtomicU8 = AtomicU8::new(15);
+/// Frames metered from the tail because `frame_info` arrived null.
+/// Diagnostics only (a healthy driver never sends null here).
+static RX_INFO_NULL: AtomicU32 = AtomicU32::new(0);
 /// Frames dropped because the mailbox was still full.
 static RX_OVERRUN: AtomicU32 = AtomicU32::new(0);
 /// Current channel (task-side cache, mirrored to `RX_CH` for the ISR).
@@ -70,17 +77,37 @@ pub extern "C" fn esp_ieee802154_transmit_failed(_frame: *const u8, error: u32) 
 }
 
 /// Driver event hook: frame received. Copies the frame into the
-/// mailbox, snapshots RSSI/LQI, releases the driver buffer, sets the
-/// flag — the proven C-leg sequence, bounded and lock-free.
+/// mailbox, snapshots per-frame RSSI/LQI/channel, releases the driver
+/// buffer, sets the flag — the proven C-leg sequence, bounded and
+/// lock-free.
+///
+/// Metering contract (`esp_ieee802154.h` §"reception",
+/// `esp_ieee802154_types.h` `frame_info_t`): the `info` pointer carries
+/// this frame's channel/RSSI/LQI, and the hardware-verified FCS is
+/// REPLACED by the frame's RSSI and LQI octets, so a Len+2 frame reads
+/// `[Len][Len-2 payload bytes][RSSI][LQI]`. Meters come from `info`
+/// first and the frame tail second — never from the most-recent
+/// getters, which proved stale on air.
+///
+/// HARDWARE NOTE (wave-27 field evidence): on the C6 units under test
+/// the LQI meter reads flat 9–11 on links that decode ~100% (nRF grades
+/// the same air 252/255; tail-RSSI a rock-stable −28 dBm while the
+/// stale getter swung −59…−102 dBm frame to frame). The flat LQI is a
+/// metering quirk of this hardware/firmware, not a link verdict — no
+/// admission policy may treat a C6 LQI reading as link quality. See
+/// `rounddance-commission::LinkEvidencePolicy`.
 ///
 /// SAFETY: (1) null-checked; (2) the copy is bounded to `MAX_AIR_FRAME`
 /// bytes into a static buffer the ISR alone writes, and only while the
 /// mailbox is empty — task code touches `RX_BUF` only after swapping
-/// state to draining, a state the ISR never writes in; (3)
+/// state to draining, a state the ISR never writes in; (3) `info` is
+/// either null (tail fallback) or points at one driver-owned
+/// `EspFrameInfo` valid for the callback duration (header contract),
+/// read with a plain copy while still in the callback; (4)
 /// `receive_handle_done` is called exactly once per non-null frame with
-/// the driver's own pointer; (4) no logging, locks, or allocation.
+/// the driver's own pointer; (5) no logging, locks, or allocation.
 #[no_mangle]
-pub extern "C" fn esp_ieee802154_receive_done(frame: *mut u8, _info: *mut u8) {
+pub extern "C" fn esp_ieee802154_receive_done(frame: *mut u8, info: *mut ffi::EspFrameInfo) {
     if frame.is_null() {
         return;
     }
@@ -100,14 +127,32 @@ pub extern "C" fn esp_ieee802154_receive_done(frame: *mut u8, _info: *mut u8) {
     // `addr_of_mut!` creates no reference, so no `static_mut_refs`.
     let total = unsafe {
         let len = (*frame) as usize;
-        let total = len.saturating_add(1).min(MAX_AIR_FRAME);
+        let full = len.saturating_add(1);
+        let total = full.min(MAX_AIR_FRAME);
         let dst = core::ptr::addr_of_mut!(RX_BUF).cast::<u8>();
         core::ptr::copy_nonoverlapping(frame, dst, total);
-        // Snapshot the reception meters while they still belong to this
-        // frame (header §"reception info" accessors).
-        RX_RSSI.store(ffi::esp_ieee802154_get_recent_rssi(), Ordering::Relaxed);
-        RX_LQI.store(ffi::esp_ieee802154_get_recent_lqi(), Ordering::Relaxed);
-        RX_CH.store(CURRENT_CH.load(Ordering::Relaxed), Ordering::Relaxed);
+        // Per-frame meters: the callback's own info struct first.
+        if let Some(meters) = info.as_ref() {
+            RX_CH.store(meters.channel, Ordering::Relaxed);
+            RX_RSSI.store(meters.rssi, Ordering::Relaxed);
+            RX_LQI.store(meters.lqi, Ordering::Relaxed);
+        } else {
+            // Driver sent no info (never observed): fall back to the
+            // FCS-replaced tail — `[..][RSSI][LQI]` at the frame's own
+            // end — and the task-side channel cache. Counted so a sick
+            // driver shows up in diagnostics instead of silently
+            // degrading attribution. The read stays inside the mailbox
+            // clamp (driver RX buffers are max-size; a corrupt length
+            // past the clamp yields no meters rather than an OOB read —
+            // the frame itself will fail parsing downstream anyway).
+            RX_INFO_NULL.fetch_add(1, Ordering::Relaxed);
+            if full >= 2 && full <= MAX_AIR_FRAME {
+                let tail = core::slice::from_raw_parts(frame as *const u8, full);
+                RX_RSSI.store(tail[full - 2] as i8, Ordering::Relaxed);
+                RX_LQI.store(tail[full - 1], Ordering::Relaxed);
+            }
+            RX_CH.store(CURRENT_CH.load(Ordering::Relaxed), Ordering::Relaxed);
+        }
         total
     };
     RX_LEN.store(total, Ordering::Relaxed);
@@ -186,6 +231,15 @@ impl EspIdfDriver {
     #[must_use]
     pub fn rx_overruns() -> u32 {
         RX_OVERRUN.load(Ordering::Relaxed)
+    }
+
+    /// Frames metered from the frame tail because the driver's
+    /// `frame_info` pointer arrived null. Diagnostics only — a healthy
+    /// driver always passes info, so any nonzero count here is a
+    /// firmware bug report, not a tuning knob.
+    #[must_use]
+    pub fn rx_info_fallbacks() -> u32 {
+        RX_INFO_NULL.load(Ordering::Relaxed)
     }
 }
 

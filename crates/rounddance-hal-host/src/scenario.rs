@@ -28,8 +28,8 @@
 use crate::{EventKind, HostEntropy, HostLog, HostMedium, HostStore, HostTimer};
 use rounddance_aps::{DataDest, DataHeader, DeliveryMode, FrameControl as ApsControl};
 use rounddance_commission::{
-    BaselineSteeringPolicy, BeaconSurveyEntry, ChannelMask, FormationConfig, InstallCode,
-    JoinMethod, JoinPolicy, JoinerMachine, JoinerState, KeyAttributes, LogicalType, MmoJoinKdf,
+    BeaconSurveyEntry, ChannelMask, FormationConfig, InstallCode, JoinMethod, JoinPolicy,
+    JoinerMachine, JoinerState, KeyAttributes, LinkEvidencePolicy, LogicalType, MmoJoinKdf,
     PanChoice, SteeringMachine, TrustCenter,
 };
 use rounddance_mac_sap::{
@@ -82,6 +82,7 @@ fn survey_and_select(log: &mut HostLog, run_id: u64, now: u64) -> SteeringMachin
             pan_id: HOST_PAN,
             channel: 15,
             lqi: 220,
+            rssi: -40,
             permit_joining: true,
             router_capacity: true,
             end_device_capacity: true,
@@ -96,10 +97,9 @@ fn survey_and_select(log: &mut HostLog, run_id: u64, now: u64) -> SteeringMachin
         "scanning",
         "candidate-selected",
     );
-    steering.finish_scan(&BaselineSteeringPolicy {
-        min_version: 2,
-        min_lqi: 100,
-    });
+    // Field admission (no absolute LQI gate — see
+    // `LinkEvidencePolicy`); the scripted host beacon is strong.
+    steering.finish_scan(&LinkEvidencePolicy::default());
     assert_eq!(
         steering.state(),
         rounddance_commission::SteeringState::CandidateSelected

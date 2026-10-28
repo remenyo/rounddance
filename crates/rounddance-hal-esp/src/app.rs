@@ -31,8 +31,8 @@
 
 use rounddance_aps::{decode_data, DataDest, DataHeader, DeliveryMode, FrameControl as ApsFc};
 use rounddance_commission::{
-    BaselineSteeringPolicy, BeaconSurveyEntry, ChannelMask, FormationConfig, FormationState,
-    InstallCode, JoinError, JoinMethod, JoinPolicy, JoinerMachine, JoinerState, KeyAttributes,
+    BeaconSurveyEntry, ChannelMask, FormationConfig, FormationState, InstallCode, JoinError,
+    JoinMethod, JoinPolicy, JoinerMachine, JoinerState, KeyAttributes, LinkEvidencePolicy,
     LogicalType, MmoJoinKdf, PanChoice, SteeringMachine, SteeringState, TrustCenter,
 };
 use rounddance_nwk::{decode as nwk_decode, FrameControl as NwkFc, NwkHeader};
@@ -525,10 +525,11 @@ impl<'a> JoinerApp<'a> {
         entry: BeaconSurveyEntry,
     ) -> Result<SteeringState, AppError> {
         self.steering.ingest(entry).map_err(|_| AppError::BadRole)?;
-        self.steering.finish_scan(&BaselineSteeringPolicy {
-            min_lqi: 100,
-            min_version: 2,
-        });
+        // Field admission: decode success + RSSI sanity, no absolute
+        // LQI gate (C6 LQI reads flat 9–11 on ~100%-decode links —
+        // wave-27 — so `min_lqi = 100` could never pass on this
+        // hardware; see `LinkEvidencePolicy`).
+        self.steering.finish_scan(&LinkEvidencePolicy::default());
         let state = self.steering.state();
         if state == SteeringState::CandidateSelected {
             log.log("C6APP SURVEY candidate pan=0xc601");

@@ -283,6 +283,7 @@ fn rcp_join_announce_over_uart() {
             pan_id: PAN,
             channel: 15,
             lqi: 220,
+            rssi: -40,
             permit_joining: true,
             router_capacity: true,
             end_device_capacity: true,

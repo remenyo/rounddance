@@ -320,6 +320,7 @@ fn fuzz_machines_reject_arbitrary_events() {
                         pan_id: rng.below(0x1_0000) as u16,
                         channel: 11 + rng.below(16) as u8,
                         lqi: rng.below(0x100) as u8,
+                        rssi: rng.below(0x100) as u8 as i8,
                         permit_joining: rng.below(2) == 0,
                         router_capacity: rng.below(2) == 0,
                         end_device_capacity: rng.below(2) == 0,

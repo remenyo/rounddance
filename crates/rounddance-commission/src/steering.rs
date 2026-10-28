@@ -25,14 +25,25 @@ pub const MAX_SURVEY_ENTRIES: usize = 16;
 ///
 /// Requirement `05-3474-23-3613-01` (beacon processing feeds
 /// discovery; anchor p0249-L5842).
+///
+/// Every row is one FCS-passing decode: presence in the table IS the
+/// decode evidence (the radio only delivers frames that pass the
+/// hardware check). `rssi`/`lqi` are that frame's own meters, filled by
+/// whoever heard it (on ESP: the HAL's per-frame snapshot, `frame_info`
+/// first, frame tail second).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BeaconSurveyEntry {
     /// PAN identifier heard.
     pub pan_id: u16,
     /// Channel the beacon arrived on.
     pub channel: u8,
-    /// Link quality 0–255 (higher is better; ranks candidates).
+    /// Link quality 0–255 of the heard frame (ranks candidates;
+    /// NEVER an absolute gate on flat-metering hardware — see
+    /// [`LinkEvidencePolicy`]).
     pub lqi: u8,
+    /// RSSI in dBm of the heard frame (sanity-gates admission; see
+    /// [`LinkEvidencePolicy`]).
+    pub rssi: i8,
     /// Whether the beacon advertises joining permitted.
     pub permit_joining: bool,
     /// Whether a router child would have room.
@@ -161,7 +172,10 @@ pub trait SteeringPolicy {
 }
 
 /// Baseline gate: join-permitted, end-device room, minimum link
-/// quality. Tests and simple apps use this directly.
+/// quality. Tests and simple apps with honest meters use this
+/// directly. NOT for C6 field units: their LQI meter reads flat 9–11
+/// on links that decode ~100% (wave-27), so any absolute `min_lqi`
+/// there is unpassable — use [`LinkEvidencePolicy`] instead.
 #[derive(Debug, Clone, Copy)]
 pub struct BaselineSteeringPolicy {
     /// Minimum link quality admitted.
@@ -176,6 +190,72 @@ impl SteeringPolicy for BaselineSteeringPolicy {
             && entry.end_device_capacity
             && entry.lqi >= self.min_lqi
             && entry.protocol_version >= self.min_version
+    }
+}
+
+/// Hardware-grounded suitability: decode success + RSSI sanity +
+/// optional LQI floor. The default admission for field apps.
+///
+/// Admission is evidence, not a quality number:
+/// * **Decode success** — table presence means one FCS-passing decode
+///   of this beacon (the radio delivers nothing else). No counter is
+///   claimed: one frame is one frame.
+/// * **RSSI sanity** — the heard frame's RSSI must clear `min_rssi`.
+///   The default (−90 dBm) sits 11 dB above the measured C6 noise floor
+///   (ED −101 dBm, ch15, wave-2b audit) and far below every
+///   field-observed successful decode (tail-RSSI −28/−29 dBm on the
+///   bench link, wave-27): it rejects only pathologically weak beacons
+///   while admitting everything the hardware can actually decode.
+/// * **LQI is ranking-only by default** — highest LQI still wins the
+///   candidate race (ties break to the lower PAN), but no absolute LQI
+///   value gates admission (`lqi_floor: None`). Rationale: the C6 LQI
+///   meter is flat 9–11 on ~100%-decode links (wave-27: same air grades
+///   252/255 on the nRF) — an absolute floor would either be unpassable
+///   (like the old `min_lqi = 100`) or pretend a number means something
+///   it does not. Set `lqi_floor: Some` only on radios whose LQI meter
+///   is calibrated, and document the calibration next to the value.
+///
+/// Requirement `22-65816-030-91-01` (suitability is read from the
+/// discovery table by the application): this policy IS that
+/// application-side reading for field hardware.
+#[derive(Debug, Clone, Copy)]
+pub struct LinkEvidencePolicy {
+    /// Minimum protocol version admitted.
+    pub min_version: u8,
+    /// Minimum per-frame RSSI (dBm) admitted.
+    pub min_rssi: i8,
+    /// Optional absolute LQI floor. `None` (default) disables the LQI
+    /// gate entirely — the honest setting for flat-metering units.
+    pub lqi_floor: Option<u8>,
+}
+
+impl LinkEvidencePolicy {
+    /// Field default: version 2+, RSSI sanity at −90 dBm, no LQI gate.
+    /// Admits the wave-27 bench link (flat LQI 10–11, RSSI −28 dBm)
+    /// that the old absolute gate rejected.
+    #[must_use]
+    pub const fn field_default() -> Self {
+        Self {
+            min_version: 2,
+            min_rssi: -90,
+            lqi_floor: None,
+        }
+    }
+}
+
+impl Default for LinkEvidencePolicy {
+    fn default() -> Self {
+        Self::field_default()
+    }
+}
+
+impl SteeringPolicy for LinkEvidencePolicy {
+    fn acceptable(&self, entry: &BeaconSurveyEntry) -> bool {
+        entry.permit_joining
+            && entry.end_device_capacity
+            && entry.protocol_version >= self.min_version
+            && entry.rssi >= self.min_rssi
+            && self.lqi_floor.is_none_or(|floor| entry.lqi >= floor)
     }
 }
 

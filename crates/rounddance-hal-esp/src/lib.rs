@@ -43,6 +43,12 @@
 //! * **Retry policy**: the driver reports each transaction once
 //!   (auto-ACK + CSMA in hardware, no HAL retry); this adapter maps the
 //!   single report to the SAP confirm. Upper layers own retry.
+//! * **Per-frame metering**: RX RSSI/LQI/channel come from the RX-done
+//!   callback's `frame_info` (tail fallback if null) — never from the
+//!   most-recent getters, which proved stale on air. C6 LQI reads flat
+//!   9–11 on links that decode ~100%: a metering quirk, not a link
+//!   verdict (see `esp` docs; admission policy lives in
+//!   `rounddance-commission`).
 //!
 //! # `unsafe` confinement
 //!

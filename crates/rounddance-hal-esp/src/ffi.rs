@@ -11,12 +11,46 @@
 //! Header: `components/ieee802154/include/esp_ieee802154.h` (and
 //! `esp_ieee802154_types.h` for the TX-error enum).
 
-// The driver entry points take plain C types only, so the declarations
-// need no IDF struct bindings. WHY-SAFE (whole module): declaring an
-// `extern "C"` symbol is sound when the signature matches the C
-// definition; each signature below was checked against the cited header
-// section, and the spike binary proved the set links and behaves on
-// real C6 hardware (10/10 TX-DONE OTA-verified).
+// The driver entry points take plain C types only, with one exception:
+// the RX-done callback carries a per-frame info pointer whose layout is
+// bound below. WHY-SAFE (whole module): declaring an `extern "C"`
+// symbol is sound when the signature matches the C definition; each
+// signature below was checked against the cited header section, and the
+// spike binary proved the set links and behaves on real C6 hardware
+// (10/10 TX-DONE OTA-verified).
+//
+// Deliberately NOT bound: `esp_ieee802154_get_recent_rssi` /
+// `esp_ieee802154_get_recent_lqi` (header §"reception info"). They
+// report the most-recent frame's meters with no per-frame attribution,
+// and proved stale on air (wave-27: C6 LQI flat 9–11 and RSSI swinging
+// floor-to-strong between consecutive beacons from one fixed sender,
+// while the frame tail stayed rock-stable). Per-frame metering comes
+// from [`EspFrameInfo`] (primary) and the FCS-replaced frame tail
+// (fallback) — see `esp.rs`.
+///
+/// Per-frame RX metadata: `esp_ieee802154_frame_info_t`
+/// (`esp_ieee802154_types.h`). Field order and types mirror the C
+/// struct exactly (`bool` = 1 byte both sides; `timestamp` first
+/// 8-aligned member after the 5 header bytes, so 3 pad bytes precede
+/// it; trailing `mpf_index` pads the struct to 24).
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct EspFrameInfo {
+    /// The frame was ACKed with frame-pending set.
+    pub pending: bool,
+    /// The frame needs upper-layer processing.
+    pub process: bool,
+    /// Channel the frame arrived on (11–26).
+    pub channel: u8,
+    /// Per-frame RSSI in dBm.
+    pub rssi: i8,
+    /// Per-frame LQI (0–255 scale per radio convention).
+    pub lqi: u8,
+    /// SFD-timestamp of reception (driver time base).
+    pub timestamp: u64,
+    /// Multipan interface that matched, or `ESP_IEEE802154_MULTIPAN_MAX`.
+    pub mpf_index: u32,
+}
 
 unsafe extern "C" {
     /// `esp_err_t esp_ieee802154_enable(void)` — header §"basic",
@@ -66,15 +100,6 @@ unsafe extern "C" {
     /// header §"energy detection"; result arrives via
     /// `esp_ieee802154_energy_detect_done`. WHY-SAFE: scalar arg.
     pub(crate) fn esp_ieee802154_energy_detect(duration: u32) -> i32;
-    /// `int8_t esp_ieee802154_get_recent_rssi(void)` — header
-    /// §"reception info"; RSSI of the most recently received frame.
-    /// WHY-SAFE: no args, returns a signed byte by value. Called from
-    /// the RX callback (ISR) so the reading belongs to this frame.
-    pub(crate) fn esp_ieee802154_get_recent_rssi() -> i8;
-    /// `uint8_t esp_ieee802154_get_recent_lqi(void)` — header
-    /// §"reception info"; LQI of the most recently received frame.
-    /// WHY-SAFE: as above.
-    pub(crate) fn esp_ieee802154_get_recent_lqi() -> u8;
     /// `esp_err_t esp_ieee802154_receive_handle_done(const uint8_t
     /// *frame)` — header §"reception"; releases a driver RX buffer
     /// (or a DONE-path ACK buffer). MUST be called exactly once per

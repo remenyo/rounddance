@@ -190,18 +190,19 @@ fn vector_bad_scan_fails_22_65816_030_91_01() {
 fn vector_candidate_ranking_22_65816_030_91_01() {
     let mut m = SteeringMachine::new();
     m.begin_scan(ChannelMask::all_24g(), 3).unwrap();
-    let row = |pan, lqi, permit| BeaconSurveyEntry {
+    let row = |pan, lqi, rssi, permit| BeaconSurveyEntry {
         pan_id: pan,
         channel: 15,
         lqi,
+        rssi,
         permit_joining: permit,
         router_capacity: true,
         end_device_capacity: true,
         protocol_version: 2,
     };
-    m.ingest(row(0x2222, 200, true)).unwrap();
-    m.ingest(row(0x1111, 200, true)).unwrap();
-    m.ingest(row(0x3333, 250, false)).unwrap();
+    m.ingest(row(0x2222, 200, -40, true)).unwrap();
+    m.ingest(row(0x1111, 200, -40, true)).unwrap();
+    m.ingest(row(0x3333, 250, -40, false)).unwrap();
     m.finish_scan(&BaselineSteeringPolicy {
         min_lqi: 100,
         min_version: 2,
@@ -220,6 +221,9 @@ fn vector_no_suitable_network_22_65816_030_91_01() {
         pan_id: 0x1234,
         channel: 15,
         lqi: 10,
+        // Strong frame (wave-27 bench tail-RSSI) that the absolute
+        // gate still refuses: pins the old gate's documented behavior.
+        rssi: -28,
         permit_joining: true,
         router_capacity: true,
         end_device_capacity: true,
@@ -1692,4 +1696,134 @@ fn vector_join_unsecured_keywait_leg_and_edges() {
     j.on_transport_timeout();
     assert_eq!(j.state(), JoinerState::Failed);
     assert_eq!(j.error(), Some(JoinError::NoTransport));
+}
+
+// 22-65816-030-91-01: the field policy admits a strong link the old
+// absolute gate refused. Transcript replayed from the wave-27 bench
+// logs (`join_run5/6.log`): tail-LQI 10–11 with tail-RSSI −28 dBm on a
+// permit-open beacon — one FCS-passing decode the C6 HAL attributed
+// per-frame. `LinkEvidencePolicy::default()` selects it;
+// `BaselineSteeringPolicy { min_lqi: 100, .. }` parks in
+// `NoSuitableNetwork` on the identical row.
+#[test]
+fn vector_field_policy_admits_flat_lqi_strong_link() {
+    let entry = BeaconSurveyEntry {
+        pan_id: 0x1A2B,
+        channel: 15,
+        lqi: 10,
+        rssi: -28,
+        permit_joining: true,
+        router_capacity: true,
+        end_device_capacity: true,
+        protocol_version: 2,
+    };
+    assert!(LinkEvidencePolicy::default().acceptable(&entry));
+    let mut m = SteeringMachine::new();
+    m.begin_scan(ChannelMask::from_list(&[15]).unwrap(), 3)
+        .unwrap();
+    m.ingest(entry).unwrap();
+    m.finish_scan(&LinkEvidencePolicy::default());
+    assert_eq!(m.state(), SteeringState::CandidateSelected);
+    assert_eq!(m.candidate().unwrap().pan_id, 0x1A2B);
+
+    // The old absolute gate on the same row: unpassable on this
+    // hardware, by construction (pins the wave-26 survey outcome).
+    let mut old = SteeringMachine::new();
+    old.begin_scan(ChannelMask::from_list(&[15]).unwrap(), 3)
+        .unwrap();
+    old.ingest(entry).unwrap();
+    old.finish_scan(&BaselineSteeringPolicy {
+        min_lqi: 100,
+        min_version: 2,
+    });
+    assert_eq!(old.state(), SteeringState::NoSuitableNetwork);
+}
+
+// 22-65816-030-91-01: the field policy still rejects every
+// non-evidence leg — closed permit, no end-device room, old version,
+// and pathologically weak RSSI each park the machine.
+#[test]
+fn vector_field_policy_reject_legs() {
+    let good = BeaconSurveyEntry {
+        pan_id: 0x1A2B,
+        channel: 15,
+        lqi: 11,
+        rssi: -28,
+        permit_joining: true,
+        router_capacity: true,
+        end_device_capacity: true,
+        protocol_version: 2,
+    };
+    let legs = [
+        (
+            "closed permit",
+            BeaconSurveyEntry {
+                permit_joining: false,
+                ..good
+            },
+        ),
+        (
+            "no room",
+            BeaconSurveyEntry {
+                end_device_capacity: false,
+                ..good
+            },
+        ),
+        (
+            "old version",
+            BeaconSurveyEntry {
+                protocol_version: 1,
+                ..good
+            },
+        ),
+        ("weak rssi", BeaconSurveyEntry { rssi: -95, ..good }),
+        ("floor rssi", BeaconSurveyEntry { rssi: -101, ..good }),
+    ];
+    for (name, entry) in legs {
+        assert!(!LinkEvidencePolicy::default().acceptable(&entry), "{name}");
+        let mut m = SteeringMachine::new();
+        m.begin_scan(ChannelMask::from_list(&[15]).unwrap(), 3)
+            .unwrap();
+        m.ingest(entry).unwrap();
+        m.finish_scan(&LinkEvidencePolicy::default());
+        assert_eq!(m.state(), SteeringState::NoSuitableNetwork, "{name}");
+    }
+    // Sanity: the unmodified row still admits.
+    assert!(LinkEvidencePolicy::default().acceptable(&good));
+}
+
+// 22-65816-030-91-01: ranking stays relative under the field policy —
+// highest LQI wins, ties break to the lower PAN — and the opt-in LQI
+// floor only bites when a calibrated radio asks for it.
+#[test]
+fn vector_field_policy_ranking_and_opt_in_floor() {
+    let row = |pan, lqi| BeaconSurveyEntry {
+        pan_id: pan,
+        channel: 15,
+        lqi,
+        rssi: -28,
+        permit_joining: true,
+        router_capacity: true,
+        end_device_capacity: true,
+        protocol_version: 2,
+    };
+    let mut m = SteeringMachine::new();
+    m.begin_scan(ChannelMask::all_24g(), 3).unwrap();
+    m.ingest(row(0x2222, 11)).unwrap();
+    m.ingest(row(0x1111, 11)).unwrap();
+    m.ingest(row(0x3333, 10)).unwrap();
+    m.finish_scan(&LinkEvidencePolicy::default());
+    assert_eq!(m.state(), SteeringState::CandidateSelected);
+    // Flat-meter tie (11 == 11) breaks to the lower PAN; the 10 loses
+    // relatively without any absolute gate firing.
+    assert_eq!(m.candidate().unwrap().pan_id, 0x1111);
+
+    // Opt-in floor: a calibrated radio may demand LQI ≥ 200 — the flat
+    // bench link then refuses (documented opt-in, never the default).
+    let strict = LinkEvidencePolicy {
+        lqi_floor: Some(200),
+        ..LinkEvidencePolicy::default()
+    };
+    assert!(!strict.acceptable(&row(0x1A2B, 11)));
+    assert!(strict.acceptable(&row(0x1A2B, 220)));
 }

@@ -161,6 +161,7 @@ impl FullStack {
                     pan_id: APP_PAN,
                     channel: APP_CHANNEL,
                     lqi: 220,
+                    rssi: -40,
                     permit_joining: true,
                     router_capacity: true,
                     end_device_capacity: true,
