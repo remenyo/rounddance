@@ -959,3 +959,25 @@ assist per the wave-2b contract).
 |----------------|-------|-------------------|----------------|
 | 05-3474-23-431-01 | implemented + verified | `SecurityControl::with_level` (incoming level restore) + `AuxHeader::decode_with_level` (zeroed-level NWK decode; trailing octet under network-key bits is the key sequence number) + `AuxReception::decode` doc pointer (§4.3.1.1 outgoing step 8, anchor p0422-L10154; §4.3.1.2 incoming step 1, anchor p0422-L10159-L10160; sequence-number field §4.5.1.4, anchor p0481-L11467-L11469) | `security/tests/vectors.rs::vector_nwk_ember_zeroed_level_opens` (genuine Ember U1/B1 frames: raw decode sees level 0 = the wave-33 trap, restored decode opens both) + `fuzz_nwk_ember_open_rejects_mutations` (7 wrong levels refused) |
 | 05-3474-23-4522-01 | implemented + verified | `NwkNonce::from_header` (13-octet source + counter + control order) + `NWK_NONCE_LEN` (§4.5.2.2, anchor p0481-L11480-L11488) | `security/tests/vectors.rs::vector_nwk_ember_zeroed_level_opens` (pinned nonce bytes per frame) + `vector_nwk_nonce_roundtrip_seal_open` (counter/sender sweep) + `fuzz_nwk_ember_open_rejects_mutations` (12495-case nonce/AAD/ciphertext mutation matrix all refused) |
+
+## Wave-40 traceability — packet inspector scaffold (`rounddance-inspect`)
+
+Inspector scaffold only: 802.15.4 MAC + NWK + APS + ZCL dissector chain
+producing structured decode trees, offline pcap/pcapng ingest with text /
+JSON reports, a stateful session-engine skeleton (per-device / network
+tables), and listener / sender traits with NO live drivers. No spec text
+mined (D1); wording in code/tests is paraphrase only. 8 repo-minted IDs
+(`RD-INSPECT-01..08`), MINTED-pending-confirm. Live-driver binding,
+keyed decryption of secured frames, and cluster-payload semantics are
+explicit follow-ups, not this wave.
+
+| Requirement ID | State | Implementing code | Verifying test |
+|----------------|-------|-------------------|----------------|
+| RD-INSPECT-01 | implemented + verified | `mac::decode`: bounded 802.15.4 header parse (frame-control LE, seq, PAN-ID compression, short/extended addressing; unsupported modes typed-refused) | `inspect/tests/goldens.rs::golden_full_chain_mac_nwk_aps_zcl` (MAC node fields) + `golden_empty_and_truncated_are_typed` |
+| RD-INSPECT-02 | implemented + verified | `chain::dissect`: MAC → NWK → APS → ZCL chain reusing the `rounddance-nwk` / `rounddance-aps` / `rounddance-zcl` codecs; secured frames stop with a `secured` note, never decrypted | `golden_full_chain_mac_nwk_aps_zcl` (4-layer tree) + `golden_captured_air_secured_nwk_stops_chain` (genuine Ember U1/B1 stop at MAC + NWK + secured note; command id stays `None` while encrypted) |
+| RD-INSPECT-03 | implemented + verified | `tree`: bounded `DecodeTree` (MAC + NWK + APS + ZCL + one stop note) of owned `Copy` scalars, no borrows, no allocator | `golden_full_chain_mac_nwk_aps_zcl` + `golden_captured_air_secured_nwk_stops_chain` (bare-NWK PDU dissects identically) |
+| RD-INSPECT-04 | implemented + verified | `session::SessionEngine`: 32-entry device table + 4-entry network table folded from trees, stalest-row eviction, `device` / `network` lookup | `golden_sender_traits_and_session_engine` (counts, last-seq, PAN attribution, 40-device overfill stays capped) |
+| RD-INSPECT-05 | implemented + verified | `capture::Listener` / `capture::Sender` traits (channel + rssi + lqi metadata; no live drivers) | `golden_sender_traits_and_session_engine` (in-memory `Sender` loopback) |
+| RD-INSPECT-06 | implemented + verified | `pcap::read_all` (pcap + minimal pcapng: SHB/IDB/EPB, other blocks skipped by length) + `pcap::write_pcap` (pcap writer) | `golden_pcap_write_read_dissect` (round-trip + dissect) + `golden_pcapng_ingest_minimal` (hand-built SHB + IDB + EPB) |
+| RD-INSPECT-07 | implemented + verified | `report::to_text` / `report::to_json` (owned-scalar rendering only; secured frames named, never decrypted) | `golden_sender_traits_and_session_engine` (text + JSON layer keys) + `golden_secured_report_names_stop` (`secured:true` in JSON) |
+| RD-INSPECT-08 | implemented + verified | `no_std` core (`tree`, `mac`, `nwk`, `aps`, `zcl`, `chain`, `session`, `capture`) with `forbid(unsafe_code)`; `std` capture IO behind the `std` feature | `cargo build -p rounddance-inspect --no-default-features --target wasm32-unknown-unknown` green; default-feature build carries `pcap` + `report` |

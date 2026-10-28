@@ -1106,6 +1106,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rounddance-inspect"
+version = "0.1.0"
+dependencies = [
+ "rounddance-aps",
+ "rounddance-mac-sap",
+ "rounddance-nwk",
+ "rounddance-zcl",
+]
+
+[[package]]
 name = "rounddance-mac-sap"
 version = "0.1.0"
 

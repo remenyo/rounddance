@@ -1,0 +1,17 @@
+[package]
+name = "rounddance-inspect"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Packet inspector: 802.15.4/NWK/APS/ZCL dissector chain, decode trees, pcap ingest, session engine, listener/sender traits"
+
+[features]
+default = ["std"]
+std = []
+
+[dependencies]
+rounddance-mac-sap = { path = "../rounddance-mac-sap" }
+rounddance-nwk = { path = "../rounddance-nwk" }
+rounddance-aps = { path = "../rounddance-aps" }
+rounddance-zcl = { path = "../rounddance-zcl" }
