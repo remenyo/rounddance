@@ -505,8 +505,8 @@ fn drive_full(pair: &mut Pair) {
         .unwrap();
     // Ephemeral.
     let qe_u = pair.init.ephemeral_request().unwrap();
-    let qe_v = pair.resp.on_ephemeral_request(b, &qe_u).unwrap();
-    let mac_u = pair.init.on_ephemeral_response(b, &qe_v).unwrap();
+    let qe_v = pair.resp.on_ephemeral_request(b, qe_u.as_slice()).unwrap();
+    let mac_u = pair.init.on_ephemeral_response(b, qe_v.as_slice()).unwrap();
     // Confirm.
     let mac_v = pair.resp.on_confirm_request(b, &mac_u).unwrap();
     pair.init.on_confirm_response(b, &mac_v).unwrap();
@@ -543,8 +543,11 @@ fn vector_keyest_mac_fail_terminates_07_5356_22_c312_08() {
     let rsp = pair.resp.on_initiate(&b, &req).unwrap();
     pair.init.on_initiate_response(&b, &rsp).unwrap();
     let qe_u = pair.init.ephemeral_request().unwrap();
-    let qe_v = pair.resp.on_ephemeral_request(&b, &qe_u).unwrap();
-    let mac_u = pair.init.on_ephemeral_response(&b, &qe_v).unwrap();
+    let qe_v = pair.resp.on_ephemeral_request(&b, qe_u.as_slice()).unwrap();
+    let mac_u = pair
+        .init
+        .on_ephemeral_response(&b, qe_v.as_slice())
+        .unwrap();
     let mac_v = pair.resp.on_confirm_request(&b, &mac_u).unwrap();
     // Tamper one bit of the responder tag on the wire.
     let mut bad = mac_v;
@@ -656,11 +659,142 @@ fn vector_keyest_ephemeral_length_07_5123_08_1074_05() {
     pair.init.on_initiate_response(&b, &rsp).unwrap();
     let mut long = [0u8; 65];
     let qe = pair.init.ephemeral_request().unwrap();
-    long[..64].copy_from_slice(&qe);
+    long[..64].copy_from_slice(qe.as_slice());
     assert_eq!(
         pair.resp.on_ephemeral_request(&b, &long),
         Err(keyest::ExchangeError::Terminated)
     );
+}
+
+// Ephemeral wire forms: the transmit preference only shapes our own
+// flights (07-5123-08-1074-05 + 07-5356-22-C312-06/07).
+#[test]
+fn vector_keyest_compressed_forms_07_5123_08_1074_05() {
+    use rounddance_security::decompress_point;
+
+    fn as33(slice: &[u8]) -> [u8; 33] {
+        let mut c = [0u8; 33];
+        c.copy_from_slice(slice);
+        c
+    }
+
+    let mut pair = make_pair();
+    let b = HostBackend::new();
+    // Default transmit is the expanded convention.
+    assert!(!pair.init.tx_compressed());
+    let req = pair.init.initiate_request().unwrap();
+    let rsp = pair.resp.on_initiate(&b, &req).unwrap();
+    pair.init.on_initiate_response(&b, &rsp).unwrap();
+    let default = pair.init.ephemeral_request().unwrap();
+    assert!(!default.is_compressed());
+    assert_eq!(default.len(), keyest::EPH_LEN);
+    assert_eq!(default.as_slice().len(), 64);
+    // Preferred compressed transmit expands to the same point.
+    pair.init.set_tx_compressed(true);
+    assert!(pair.init.tx_compressed());
+    let compressed = pair.init.ephemeral_request().unwrap();
+    assert!(compressed.is_compressed());
+    assert_eq!(compressed.len(), keyest::EPH_COMPRESSED_LEN);
+    let expanded = match default {
+        keyest::EphemeralPayload::Expanded(p) => p,
+        keyest::EphemeralPayload::Compressed(_) => unreachable!(),
+    };
+    assert_eq!(
+        decompress_point(&as33(compressed.as_slice())).unwrap(),
+        expanded
+    );
+    // The responder accepts the compressed flight and answers in its
+    // own (default expanded) form.
+    let answer = pair
+        .resp
+        .on_ephemeral_request(&b, compressed.as_slice())
+        .unwrap();
+    assert!(!answer.is_compressed());
+}
+
+// Compressed ephemeral flights complete the handshake with the same
+// session key as the expanded run: the transcript absorbs expanded
+// points, so the wire form never splits the keys
+// (07-5356-22-C312-06/07 + 07-5123-08-1074-05).
+#[test]
+fn vector_keyest_compressed_handshake_07_5356_22_c312() {
+    let mut pair = make_pair();
+    pair.init.set_tx_compressed(true);
+    pair.resp.set_tx_compressed(true);
+    drive_full(&mut pair);
+    assert!(pair.init.is_done());
+    assert!(pair.resp.is_done());
+    assert_eq!(
+        pair.init.session_key().unwrap(),
+        pair.resp.session_key().unwrap()
+    );
+    // Mixed forms agree too, and match the expanded-only run.
+    let mut mixed = make_pair();
+    mixed.init.set_tx_compressed(true);
+    drive_full(&mut mixed);
+    assert_eq!(
+        mixed.init.session_key().unwrap(),
+        pair.init.session_key().unwrap()
+    );
+    let mut plain = make_pair();
+    drive_full(&mut plain);
+    assert_eq!(
+        plain.init.session_key().unwrap(),
+        pair.init.session_key().unwrap()
+    );
+}
+
+// Malformed ephemeral payloads terminate with BAD_MESSAGE — never a
+// silent wrong point and never a certificate defect
+// (07-5123-08-1074-02 + 07-5356-22-C312-06/07).
+#[test]
+fn vector_keyest_compressed_rejection_07_5123_08_1074_02() {
+    // Non-residue x = 2 with an even tag: well-formed length, no
+    // curve point.
+    let mut nonresidue = [0u8; 33];
+    nonresidue[0] = 0x02;
+    nonresidue[32] = 2;
+    // Unknown tag over a valid x (taken from a live ephemeral).
+    let mut pair = make_pair();
+    let b = HostBackend::new();
+    let req = pair.init.initiate_request().unwrap();
+    let rsp = pair.resp.on_initiate(&b, &req).unwrap();
+    pair.init.on_initiate_response(&b, &rsp).unwrap();
+    let live = pair.init.ephemeral_request().unwrap();
+    let mut badtag = [0u8; 33];
+    badtag[0] = 0x04;
+    badtag[1..].copy_from_slice(&live.as_slice()[..32]);
+
+    for qe in [&nonresidue[..], &badtag[..], &[0u8; 32][..], &[0u8; 34][..]] {
+        // Responder path.
+        let mut pair = make_pair();
+        let req = pair.init.initiate_request().unwrap();
+        let rsp = pair.resp.on_initiate(&b, &req).unwrap();
+        pair.init.on_initiate_response(&b, &rsp).unwrap();
+        assert_eq!(
+            pair.resp.on_ephemeral_request(&b, qe),
+            Err(keyest::ExchangeError::Terminated)
+        );
+        assert_eq!(
+            pair.resp.take_terminate().unwrap().status,
+            keyest::TERM_BAD_MESSAGE
+        );
+        assert_eq!(pair.resp.stage(), keyest::Stage::Failed);
+        // Initiator path.
+        let mut pair = make_pair();
+        let req = pair.init.initiate_request().unwrap();
+        let rsp = pair.resp.on_initiate(&b, &req).unwrap();
+        pair.init.on_initiate_response(&b, &rsp).unwrap();
+        assert_eq!(
+            pair.init.on_ephemeral_response(&b, qe),
+            Err(keyest::ExchangeError::Terminated)
+        );
+        assert_eq!(
+            pair.init.take_terminate().unwrap().status,
+            keyest::TERM_BAD_MESSAGE
+        );
+        assert_eq!(pair.init.stage(), keyest::Stage::Failed);
+    }
 }
 
 // ---- price.rs: block periods + block thresholds --------------------

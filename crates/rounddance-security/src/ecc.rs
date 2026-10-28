@@ -18,11 +18,18 @@
 //! key confirmation (anchor p0168-L4323-L4325).
 
 use crate::cert::{ImplicitCert, PeerIdentity};
+use crate::p256field;
 
 /// P-256 scalar length in octets.
 pub const SCALAR_LEN: usize = 32;
 /// Uncompressed point length in octets (x || y).
 pub const POINT_LEN: usize = 64;
+/// Compressed point length in octets (parity tag || x).
+pub const COMPRESSED_LEN: usize = 33;
+/// Compressed-point tag naming an even `y`.
+pub const COMPRESSED_EVEN: u8 = 0x02;
+/// Compressed-point tag naming an odd `y`.
+pub const COMPRESSED_ODD: u8 = 0x03;
 /// Key-confirmation tag length in octets.
 pub const MAC_LEN: usize = 16;
 /// Largest KDF output this core ever requests in one call.
@@ -88,6 +95,60 @@ pub trait EccBackend {
     fn kdf(&self, secret: &[u8], info: &[u8], out: &mut [u8]) -> Result<(), EccError>;
     /// Message authentication: `MAC_LEN`-octet tag.
     fn mac(&self, key: &[u8], msg: &[u8], tag: &mut [u8; MAC_LEN]) -> Result<(), EccError>;
+    /// Expand a compressed point (parity tag || x) to uncompressed
+    /// x || y. The default body is the audited core routine
+    /// ([`decompress_point`]): backend-independent, so the mock
+    /// backend proves the same bytes the host backend serves.
+    /// Backends with a stack decoder may override with it, but the
+    /// override must agree byte-for-byte (pinned by vectors).
+    fn point_decompress(
+        &self,
+        compressed: &[u8; COMPRESSED_LEN],
+    ) -> Result<[u8; POINT_LEN], EccError> {
+        decompress_point(compressed)
+    }
+}
+
+/// Compress an uncompressed point to parity tag || x.
+///
+/// Infallible: any 64 octets compress (validity is established on
+/// decompression, never here). The tag is [`COMPRESSED_ODD`] when the
+/// low bit of `y` is set, else [`COMPRESSED_EVEN`].
+///
+/// Requirement `07-5123-08-1074-05`.
+#[must_use]
+pub fn compress_point(point: &[u8; POINT_LEN]) -> [u8; COMPRESSED_LEN] {
+    let mut out = [0u8; COMPRESSED_LEN];
+    out[0] = if point[63] & 1 == 1 {
+        COMPRESSED_ODD
+    } else {
+        COMPRESSED_EVEN
+    };
+    out[1..].copy_from_slice(&point[..SCALAR_LEN]);
+    out
+}
+
+/// Expand a compressed point (parity tag || x) to uncompressed x ||
+/// y, recovering `y` through the field square root. Rejects unknown
+/// tags (including the uncompressed-infinity marker `0x00`),
+/// `x >= p`, and `x` values with no curve point (non-residues) as
+/// [`EccError::InvalidPoint`]. On success `(x, y)` satisfies the curve
+/// equation by construction, so membership needs no further check.
+///
+/// Requirement `07-5123-08-1074-05`.
+pub fn decompress_point(compressed: &[u8; COMPRESSED_LEN]) -> Result<[u8; POINT_LEN], EccError> {
+    let odd = match compressed[0] {
+        COMPRESSED_EVEN => false,
+        COMPRESSED_ODD => true,
+        _ => return Err(EccError::InvalidPoint),
+    };
+    let mut x = [0u8; SCALAR_LEN];
+    x.copy_from_slice(&compressed[1..]);
+    let y = p256field::y_from_x(&x, odd)?;
+    let mut out = [0u8; POINT_LEN];
+    out[..SCALAR_LEN].copy_from_slice(&x);
+    out[SCALAR_LEN..].copy_from_slice(&y);
+    Ok(out)
 }
 
 /// Derive a curve scalar from arbitrary transcript material.
@@ -267,6 +328,78 @@ mod tests {
         )
         .unwrap();
         assert_ne!(z, [0u8; SCALAR_LEN]);
+    }
+
+    /// P-256 base point, big-endian halves (public curve parameter).
+    const GX: [u8; 32] = [
+        0x6b, 0x17, 0xd1, 0xf2, 0xe1, 0x2c, 0x42, 0x47, 0xf8, 0xbc, 0xe6, 0xe5, 0x63, 0xa4, 0x40,
+        0xf2, 0x77, 0x03, 0x7d, 0x81, 0x2d, 0xeb, 0x33, 0xa0, 0xf4, 0xa1, 0x39, 0x45, 0xd8, 0x98,
+        0xc2, 0x96,
+    ];
+    const GY: [u8; 32] = [
+        0x4f, 0xe3, 0x42, 0xe2, 0xfe, 0x1a, 0x7f, 0x9b, 0x8e, 0xe7, 0xeb, 0x4a, 0x7c, 0x0f, 0x9e,
+        0x16, 0x2b, 0xce, 0x33, 0x57, 0x6b, 0x31, 0x5e, 0xce, 0xcb, 0xb6, 0x40, 0x68, 0x37, 0xbf,
+        0x51, 0xf5,
+    ];
+
+    fn generator() -> [u8; POINT_LEN] {
+        let mut p = [0u8; POINT_LEN];
+        p[..32].copy_from_slice(&GX);
+        p[32..].copy_from_slice(&GY);
+        p
+    }
+
+    #[test]
+    fn compress_names_parity_and_round_trips_generator() {
+        // Gy is odd: the compressed generator carries 0x03.
+        let g = generator();
+        let c = compress_point(&g);
+        assert_eq!(c[0], COMPRESSED_ODD);
+        assert_eq!(&c[1..], &GX);
+        assert_eq!(decompress_point(&c).unwrap(), g);
+        // The wrong parity tag recovers the negated point, never G.
+        let mut other = c;
+        other[0] = COMPRESSED_EVEN;
+        let neg = decompress_point(&other).unwrap();
+        assert_eq!(&neg[..32], &GX);
+        assert_ne!(&neg[32..], &GY);
+        // An even-y twin compresses back to the even tag.
+        assert_eq!(compress_point(&neg)[0], COMPRESSED_EVEN);
+        assert_eq!(decompress_point(&compress_point(&neg)).unwrap(), neg);
+    }
+
+    #[test]
+    fn decompress_via_backend_trait_on_mock() {
+        // Mock-provable integration: the EccBackend seam serves the
+        // same bytes with no host feature enabled.
+        let b = MockBackend::new(0xC0);
+        let g = generator();
+        let c = compress_point(&g);
+        assert_eq!(b.point_decompress(&c).unwrap(), g);
+    }
+
+    #[test]
+    fn decompress_rejects_foreign_encodings() {
+        let g = generator();
+        let c = compress_point(&g);
+        // Unknown tags, including the uncompressed-infinity marker.
+        for tag in [0x00u8, 0x01, 0x04, 0x05, 0x06, 0x07, 0xFF] {
+            let mut bad = c;
+            bad[0] = tag;
+            assert_eq!(decompress_point(&bad), Err(EccError::InvalidPoint));
+        }
+        // x == p and x > p are not field elements.
+        let mut xp = c;
+        xp[1..].copy_from_slice(&crate::p256field::FIELD_P);
+        assert_eq!(decompress_point(&xp), Err(EccError::InvalidPoint));
+        let mut big = c;
+        big[1..].fill(0xFF);
+        assert_eq!(decompress_point(&big), Err(EccError::InvalidPoint));
+        // x = 2 admits no curve point (pinned non-residue).
+        let mut x2 = c;
+        x2[1..].fill(0);
+        x2[32] = 2;
+        assert_eq!(decompress_point(&x2), Err(EccError::InvalidPoint));
     }
 
     #[test]

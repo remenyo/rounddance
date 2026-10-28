@@ -45,6 +45,7 @@ pub mod ecc;
 pub mod keyupdate;
 pub mod mmo;
 pub mod mock;
+pub mod p256field;
 pub mod store;
 
 pub use aes::{encrypt_block_aes128, BLOCK_LEN};
@@ -58,8 +59,9 @@ pub use classical::{
     UNSECURED_LEVEL,
 };
 pub use ecc::{
-    mqv_agree, reconstruct_static, scalar_from_kdf, session_keys, EccBackend, EccError, MAC_LEN,
-    MAX_KDF_OUT, POINT_LEN, SCALAR_LEN,
+    compress_point, decompress_point, mqv_agree, reconstruct_static, scalar_from_kdf, session_keys,
+    EccBackend, EccError, COMPRESSED_EVEN, COMPRESSED_LEN, COMPRESSED_ODD, MAC_LEN, MAX_KDF_OUT,
+    POINT_LEN, SCALAR_LEN,
 };
 pub use keyupdate::{derive_update_key, derive_update_mask, install_link_key, UPDATE_LABEL};
 pub use mmo::{mmo_hash_128, MmoError, MMO_DIGEST_LEN, MMO_MAX_MSG_LEN};

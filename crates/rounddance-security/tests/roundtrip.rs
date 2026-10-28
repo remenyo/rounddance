@@ -118,3 +118,27 @@ fn fuzz_counter_monotonicity() {
     tx.mark_persisted(tx.peek()).unwrap();
     assert!(!tx.needs_persist());
 }
+
+// 07-5123-08-1074-05: random 33-octet inputs never panic the point
+// decoder; every accepted input is an involution (re-compressing
+// recovers the input, parity included), and lengths other than 33
+// are unrepresentable at the type level.
+#[test]
+fn fuzz_compressed_point_shape() {
+    let mut rng = Rng(0xC0DE_3305);
+    let mut accepted = 0u32;
+    for _ in 0..8000 {
+        let mut c = [0u8; COMPRESSED_LEN];
+        rng.bytes(&mut c);
+        match decompress_point(&c) {
+            Ok(p) => {
+                accepted += 1;
+                assert_eq!(&p[..SCALAR_LEN], &c[1..]);
+                assert_eq!(compress_point(&p), c);
+                assert_eq!(c[0] == COMPRESSED_ODD, p[SCALAR_LEN * 2 - 1] & 1 == 1);
+            }
+            Err(e) => assert_eq!(e, EccError::InvalidPoint),
+        }
+    }
+    assert!(accepted > 0, "fuzz never accepted a point");
+}

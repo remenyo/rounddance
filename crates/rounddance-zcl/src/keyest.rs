@@ -28,8 +28,13 @@
 //!   fields naming it are accepted, everything else terminates per
 //!   the guard table.
 //! * Certificates on the wire are the 48-octet suite-1 implicit form;
-//!   ephemeral points travel EXPANDED (64 octets), enforced exactly
-//!   by the length check. Compressed-point codecs are follow-up work.
+//!   ephemeral points are accepted in BOTH wire forms — the 33-octet
+//!   compressed encoding (parity tag + x, `y` recovered on receipt)
+//!   and the 64-octet expanded convention — while transmit uses the
+//!   locally preferred form (`Exchange::set_tx_compressed`, default
+//!   expanded). The CBKE parameter table carries the ephemeral keys
+//!   as point-compressed values (anchor p0865-L19821); the expanded
+//!   form stays supported as the profile's long-standing convention.
 //! * The receiver binds the peer identity to the sender address by
 //!   matching the received certificate against locally installed
 //!   same-suite certificates (the enforceable form of the
@@ -40,8 +45,9 @@ use crate::cluster::{ClusterDef, ClusterRole, CmdDef};
 use crate::types::{DataType, Value};
 use crate::{Error, ZclStatus};
 use rounddance_security::{
-    derive_update_key, install_link_key, CbkeError, CbkeSession, CbkeState, EccBackend, EccError,
-    LinkKeyTable, PeerIdentity, SecError, IMPLICIT_CERT_LEN, MAC_LEN, POINT_LEN, SCALAR_LEN,
+    compress_point, derive_update_key, install_link_key, CbkeError, CbkeSession, CbkeState,
+    EccBackend, EccError, LinkKeyTable, PeerIdentity, SecError, COMPRESSED_LEN, IMPLICIT_CERT_LEN,
+    MAC_LEN, POINT_LEN, SCALAR_LEN,
 };
 
 /// Cluster identifier.
@@ -90,10 +96,15 @@ pub const TERM_INVALID_CERTIFICATE: u8 = 0x06;
 
 /// Largest generate-time hint accepted (0xFF is out of range).
 pub const MAX_GENERATE_TIME: u8 = 0xFE;
-/// Wire ephemeral length enforced here (expanded points).
+/// Wire ephemeral length for the expanded point form (x || y).
 ///
 /// Requirement `07-5123-08-1074-05` (MINTED-pending-confirm).
 pub const EPH_LEN: usize = POINT_LEN;
+/// Wire ephemeral length for the compressed point form
+/// (parity tag || x).
+///
+/// Requirement `07-5123-08-1074-05` (MINTED-pending-confirm).
+pub const EPH_COMPRESSED_LEN: usize = COMPRESSED_LEN;
 /// Largest provisioned-peer table in one exchange.
 pub const MAX_PEERS: usize = 4;
 
@@ -326,6 +337,73 @@ pub const fn retry_advice(msg: &TerminateMsg) -> RetryAdvice {
     }
 }
 
+/// An ephemeral point in either accepted wire form.
+///
+/// Requirement `07-5123-08-1074-05` (MINTED-pending-confirm).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EphemeralPayload {
+    /// 64-octet expanded convention (x || y).
+    Expanded([u8; EPH_LEN]),
+    /// 33-octet compressed encoding (parity tag || x).
+    Compressed([u8; EPH_COMPRESSED_LEN]),
+}
+
+impl EphemeralPayload {
+    /// Wire bytes of this payload.
+    #[must_use]
+    pub fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::Expanded(p) => &p[..],
+            Self::Compressed(p) => &p[..],
+        }
+    }
+
+    /// Wire length: [`EPH_LEN`] or [`EPH_COMPRESSED_LEN`].
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        match self {
+            Self::Expanded(_) => EPH_LEN,
+            Self::Compressed(_) => EPH_COMPRESSED_LEN,
+        }
+    }
+
+    /// Whether this payload uses the compressed encoding.
+    #[must_use]
+    pub const fn is_compressed(&self) -> bool {
+        matches!(self, Self::Compressed(_))
+    }
+
+    /// Whether this payload carries no bytes: never true — both wire
+    /// forms are fixed non-zero lengths (exists for the `len`/`is_empty`
+    /// pair convention).
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        false
+    }
+}
+
+/// Expand a received ephemeral payload to the 64-octet form the
+/// crypto session consumes: expanded bytes pass through, compressed
+/// bytes recover `y` through the backend. Anything else — wrong
+/// length, unknown tag, `x >= p`, non-residue `x` — reports the
+/// terminate status the caller must fail with (a malformed ephemeral
+/// field is a bad message, never a certificate defect).
+fn decode_peer<B: EccBackend>(backend: &B, qe: &[u8]) -> Result<[u8; POINT_LEN], u8> {
+    if qe.len() == EPH_LEN {
+        let mut point = [0u8; POINT_LEN];
+        point.copy_from_slice(qe);
+        return Ok(point);
+    }
+    if qe.len() == EPH_COMPRESSED_LEN {
+        let mut compressed = [0u8; COMPRESSED_LEN];
+        compressed.copy_from_slice(qe);
+        return backend
+            .point_decompress(&compressed)
+            .map_err(|_| TERM_BAD_MESSAGE);
+    }
+    Err(TERM_BAD_MESSAGE)
+}
+
 /// Exchange-level failures (wire-visible as Terminate).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExchangeError {
@@ -354,6 +432,7 @@ pub struct Exchange {
     peers: [Option<PeerIdentity>; MAX_PEERS],
     pending_peer: Option<PeerIdentity>,
     own_eph_pub: Option<[u8; POINT_LEN]>,
+    tx_compressed: bool,
     pending_term: Option<TerminateMsg>,
     failed: bool,
 }
@@ -414,9 +493,35 @@ impl Exchange {
             peers: table,
             pending_peer: None,
             own_eph_pub: Some(eph_pub),
+            tx_compressed: false,
             pending_term: None,
             failed: false,
         })
+    }
+
+    /// Prefer the compressed encoding on transmit. The default is the
+    /// expanded convention; either choice is always accepted on
+    /// receipt, so this only shapes our own flights.
+    ///
+    /// Requirement `07-5123-08-1074-05` (MINTED-pending-confirm).
+    pub fn set_tx_compressed(&mut self, compressed: bool) {
+        self.tx_compressed = compressed;
+    }
+
+    /// Whether transmit currently prefers the compressed encoding.
+    #[must_use]
+    pub const fn tx_compressed(&self) -> bool {
+        self.tx_compressed
+    }
+
+    /// Our ephemeral payload in the preferred transmit form.
+    fn own_payload(&self) -> Result<EphemeralPayload, ExchangeError> {
+        let eph = self.own_eph_pub.ok_or(ExchangeError::NoExchange)?;
+        if self.tx_compressed {
+            Ok(EphemeralPayload::Compressed(compress_point(&eph)))
+        } else {
+            Ok(EphemeralPayload::Expanded(eph))
+        }
     }
 
     /// Current stage.
@@ -563,33 +668,35 @@ impl Exchange {
         Ok(())
     }
 
-    /// Outgoing ephemeral payload (our expanded point).
-    pub fn ephemeral_request(&self) -> Result<[u8; EPH_LEN], ExchangeError> {
+    /// Outgoing ephemeral payload in the preferred transmit form
+    /// (expanded by default; compressed after
+    /// [`Exchange::set_tx_compressed`]).
+    pub fn ephemeral_request(&self) -> Result<EphemeralPayload, ExchangeError> {
         if self.stage != Stage::Initiated || self.failed {
             return Err(ExchangeError::OutOfSequence);
         }
-        self.own_eph_pub.ok_or(ExchangeError::NoExchange)
+        self.own_payload()
     }
 
     /// Handle an incoming Ephemeral Data Request (responder): checks
-    /// length and sequence, drives reconstruction + derivation, and
-    /// returns our Ephemeral Data Response payload.
+    /// form and sequence, drives reconstruction + derivation, and
+    /// returns our Ephemeral Data Response payload in the preferred
+    /// transmit form.
     ///
-    /// Requirements `07-5123-08-1074-02` (MINTED-pending-confirm) +
+    /// Requirements `07-5123-08-1074-02/05` (MINTED-pending-confirm) +
     /// `07-5356-22-C312-06/07` (corpus-mined sequence + length rules).
     pub fn on_ephemeral_request<B: EccBackend>(
         &mut self,
         backend: &B,
         qe: &[u8],
-    ) -> Result<[u8; EPH_LEN], ExchangeError> {
+    ) -> Result<EphemeralPayload, ExchangeError> {
         if self.initiator || self.stage != Stage::Initiated || self.failed {
             return Err(self.fail(TERM_BAD_MESSAGE, None));
         }
-        if qe.len() != EPH_LEN {
-            return Err(self.fail(TERM_BAD_MESSAGE, None));
-        }
-        let mut peer_eph = [0u8; POINT_LEN];
-        peer_eph.copy_from_slice(qe);
+        let peer_eph = match decode_peer(backend, qe) {
+            Ok(point) => point,
+            Err(status) => return Err(self.fail(status, None)),
+        };
         let peer = self.pending_peer.ok_or(ExchangeError::NoExchange)?;
         if let Err(e) = self.session.receive_peer(peer, peer_eph) {
             return Err(self.fail(TERM_BAD_MESSAGE, Some(e)));
@@ -607,12 +714,13 @@ impl Exchange {
             return Err(self.fail(TERM_NO_RESOURCES, Some(e)));
         }
         self.stage = Stage::KeysDerived;
-        self.own_eph_pub.ok_or(ExchangeError::NoExchange)
+        self.own_payload()
     }
 
     /// Handle an incoming Ephemeral Data Response (initiator):
     /// completes reconstruction + derivation and returns our
-    /// confirmation tag (MACU) for the Confirm Request.
+    /// confirmation tag (MACU) for the Confirm Request. Accepts
+    /// either ephemeral wire form.
     pub fn on_ephemeral_response<B: EccBackend>(
         &mut self,
         backend: &B,
@@ -621,11 +729,10 @@ impl Exchange {
         if !self.initiator || self.stage != Stage::Initiated || self.failed {
             return Err(self.fail(TERM_BAD_MESSAGE, None));
         }
-        if qe.len() != EPH_LEN {
-            return Err(self.fail(TERM_BAD_MESSAGE, None));
-        }
-        let mut peer_eph = [0u8; POINT_LEN];
-        peer_eph.copy_from_slice(qe);
+        let peer_eph = match decode_peer(backend, qe) {
+            Ok(point) => point,
+            Err(status) => return Err(self.fail(status, None)),
+        };
         let peer = self.pending_peer.ok_or(ExchangeError::NoExchange)?;
         if let Err(e) = self.session.receive_peer(peer, peer_eph) {
             return Err(self.fail(TERM_BAD_MESSAGE, Some(e)));

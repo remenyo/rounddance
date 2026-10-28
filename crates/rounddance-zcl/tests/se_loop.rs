@@ -152,8 +152,10 @@ fn provision(
 }
 
 /// Run the whole SE loop once; returns the hex trace of every on-air
-/// ZCL frame plus the closing key, price, and reading.
-fn run_loop(seed: u64) -> (Vec<String>, [u8; 16], u32, u64) {
+/// ZCL frame plus the closing key, price, and reading. With
+/// `compressed`, both sides transmit the 33-octet ephemeral form;
+/// otherwise both use the expanded convention.
+fn run_loop(seed: u64, compressed: bool) -> (Vec<String>, [u8; 16], u32, u64) {
     let mut trace = Vec::new();
     let mut counter = 0u8;
     let mut tsn = 0x40u8;
@@ -186,6 +188,8 @@ fn run_loop(seed: u64) -> (Vec<String>, [u8; 16], u32, u64) {
         keyest::SUITE_1,
     )
     .unwrap();
+    init.set_tx_compressed(compressed);
+    resp.set_tx_compressed(compressed);
 
     // Macro-free trip helper: send a ZCL frame, record it, deliver it.
     let mut fly = |from: u16, to: u16, frame: Vec<u8>| -> Vec<u8> {
@@ -226,7 +230,7 @@ fn run_loop(seed: u64) -> (Vec<String>, [u8; 16], u32, u64) {
     let air = fly(
         NODE_METER,
         NODE_TC,
-        zcl_frame(tsn, true, keyest::CMD_EPHEMERAL_REQ, &qe_u),
+        zcl_frame(tsn, true, keyest::CMD_EPHEMERAL_REQ, qe_u.as_slice()),
     );
     tsn = tsn.wrapping_add(1);
     let (h, p) = Header::decode(&air).unwrap();
@@ -235,7 +239,7 @@ fn run_loop(seed: u64) -> (Vec<String>, [u8; 16], u32, u64) {
     let air = fly(
         NODE_TC,
         NODE_METER,
-        zcl_frame(tsn, false, keyest::CMD_EPHEMERAL_RSP, &qe_v),
+        zcl_frame(tsn, false, keyest::CMD_EPHEMERAL_RSP, qe_v.as_slice()),
     );
     tsn = tsn.wrapping_add(1);
     let (h, p) = Header::decode(&air).unwrap();
@@ -500,7 +504,7 @@ fn hex(bytes: &[u8]) -> String {
 // The full SE loop runs over the scripted medium and agrees.
 #[test]
 fn se_loop_meter_and_tc_agree() {
-    let (trace, key, price, reading) = run_loop(0x5EED);
+    let (trace, key, price, reading) = run_loop(0x5EED, false);
     assert!(!trace.is_empty());
     assert_ne!(key, [0u8; 16]);
     assert_eq!(price, 12345);
@@ -510,15 +514,48 @@ fn se_loop_meter_and_tc_agree() {
 // Decision determinism: the same seed replays byte-identically.
 #[test]
 fn se_loop_replays_deterministically() {
-    let (t1, k1, p1, r1) = run_loop(0x5EED);
-    let (t2, k2, p2, r2) = run_loop(0x5EED);
+    let (t1, k1, p1, r1) = run_loop(0x5EED, false);
+    let (t2, k2, p2, r2) = run_loop(0x5EED, false);
     assert_eq!(t1, t2);
     assert_eq!(k1, k2);
     assert_eq!(p1, p2);
     assert_eq!(r1, r2);
     // A different seed still drives the same application outcome.
-    let (_, k3, p3, r3) = run_loop(0x5EEF);
+    let (_, k3, p3, r3) = run_loop(0x5EEF, false);
     assert_eq!(k3, k1);
     assert_eq!(p3, p1);
     assert_eq!(r3, r1);
+}
+
+// A full CBKE run with both ephemeral flights compressed agrees on
+// the same session key as the expanded run: the transcript absorbs
+// expanded points, so the wire form never splits the keys
+// (07-5123-08-1074-05 + 07-5356-22-C312-06/07). The on-air ephemeral
+// frames are shorter, but everything after the handshake is
+// identical.
+#[test]
+fn se_loop_compressed_ephemeral_agrees() {
+    let (trace_c, key_c, price_c, reading_c) = run_loop(0x5EED, true);
+    let (trace_e, key_e, _, _) = run_loop(0x5EED, false);
+    assert!(!trace_c.is_empty());
+    assert_eq!(key_c, key_e);
+    assert_eq!(price_c, 12345);
+    assert_eq!(reading_c, 1_000_000);
+    // Only the two ephemeral frames differ on air.
+    let diffs = trace_c
+        .iter()
+        .zip(trace_e.iter())
+        .filter(|(a, b)| a != b)
+        .count();
+    assert_eq!(diffs, 2);
+    assert_eq!(trace_c.len(), trace_e.len());
+}
+
+// The compressed run replays byte-identically too.
+#[test]
+fn se_loop_compressed_replays_deterministically() {
+    let (t1, k1, _, _) = run_loop(0x5EED, true);
+    let (t2, k2, _, _) = run_loop(0x5EED, true);
+    assert_eq!(t1, t2);
+    assert_eq!(k1, k2);
 }

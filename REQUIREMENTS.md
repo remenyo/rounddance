@@ -801,3 +801,31 @@ p0105-L2344-L2348 (embedded in its row above);
 implementing row — the alternative-unit claim lives in corpus only);
 `07-5356-22-C26-02` anchor extends to p0149-L3856-L3860 (no repo
 implementing row — method-selection claim lives in corpus only).
+
+## Wave-29 traceability — compressed-point ephemeral (`rounddance-security`, `rounddance-zcl`)
+
+Corpus IDs reused verbatim (`07-5123-08-1074-*` ephemeral exchange
+rules, `07-5356-22-C312-06/07` sequence + length rules); zero new
+repo-minted IDs. Wording in code/tests is paraphrase only, never spec
+text (D1). This closes the wave-22 deferral ("compressed-point
+codecs are follow-up work", previously recorded on `07-5123-08-1074-05):
+ephemeral points are now accepted in both wire forms — the 33-octet
+compressed encoding (parity tag + x, `y` recovered through the field
+square root) and the 64-octet expanded convention — while transmit
+uses the locally preferred form (`Exchange::set_tx_compressed`,
+default expanded). The CBKE parameter table's ephemeral entries are
+point-compressed values (anchor p0865-L19821); the 22-octet suite-1
+sizes in that table belong to the older binary-curve suite and do not
+govern this P-256 profile's 33-octet SEC1 form. The P-256 prime shape
+(`p % 4 == 3`) is verified against the crypto stack's own field
+source (`p256` 0.14 `arithmetic/field.rs` modulus
+`ffffffff00000001…ffffffff`, trailing octet `0xFF`) and re-pinned by
+`p256field::tests::prime_is_three_mod_four`, so the square root is a
+single exponentiation to `(p + 1) / 4`, never an assumed shortcut.
+
+| Requirement ID | State | Implementing code | Verifying test |
+|----------------|-------|-------------------|----------------|
+| 07-5123-08-1074-02 | implemented + verified (extended: malformed compressed payloads terminate) | `keyest.rs::decode_peer` (wrong length, unknown tag, `x >= p`, non-residue `x` all map to `TERM_BAD_MESSAGE`; a malformed ephemeral field is never a certificate defect) + `on_ephemeral_request`/`on_ephemeral_response` accept 33 or 64 octets | `tests/se_vectors.rs::vector_keyest_compressed_rejection_07_5123_08_1074_02` (non-residue, bad tag, 32/34-octet legs on both paths, `TERM_BAD_MESSAGE` + `Failed` pinned) |
+| 07-5123-08-1074-05 | implemented + verified (extended: both wire forms, was expanded-only) | `p256field.rs` (field add/sub/mul/pow, `sqrt_mod`, `y_from_x`) + `ecc.rs::compress_point`/`decompress_point` + `EccBackend::point_decompress` (default core body, so the mock backend proves the same bytes the host serves) + `keyest.rs::EphemeralPayload` (33/64-octet variants, `as_slice`/`len`/`is_compressed`) + `Exchange::set_tx_compressed`/`tx_compressed` preference (default expanded) | `tests/compressed.rs::vector_compressed_published_points_07_5123_08_1074_05` (G 0x03 + handshake pins rec_r 0x03 / rec_i 0x02, byte-pinned, stack-decoder agreement) + `vector_compressed_round_trip_host_07_5123_08_1074_05` (12 scalars both parities) + `vector_compressed_rejection_host_07_5123_08_1074_05` + `fuzz_compressed_never_panics_mock_matches` (8k, involution) + `tests/roundtrip.rs::fuzz_compressed_point_shape` (8k, backend-free) + `tests/se_vectors.rs::vector_keyest_compressed_forms_07_5123_08_1074_05` (default expanded, compressed expands to same point, responder answers in own form) + `se_roundtrip.rs::fuzz_compressed_ephemeral_shapes` (6k) |
+| 07-5356-22-C312-06 | implemented + verified (reused: wire form never splits keys) | `keyest.rs` transcript absorbs expanded points in canonical role order regardless of wire form (`decode_peer` expands before `receive_peer`) | `tests/se_vectors.rs::vector_keyest_compressed_handshake_07_5356_22_c312` (compressed/compressed, mixed, and expanded-only runs release identical session keys) + sim `se_loop.rs::se_loop_compressed_ephemeral_agrees` (full CBKE → key → price → meter with compressed flights; exactly the 2 ephemeral frames differ on air) + `se_loop_compressed_replays_deterministically` (byte-identical replay) |
+| 07-5356-22-C312-07 | implemented + verified (reused: exact form rule is now 33-or-64) | `keyest.rs::EPH_COMPRESSED_LEN` (33, compressed tag + x) beside `EPH_LEN` (64, expanded convention) | `tests/se_vectors.rs::vector_keyest_ephemeral_length_07_5123_08_1074_05` (64-octet rule preserved; 65-octet still refused) + the 1074-02 rejection legs above (32/34-octet refused) |

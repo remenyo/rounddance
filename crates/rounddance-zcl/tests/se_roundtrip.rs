@@ -106,6 +106,33 @@ fn fuzz_se_codecs_reject_without_panic() {
     }
 }
 
+// Ephemeral wire forms never panic: arbitrary 33-octet inputs are
+// rejected or expand with the involution property; payload shapes
+// report their own lengths (07-5123-08-1074-05).
+#[test]
+fn fuzz_compressed_ephemeral_shapes() {
+    let mut fz = Fuzz(0x5EED_0800);
+    let mut buf = [0u8; 64];
+    let mut i = 0;
+    while i < CASES {
+        fz.fill(&mut buf);
+        let mut c = [0u8; 33];
+        c.copy_from_slice(&buf[..33]);
+        if let Ok(p) = rounddance_security::decompress_point(&c) {
+            assert_eq!(rounddance_security::compress_point(&p), c);
+        }
+        let e = keyest::EphemeralPayload::Expanded(buf);
+        assert_eq!(e.len(), keyest::EPH_LEN);
+        assert!(!e.is_compressed());
+        assert_eq!(e.as_slice(), &buf[..]);
+        let k = keyest::EphemeralPayload::Compressed(c);
+        assert_eq!(k.len(), keyest::EPH_COMPRESSED_LEN);
+        assert!(k.is_compressed());
+        assert_eq!(k.as_slice(), &c[..]);
+        i += 1;
+    }
+}
+
 // Schedule tables + sampling engines + supply machines never panic
 // on adversarial streams; tables stay bounded, confirms are exact,
 // and encode/decode round-trips are fixed points.
