@@ -80,7 +80,11 @@ pub fn dissect(frame: &[u8]) -> Result<DecodeTree, TreeError> {
         return Ok(tree);
     }
 
-    match crate::zcl::decode(rest) {
+    let (cluster_id, profile_id) = tree
+        .aps()
+        .map(|a| (a.cluster_id, a.profile_id))
+        .unwrap_or((0xffff, 0xffff));
+    match crate::zcl::decode(rest, cluster_id, profile_id) {
         Ok(zcl) => {
             tree.push(Layer::Zcl(zcl));
         }

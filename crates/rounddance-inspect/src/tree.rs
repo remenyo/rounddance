@@ -101,6 +101,64 @@ pub struct ZclNode {
     pub command_id: u8,
     /// Trailing payload length in octets.
     pub payload_len: u16,
+    /// APS cluster identifier this ZCL payload rode on
+    /// (`0xffff` when the chain saw no APS header).
+    pub cluster_id: u16,
+    /// APS profile identifier (`0xffff` without an APS header).
+    pub profile_id: u16,
+    /// Bounded payload summary (foundation or top-cluster decode).
+    pub detail: ZclDetail,
+}
+
+/// Bounded ZCL payload summary: owned `Copy` scalars only, no values.
+///
+/// Every variant degrades gracefully: short or unrecognized payloads
+/// land in `Unknown` (or a zeroed family variant) rather than failing
+/// the tree. Counts are capped at `u8` saturation; only the first
+/// record's key is retained.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ZclDetail {
+    /// No payload summary (empty payload, or secured/unknown stop
+    /// before ZCL).
+    None,
+    /// Foundation (global) command summary.
+    Global {
+        /// Foundation command identifier.
+        cmd: u8,
+        /// Records decoded (saturates at 255).
+        records: u8,
+        /// First attribute identifier (`0xffff` when none / n/a).
+        first_id: u16,
+        /// First-record status, or Default Response status
+        /// (`0xff` when the command carries no status).
+        status: u8,
+    },
+    /// On/Off cluster (0x0006) cluster-specific command.
+    OnOff {
+        /// Command identifier.
+        cmd: u8,
+    },
+    /// Level Control cluster (0x0008) command with first args.
+    Level {
+        /// Command identifier.
+        cmd: u8,
+        /// Move-to-Level: target level; Move: mode; Step: step size;
+        /// Stop: 0.
+        arg0: u8,
+        /// Move-to-Level: transition time (1/10 s); Move: rate;
+        /// Step: transition time; Stop: 0.
+        arg1: u16,
+    },
+    /// IAS Zone cluster (0x0500) cluster-specific command.
+    IasZone {
+        /// Command identifier.
+        cmd: u8,
+    },
+    /// Anything else: unrecognized cluster or command.
+    Unknown {
+        /// Command identifier.
+        cmd: u8,
+    },
 }
 
 /// Terminal note: the chain stopped here with bytes left over.

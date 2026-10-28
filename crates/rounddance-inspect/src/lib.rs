@@ -1,10 +1,10 @@
 //! Packet inspector: Wireshark-parity Zigbee dissection scaffold.
 //!
 //! The core (`tree`, `mac`, `nwk`, `aps`, `zcl`, `chain`, `session`,
-//! `capture`) is `no_std` + `#![forbid(unsafe_code)]` with no allocator:
-//! every decode is bounded and fallible, mirroring the codec crates it
-//! reuses. Host-only capture file IO (`pcap`) and human/machine reports
-//! (`report`) sit behind the `std` feature.
+//! `capture`, `keys`) is `no_std` + `#![forbid(unsafe_code)]` with no
+//! allocator: every decode is bounded and fallible, mirroring the codec
+//! crates it reuses. Host-only capture file IO (`pcap`) and
+//! human/machine reports (`report`) sit behind the `std` feature.
 //!
 //! Layering: [`chain::dissect`] runs the 802.15.4 MAC dissector, then the
 //! reused [`rounddance_nwk`], [`rounddance_aps`], and
@@ -19,6 +19,7 @@
 pub mod aps;
 pub mod capture;
 pub mod chain;
+pub mod keys;
 pub mod mac;
 pub mod nwk;
 pub mod session;

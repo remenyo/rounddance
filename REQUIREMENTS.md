@@ -981,3 +981,20 @@ explicit follow-ups, not this wave.
 | RD-INSPECT-06 | implemented + verified | `pcap::read_all` (pcap + minimal pcapng: SHB/IDB/EPB, other blocks skipped by length) + `pcap::write_pcap` (pcap writer) | `golden_pcap_write_read_dissect` (round-trip + dissect) + `golden_pcapng_ingest_minimal` (hand-built SHB + IDB + EPB) |
 | RD-INSPECT-07 | implemented + verified | `report::to_text` / `report::to_json` (owned-scalar rendering only; secured frames named, never decrypted) | `golden_sender_traits_and_session_engine` (text + JSON layer keys) + `golden_secured_report_names_stop` (`secured:true` in JSON) |
 | RD-INSPECT-08 | implemented + verified | `no_std` core (`tree`, `mac`, `nwk`, `aps`, `zcl`, `chain`, `session`, `capture`) with `forbid(unsafe_code)`; `std` capture IO behind the `std` feature | `cargo build -p rounddance-inspect --no-default-features --target wasm32-unknown-unknown` green; default-feature build carries `pcap` + `report` |
+
+## Wave-41 traceability — packet inspector stateful engine (`rounddance-inspect`)
+
+Offline engine growth only: no live drivers, no corpus writes, no keyed
+decryption (the reused NWK codec does not surface the security aux
+header, so no inspect-layer decryptor can be built on it — key slots
+report decryptability, they do not decrypt). 6 repo-minted IDs
+(`RD-INSPECT-09..14`), MINTED-pending-confirm. Paraphrase only (D1).
+
+| Requirement ID | State | Implementing code | Verifying test |
+|----------------|-------|-------------------|----------------|
+| RD-INSPECT-09 | implemented + verified | `zcl::decode` payload summaries → `tree::ZclDetail`: foundation commands (Read/ReadRsp/Report/DefaultRsp with record count + first id + status) and cluster-specific families On/Off (0x0006), Level (0x0008, first args), IAS Zone (0x0500); unknown/short payloads degrade to `Unknown`/zeroed variants, never an error; `chain` feeds the APS cluster/profile into the node | `inspect/tests/engine.rs::detail_global_read_two_attrs` + `detail_onoff_toggle` + `detail_level_move_to_level` + `detail_global_report_and_default_rsp` + `detail_unknown_cluster_and_truncated_payload`; `golden_full_chain_mac_nwk_aps_zcl` extended with cluster/profile/detail asserts |
+| RD-INSPECT-10 | implemented + verified | `session::SeqWindow`: 32-deep rolling window over wrapping 8-bit NWK seq / APS counter with replay/gap/late accounting, folded per attributed device row (APS counter attributed to the frame's source row) | `engine_windows_replay_gap_late` (seqs 10,11,12,11,14,2 → base 14, replays 1, gaps 1, late 1 on both windows) |
+| RD-INSPECT-11 | implemented + verified | Short/long binding: IEEE-first row merge (rejoin keeps one row, newest short wins) + `device_by_ieee`; per-PAN distinct-device counting via an 8-short member cache (`EMPTY_MEMBER` sentinel) | `engine_rejoin_merges_by_ieee_and_counts_pan` (same IEEE under 0x1111 then 0x2222 merges; PAN 0 devices == 2) |
+| RD-INSPECT-12 | implemented + verified | `keys::KeySlots` (2 NWK slots, replace-by-seq, saturating loads) + engine secured/orphan-vs-decryptable counters; secured frames with a loaded slot count decryptable-offline, never decrypted; keys never rendered | `engine_key_slots_gate_decryptability` (genuine Ember U1: orphan 1 without key, decryptable 1 with lab key; rotation caps at 2 slots) |
+| RD-INSPECT-13 | implemented + verified | Stable session schema: `report::session_to_json` (schema `SESSION_SCHEMA = 1`, table-order arrays, null windows, key material never rendered) + `session_to_text`; tree JSON gains `cluster`/`profile`/`detail`, tree text gains cluster/profile/detail suffix | `session_schema_empty_engine_exact` (byte-exact empty snapshot) + `session_schema_one_tree_shape` (byte-exact one-tree snapshot) |
+| RD-INSPECT-14 | implemented + verified | Parser robustness: every truncation prefix yields a sub-tree or a typed `TreeError`; 3000-case deterministic mutation sweep + exhaustive 1-/2-byte `zcl::decode` sweep + constant fills; bounded engine tables throughout; typed errors only, no panics | `robustness_truncations_are_typed` + `robustness_mutation_sweep_no_panics` + `robustness_zcl_byte_sweep_typed` |

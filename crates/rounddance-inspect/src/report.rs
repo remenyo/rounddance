@@ -64,7 +64,7 @@ pub fn to_text(tree: &DecodeTree) -> String {
             Layer::Zcl(z) => {
                 let _ = writeln!(
                     s,
-                    "  zcl: type={} dir={} tsn={} cmd={:#04x} payload={}B{}",
+                    "  zcl: type={} dir={} tsn={} cmd={:#04x} payload={}B{} cluster={} profile={} {}",
                     z.frame_type,
                     z.direction,
                     hex8(z.tsn),
@@ -73,6 +73,9 @@ pub fn to_text(tree: &DecodeTree) -> String {
                     z.manufacturer_code
                         .map(|c| format!(" mfr={c:#06x}"))
                         .unwrap_or_default(),
+                    hex16(z.cluster_id),
+                    hex16(z.profile_id),
+                    detail_text(&z.detail),
                 );
             }
             Layer::Note(n) => {
@@ -133,13 +136,16 @@ pub fn to_json(tree: &DecodeTree) -> String {
             }
             Layer::Zcl(z) => {
                 s.push_str(&format!(
-                    "{{\"zcl\":{{\"type\":{},\"dir\":{},\"tsn\":{},\"cmd\":{},\"payload_len\":{},\"mfr\":{}}}}}",
+                    "{{\"zcl\":{{\"type\":{},\"dir\":{},\"tsn\":{},\"cmd\":{},\"payload_len\":{},\"mfr\":{},\"cluster\":{},\"profile\":{},\"detail\":{}}}}}",
                     z.frame_type,
                     z.direction,
                     z.tsn,
                     z.command_id,
                     z.payload_len,
                     opt_json_u16(z.manufacturer_code),
+                    z.cluster_id,
+                    z.profile_id,
+                    detail_json(&z.detail),
                 ));
             }
             Layer::Note(n) => {
@@ -152,6 +158,164 @@ pub fn to_json(tree: &DecodeTree) -> String {
     }
     s.push_str("]}");
     s
+}
+
+/// Session schema version for [`session_to_json`].
+pub const SESSION_SCHEMA: u8 = 1;
+
+/// One-line-per-row human summary of a [`SessionEngine`](crate::session::SessionEngine).
+pub fn session_to_text(eng: &crate::session::SessionEngine) -> String {
+    let mut s = String::new();
+    let _ = writeln!(
+        s,
+        "session: trees={} secured_decryptable={} secured_orphan={} key_slots={}",
+        eng.trees,
+        eng.secured_decryptable,
+        eng.secured_orphan,
+        eng.keys().loaded(),
+    );
+    for d in eng.devices().iter().flatten() {
+        let _ = writeln!(
+            s,
+            "  dev: short={} ieee={} last_seq={} frames={} secured={}{}{}",
+            hex16(d.short_addr),
+            d.ieee
+                .map(|e| format!("{e:#018x}"))
+                .unwrap_or_else(|| String::from("-")),
+            hex8(d.last_seq),
+            d.frames,
+            d.secured,
+            d.nwk_window
+                .map(|w| format!(
+                    " nwk(base={} replays={} gaps={} late={})",
+                    hex8(w.base),
+                    w.replays,
+                    w.gaps,
+                    w.late
+                ))
+                .unwrap_or_default(),
+            d.aps_window
+                .map(|w| format!(
+                    " aps(base={} replays={} gaps={} late={})",
+                    hex8(w.base),
+                    w.replays,
+                    w.gaps,
+                    w.late
+                ))
+                .unwrap_or_default(),
+        );
+    }
+    for n in eng.networks().iter().flatten() {
+        let _ = writeln!(
+            s,
+            "  net: pan={} frames={} devices={} secured={}",
+            hex16(n.pan_id),
+            n.frames,
+            n.devices,
+            n.secured,
+        );
+    }
+    s
+}
+
+/// Stable machine-readable session snapshot (schema [`SESSION_SCHEMA`]).
+///
+/// Arrays are in table order (not sorted); absent windows render as
+/// `null`. No key material is ever rendered.
+pub fn session_to_json(eng: &crate::session::SessionEngine) -> String {
+    let mut s = format!(
+        "{{\"v\":{},\"trees\":{},\"devices\":[",
+        SESSION_SCHEMA, eng.trees
+    );
+    let mut first = true;
+    for d in eng.devices().iter().flatten() {
+        if !first {
+            s.push(',');
+        }
+        first = false;
+        s.push_str(&format!(
+            "{{\"short\":{},\"ieee\":{},\"last_seq\":{},\"frames\":{},\"secured\":{},\"nwk\":{},\"aps\":{}}}",
+            d.short_addr,
+            d.ieee.map(|e| e.to_string()).unwrap_or_else(|| String::from("null")),
+            d.last_seq,
+            d.frames,
+            d.secured,
+            window_json(d.nwk_window),
+            window_json(d.aps_window),
+        ));
+    }
+    s.push_str("],\"networks\":[");
+    first = true;
+    for n in eng.networks().iter().flatten() {
+        if !first {
+            s.push(',');
+        }
+        first = false;
+        s.push_str(&format!(
+            "{{\"pan\":{},\"frames\":{},\"devices\":{},\"secured\":{}}}",
+            n.pan_id, n.frames, n.devices, n.secured,
+        ));
+    }
+    s.push_str(&format!(
+        "],\"sec\":{{\"decryptable\":{},\"orphan\":{},\"slots\":{}}}}}",
+        eng.secured_decryptable,
+        eng.secured_orphan,
+        eng.keys().loaded(),
+    ));
+    s
+}
+
+fn window_json(w: Option<crate::session::SeqWindow>) -> String {
+    w.map(|v| {
+        format!(
+            "{{\"base\":{},\"replays\":{},\"gaps\":{},\"late\":{}}}",
+            v.base, v.replays, v.gaps, v.late,
+        )
+    })
+    .unwrap_or_else(|| String::from("null"))
+}
+
+fn detail_text(d: &crate::tree::ZclDetail) -> String {
+    use crate::tree::ZclDetail as D;
+    match *d {
+        D::None => String::from("-"),
+        D::Global {
+            cmd,
+            records,
+            first_id,
+            status,
+        } => format!(
+            "global cmd={cmd:#04x} rec={records} id={} status={status:#04x}",
+            hex16(first_id)
+        ),
+        D::OnOff { cmd } => format!("onoff cmd={cmd:#04x}"),
+        D::Level { cmd, arg0, arg1 } => {
+            format!("level cmd={cmd:#04x} arg0={arg0:#04x} arg1={arg1:#06x}")
+        }
+        D::IasZone { cmd } => format!("iaszone cmd={cmd:#04x}"),
+        D::Unknown { cmd } => format!("unknown cmd={cmd:#04x}"),
+    }
+}
+
+fn detail_json(d: &crate::tree::ZclDetail) -> String {
+    use crate::tree::ZclDetail as D;
+    match *d {
+        D::None => String::from("{\"kind\":\"none\"}"),
+        D::Global {
+            cmd,
+            records,
+            first_id,
+            status,
+        } => format!(
+            "{{\"kind\":\"global\",\"cmd\":{cmd},\"records\":{records},\"first_id\":{first_id},\"status\":{status}}}"
+        ),
+        D::OnOff { cmd } => format!("{{\"kind\":\"onoff\",\"cmd\":{cmd}}}"),
+        D::Level { cmd, arg0, arg1 } => {
+            format!("{{\"kind\":\"level\",\"cmd\":{cmd},\"arg0\":{arg0},\"arg1\":{arg1}}}")
+        }
+        D::IasZone { cmd } => format!("{{\"kind\":\"iaszone\",\"cmd\":{cmd}}}"),
+        D::Unknown { cmd } => format!("{{\"kind\":\"unknown\",\"cmd\":{cmd}}}"),
+    }
 }
 
 fn hex8(v: u8) -> String {

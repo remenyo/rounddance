@@ -103,6 +103,17 @@ fn golden_full_chain_mac_nwk_aps_zcl() {
     assert_eq!(z.tsn, 0x42);
     assert_eq!(z.command_id, 0x00);
     assert_eq!(z.payload_len, 2);
+    assert_eq!(z.cluster_id, 0x0006);
+    assert_eq!(z.profile_id, 0x0104);
+    assert_eq!(
+        z.detail,
+        tree::ZclDetail::Global {
+            cmd: 0x00,
+            records: 1,
+            first_id: 0x0000,
+            status: 0xff,
+        }
+    );
 }
 
 // ---------------------------------------------------------------------------
