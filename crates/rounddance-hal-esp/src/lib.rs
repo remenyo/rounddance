@@ -64,6 +64,7 @@
 extern crate std;
 
 pub mod adapter;
+pub mod app;
 pub mod driver;
 #[cfg(feature = "esp")]
 pub mod esp;
@@ -72,6 +73,7 @@ pub mod ffi;
 pub mod mock;
 
 pub use adapter::{EspAdapter, EspError, MAX_TX_POWER_DBM};
+pub use app::{AppError, AppRole, CoordinatorApp, JoinerApp, SerialLog};
 pub use driver::{Driver, DriverError, RxFrame, TxEvent, TxFail};
 pub use mock::MockDriver;
 

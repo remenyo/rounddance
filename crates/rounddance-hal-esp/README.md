@@ -71,6 +71,15 @@ compiles `ffi` + `esp` for `riscv32imac-esp-espidf`).
   no allocator.
 - ED scan needs STA-capable init on some targets; `espflash monitor`
   needs a TTY (use pyserial otherwise).
+- Crate-level ESP check (best-effort, host-run, non-blocking):
+  `IDF_PATH=/home/dev/projects/esp-idf-v6 MCU=esp32c6
+  RUSTFLAGS="--cfg espidf_time64" cargo +esp check -p
+  rounddance-hal-esp --features esp --target
+  riscv32imac-esp-espidf -Z build-std=std,panic_abort` — PASS in
+  wave-25 (incl. the new `app` module; all deps `no_std`).
+- Firmware shape (board code, not this crate): NVS-init-first, antenna
+  GPIO3+GPIO14 LOW, role from MAC via `role_from_mac`, `SerialLog`
+  over UART/USB, then the `CoordinatorApp`/`JoinerApp` loop below.
 
 ## Verifying the binary shape on host
 
@@ -85,9 +94,47 @@ before framing — the same bytes the spike radiated OTA. On device,
 swap the driver for `EspIdfDriver::new()` and prepend the board
 antenna sequence; the MAC framing path is unchanged.
 
+## App layer: C6-standalone coordinator + joiner (`src/app.rs`)
+
+First-class repo productization of the wave-23 OTA run (`rd-c6join`
+in scratch `~/hwscratch/c6join`): the same form → permit → admit →
+install-code join → DeviceAnnce → secured ZCL Toggle sequence, now
+composed from repo crates (`roles`, `commission`, `nwk`, `aps`,
+`security`, `zdo`, `zcl`) over `EspAdapter`.
+
+- Role selection: `role_from_mac` maps the OTA-proven pair (MAC last
+  octet `0x86` coordinator, `0x85` joiner); anything else refuses
+  before touching the radio. `eui_from_mac` expands the base MAC with
+  the proven `ff:fe` rule.
+- Serial-log discipline: `SerialLog` trait (`&str` lines, task
+  context only) + `log_air` (bounded 512 B line with full air
+  bytes). Host tests collect lines; firmware implements the trait
+  over UART/USB.
+- `CoordinatorApp`: formation (centralized, fixed PAN `0xC601`) →
+  permit window → child-table + Trust-Center admit → MMO-KDF key
+  exchange → secured Toggle builder → Default Response verifier.
+- `JoinerApp`: beacon survey → candidate → assoc (short `0x0001`
+  assigned post-assoc, `0xFFFF` before) → wave-23 unsecured-vendor
+  tolerance → key → verify → announced → DeviceAnnce → live On/Off
+  server endpoint (real `AttrStore` + `dispatch`) → Default Response
+  with `should_default_respond` triage.
+
+## Host-side proof
+
+```sh
+cargo test -p rounddance-hal-esp --test c6_standalone
+# 4 tests: role selection + full form→join→toggle over two
+# EspAdapter<MockDriver>s with mock-to-mock air shuttling (Delivered
+# confirms, lamp off→on, SUCCESS defrsp, replay refused both legs,
+# two fresh runs radiate identical bytes + log lines).
+```
+
 ## Follow-ups (not in v0)
 
 Extended-address data frames (SAP returns `Unsupported`), SFD
 timestamps (confirms carry `None`, capability honestly `false`), and
 sleep scheduling. Touchlink scan bursts should call
 `restore_channel()` afterwards (inter-PAN retunes per request).
+MAC-association primitives (beacon/assoc over the air) are still
+driver-level follow-up: the join leg above starts at the steering
+survey with the coordinator's beacon ingested.

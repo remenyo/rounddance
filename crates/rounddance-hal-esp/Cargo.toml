@@ -15,8 +15,21 @@ esp = ["dep:esp-idf-sys"]
 
 [dependencies]
 rounddance-mac-sap = { path = "../rounddance-mac-sap" }
+rounddance-nwk = { path = "../rounddance-nwk" }
+rounddance-aps = { path = "../rounddance-aps" }
+rounddance-zdo = { path = "../rounddance-zdo" }
+rounddance-security = { path = "../rounddance-security" }
+rounddance-zcl = { path = "../rounddance-zcl" }
+rounddance-commission = { path = "../rounddance-commission" }
+rounddance-roles = { path = "../rounddance-roles" }
 esp-idf-sys = { version = "0.38", optional = true }
 
 [dev-dependencies]
 rounddance-mac-sap = { path = "../rounddance-mac-sap" }
 rounddance-nwk = { path = "../rounddance-nwk" }
+rounddance-aps = { path = "../rounddance-aps" }
+rounddance-zdo = { path = "../rounddance-zdo" }
+rounddance-security = { path = "../rounddance-security" }
+rounddance-zcl = { path = "../rounddance-zcl" }
+rounddance-commission = { path = "../rounddance-commission" }
+rounddance-roles = { path = "../rounddance-roles" }

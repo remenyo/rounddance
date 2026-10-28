@@ -1073,8 +1073,14 @@ name = "rounddance-hal-esp"
 version = "0.1.0"
 dependencies = [
  "esp-idf-sys",
+ "rounddance-aps",
+ "rounddance-commission",
  "rounddance-mac-sap",
  "rounddance-nwk",
+ "rounddance-roles",
+ "rounddance-security",
+ "rounddance-zcl",
+ "rounddance-zdo",
 ]
 
 [[package]]

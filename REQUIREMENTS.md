@@ -674,3 +674,41 @@ them; downgrade policy is never-silent (refusal is typed, see
 | RD-COMPAT-02 | implemented + verified | `negotiate::admit_30_peer`: full 3.0 admission (version + method + level) in one call | `compat/tests/vectors.rs::vector_admit_30_peer_bundle` |
 | RD-COMPAT-03 | implemented + verified | `negotiate::highest_common_key_index`: bounded highest-common key-transport index | `compat/tests/vectors.rs::vector_highest_common_key_index` |
 | RD-COMPAT-04 | implemented + verified | forward-compat corners: touchlink sub-device versions carried verbatim, higher ClusterRevisions tolerated | `compat/tests/vectors.rs::vector_forward_compat_corners` |
+
+## Wave-25 traceability — C6-standalone full-stack app (`rounddance-hal-esp::app`)
+
+The app layer composes repo crates only (roles, commission, NWK,
+APS, security, ZDO, ZCL over `EspAdapter`); all behavior IDs below
+are corpus IDs reused from their home waves — no new codec or
+machine semantics, so no new corpus rows. The `RD-APP-C6-*` rows are
+repo-minted (MINTED-pending-confirm) and cover only the app binding
+itself: role selection, serial-log discipline, and the wired
+composition the host proof exercises. Radio facts (channel 15, PAN
+0xC601, +10 dBm cap, Len+2, short-short intra-PAN) are the wave-23
+OTA run (`rd-c6join` in scratch `~/hwscratch/c6join`); no hardware
+was touched by this wave — the proof runs the same app logic
+against `MockDriver`.
+
+| Requirement ID | State | Implementing code | Verifying test |
+|----------------|-------|-------------------|----------------|
+| 22-65816-030-61-01 | implemented + verified (reused: app roles) | `app::AppRole::from` selection (`role_from_mac`: 0x86 coordinator / 0x85 joiner, refuse otherwise before touching the radio) | `c6_standalone.rs::c6_standalone_unknown_unit_refuses_role`, full-run role asserts |
+| 05-3474-23-3611-01 | implemented + verified (reused: formation) | `CoordinatorApp::begin_formation` (centralized, fixed PAN) + `formation_done` | `c6_standalone.rs::c6_standalone_form_join_toggle` (C6APP FORMED leg) |
+| 05-3474-23-3612-06 | implemented + verified (reused: coordinator lifecycle) | `CoordinatorApp` over `CoordinatorMachine` (form + permit + admit + child table) | full run (ADMIT leg + `joiner_heard` keepalive) |
+| 05-3474-23-3612-07 | implemented + verified (reused: permit/admit) | `open_permit` + `admit_joiner` (formed + window required) | full run (C6APP PERMIT/ADMIT lines) |
+| 22-65816-030-91-01 | implemented + verified (reused: survey) | `JoinerApp::begin_scan` + `survey` (channel-15 entry → candidate) | full run (C6APP SCAN/SURVEY legs) |
+| 22-65816-030-91-03 | implemented + verified (reused: symmetric join) | `JoinerApp` over `JoinerMachine` (assoc → key → verify → announced → joined) + `UNSECURED_VENDOR_CMD` tolerance | full run incl. `tolerate_unsecured` count, `c6_standalone_unknown_unit_refuses_role` |
+| 22-65816-030-56-03 | implemented + verified (reused: install-code KDF) | `CoordinatorApp::exchange_join_key` (real `MmoJoinKdf`, never a mock) | full run (SYMMETRIC attrs assert) |
+| 05-3474-23-3615-01 | implemented + verified (reused: Trust-Center admission) | `admit_joiner` admits at both layers (child table + `TrustCenter`) | full run |
+| 05-3474-23-24311-11 | implemented + verified (reused: DeviceAnnce) | `JoinerApp::build_annce` via `JoinerMachine::device_annce`, decoded by the coordinator side | full run (announce leg asserts) |
+| 07-5123-08-241-01 | implemented + verified (reused: ZCL frame) | `build_toggle_request` (`onoff::client::toggle`) + `handle_toggle` decode | full run (lamp flips off→on) |
+| 07-5123-08-383-01..04 | implemented + verified (reused: On/Off server) | live `ServerBehavior` over a real `AttrStore` via `dispatch` | full run (behavior applies the toggle) |
+| 07-5123-08-2512-01 | implemented + verified (reused: Default Response triage) | `encode_default_rsp` + `should_default_respond` (success + error paths) | full run (`handle_defrsp` SUCCESS check) |
+| 05-3474-23-4312-01 | implemented + verified (reused: replay) | per-direction `ReplayTable<8>` on both apps | `c6_standalone.rs::c6_standalone_replay_is_refused` |
+| RD-APP-C6-01 | implemented + verified | `app::role_from_mac` + `eui_from_mac`: the OTA-proven pair selects, anything else refuses pre-radio | `c6_standalone_unknown_unit_refuses_role` |
+| RD-APP-C6-02 | implemented + verified | `SerialLog` trait + `log_air` (bounded 512 B line, full air bytes, task-context only) | full run (8 discipline lines asserted) |
+| RD-APP-C6-03 | implemented + verified | `CoordinatorApp` composition (machine + Trust Center + NWK/APS/aux/ZCL builders) | full run |
+| RD-APP-C6-04 | implemented + verified | `JoinerApp` composition (steering + join machine + live ZCL endpoint + replay) | full run |
+| RD-APP-C6-05 | implemented + verified | `build_secured_npdu` / `decode_secured_npdu` (NWK→APS→aux→ZCL, level-5 + address gates) | full run (byte-identical shuttled MSDUs) |
+| RD-APP-C6-06 | implemented + verified | Error taxonomy `AppError` (BadRole/BadState/BadFrame/Replay/WrongCluster/BadStatus, no key material) | replay test (`AppError::Replay` on both legs) |
+| RD-APP-C6-07 | implemented + verified | End-to-end proof shape: two `EspAdapter<MockDriver>` with mock-to-mock air shuttling + `Delivered` confirms | all 4 `c6_standalone.rs` tests, incl. determinism pin |
+| RD-APP-C6-08 | implemented + verified | ESP-target build of the app (`no_std`, no `unsafe`, new deps all no_std) | `cargo check -p rounddance-hal-esp --features esp --target riscv32imac-esp-espidf -Z build-std=std,panic_abort` PASS (this wave) |
