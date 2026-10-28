@@ -45,6 +45,16 @@
 //!   attributes and commands it does not implement
 //!   ([`negotiate::tolerates_cluster_revision`]).
 //!
+//! # PRO best-effort support (doc `22-65816-030` v3.1, tracked fallback)
+//!
+//! PRO-legacy peers are recognized — not fully commissioned — by
+//! [`negotiate::admit_pro_peer`]: shared NWK version 2, PRO
+//! stack-profile value ([`profile::PRO_STACK_PROFILE`]), open
+//! joining permission, symmetric key path, baseline security
+//! level. Full PRO commissioning (BDB procedures, Trust-Center PRO
+//! policies) is an explicit non-goal; the boundary is documented at
+//! the decision site. Requirements `RD-PRO-01..04`.
+//!
 //! # Downgrade policy (never silent)
 //!
 //! A fallback that lowers the security posture (a security level below

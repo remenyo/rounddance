@@ -902,3 +902,34 @@ cover behavior: `14-0563-19-A152-01` (queue), `14-0563-19-A152-02`
 | 14-0563-19-A4212-02 | implemented + verified | `commissioning.rs::CommissioningSession::{stage_reply, build_reply, note_success}` (shape-checked staging, in-window serve, identity-matched Success commissions with a translation seed else `TransactionMismatch`; anchors p0259-L7238-L7250) | `tests/vectors.rs::vector_bidir_full_exchange_14_0563_19_a4212_02`, `vector_bidir_state_gates_14_0563_19_a4212_02` + `rounddance-sim/tests/gp_bidir.rs::gp_bidir_commissioning_reply_two_node`, `gp_bidir_replay_is_deterministic` |
 | 14-0563-19-A4214-01 | implemented + verified | `reply.rs::ChannelRequest` (1-octet toggling behavior, nibbles name channels 11..=26; anchors p0259-L7259-L7270) | `tests/vectors.rs::vector_channel_codecs_14_0563_19_a4214_01_a4215_01` + `tests/roundtrip.rs::fuzz_reply_round_trip` |
 | 14-0563-19-A4215-01 | implemented + verified | `reply.rs::ChannelConfig` (1-octet channel: operational channel + basic-only flag; anchors p0260-L7275-L7292) | `tests/vectors.rs::vector_channel_codecs_14_0563_19_a4214_01_a4215_01` + `tests/roundtrip.rs::fuzz_reply_round_trip` |
+
+## Wave-35 traceability — PRO best-effort evidence (`rounddance-compat`)
+
+Closes audit R5 (wave-32): PRO (doc `22-65816-030` v3.1, 103 pp,
+extracted per corpus `coverage.md` Doc 7) moves from ZERO repo
+evidence to a tracked best-effort subset in the compat-crate seam.
+4 repo-minted IDs (`RD-PRO-01..04`), MINTED-pending-confirm.
+Wording in code/tests is paraphrase only, never spec text (D1).
+Reused corpus IDs where they cover behavior: `05-3474-23-331-02`
+(shared NWK version 2), `05-3474-23-3615-01` (discovery version /
+profile filter), `22-65816-030-91-01/02` (survey + symmetric
+exchange), `22-65816-030-56-03` (install-code key).
+
+Best-effort boundary (also documented at `negotiate::admit_pro_peer`):
+COVERS recognition of a PRO-legacy peer (shared NWK version 2 +
+PRO stack-profile value + symmetric-only key capabilities), one
+typed accept/refuse decision per candidate network, and the
+version-gate extension keeping unknown versions out of the join
+machine. Does NOT cover full PRO commissioning: no BDB
+formation/steering procedures, no Trust-Center PRO policies, no
+PRO install-code policy tables, no PRO commissioning-frame
+translation. Admitted PRO peers join over the proven symmetric
+exchange; anything PRO-specific beyond admission is a typed
+refusal, never a silent downgrade.
+
+| Requirement ID | State | Implementing code | Verifying test |
+|----------------|-------|-------------------|----------------|
+| RD-PRO-01 | implemented + verified | `negotiate::admit_pro_peer`: version → profile → permission → method → level bundle (doc `22-65816-030` v3.1 body, R23.2 §3.6.1.5 discovery anchors) | `compat/tests/vectors.rs::vector_pro_peer_accepted`, `rounddance-sim/tests/pro_best_effort.rs::pro_best_effort_accept_and_replay` |
+| RD-PRO-02 | implemented + verified | `profile::PRO_STACK_PROFILE` 0x02 + `negotiate::admit_pro_stack_profile` (anchors: `05-3474-23-3615-01` discovery filter) | `compat/tests/vectors.rs::vector_pro_stack_profile_gate` |
+| RD-PRO-03 | implemented + verified | refusal matrix in `admit_pro_peer` (`UnsupportedStackProfile`, `JoiningClosed`, plus reused `UnsupportedNwkVersion` / `NoCommonKeyMethod` / `SecurityDowngradeRefused`); closed networks refused before any key decision | `compat/tests/vectors.rs::vector_pro_peer_refusal_matrix`, `rounddance-sim/tests/pro_best_effort.rs::pro_closed_network_never_joins` |
+| RD-PRO-04 | implemented + verified | version-gate extension: shared version-2 recognition (`admit_nwk_version`) explicitly covers PRO beacons via the `admit_pro_peer` bundle; `profile::StackProfile::Pro` + `CompatPeer::profile_pro` (symmetric-only, baseline level) | `compat/tests/vectors.rs::vector_pro_peer_accepted` (accept leg pins the shared version) |

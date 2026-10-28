@@ -8,7 +8,7 @@ hardware, and keep all other streams moving.
 ## Queue
 
 ### B-001 (2026-10-27): C6 wifi-deafness on ACM7 + ACM8 — physical replug protocol + quarantine approval
-Status: NEEDS-HUMAN (remote diagnosis exhausted).
+Status: CLOSED (diagnosed wave-34 — see verdict bullet).
 - Symptom: wifi scans 0 APs / reason 201 (NO_AP_FOUND) on both Xiao C6 units (ttyACM7 A0:F2:62:86:7F:68, ttyACM8 A0:F2:62:85:97:A4), across 3 firmwares. Onset in wave-6 antenna-sweep window (non-LOW/LOW combos driven; ACM9 without sweep stays healthy).
 - Proven good: 15.4 TX/RX OTA-verified on ACM8 (10/10 byte-match + 97 ambient RX); RF/LNA/antenna functional.
 - Excluded remotely: antenna GPIO, NVS (erase+fresh cal), phy partition (byte-identical to healthy ACM9), efuse, RTC/RAM (survives uhubctl VBUS power-cycle), firmware (same binary works on ACM9), Kconfig, AP-side. Evidence: /tmp/c6diag/ (31 files, on Pi, ephemeral — ask for re-capture if stale).
@@ -17,21 +17,24 @@ Status: NEEDS-HUMAN (remote diagnosis exhausted).
 - Non-LOW/LOW antenna combos on Xiao C6 are banned without human approval (suspected cause).
 - DIAGNOSTIC UPDATE (2026-10-27, BLE spike): deaf ACM7 hears 28 ambient BLE advertisers/60s + peer ESP OTA both directions (RSSI -35..-43). 2.4GHz RX path is fine — damage is wifi-path-specific. BLE is usable on deaf units, so they remain fully useful for 15.4 + BLE (Zigbee-Direct) work. Evidence: ~/hwscratch/ble/ (durable).
 - DIAGNOSTIC UPDATE (2026-10-28, repocode wave): 97A4 REJOINED post-restore and is helloing fresh (.47, rssi -50/-52, uptime counting). Deafness is INTERMITTENT, not permanent — a marginal/flaky wifi path now leads over the RF-death theory (consistent with e510's pre-death flake history). Policy unchanged (15.4-ONLY until human review — intermittent is not reliable); hello continuity under monitoring.
+- Verdict 2026-10-28 (head, wave-34): UNIT-HW (wifi subsystem). 7F68 scan-proven wifi-RX-dead (stock IDF after FULL chip erase: 0 APs; same-fw S3 same-bench: 19-20 APs), 97A4 log-proven deaf 5h+ post-restore (06:06 restore, zero hellos after; earlier rejoins unexplained/marginal). NVS/cal/efuse excluded, Pi-AP excluded, 15.4 alive on both. C6 wifi not functional per role ruling. Evidence: ~/hwscratch/deaf/.
 
 ### B-002 (2026-10-27): C5 wifi-deaf on ACM2 — replug protocol + quarantine approval + txpower-cap ratification
-Status: NEEDS-HUMAN (remote recovery ladder exhausted: reflash x2, full erase_flash+reflash, uhubctl power-cycle).
+Status: CLOSED (recovered wave-34 — see verdict bullet).
 - Symptom: ESP32-C5 (ttyACM2, 30:ED:A0:E4:1A:30) wifi STA stuck `disconnected, retrying`, never associates, after 15.4 bring-up session. 15.4 fully alive (TX OTA byte-match 15/15 + 7/7, RX ambient excellent). Same signature class as B-001 (wifi-dead/15.4-alive, survives erase+power-cycle) but NO antenna GPIOs were driven — differentiator is ~1hr of +20dBm 15.4 TX. S31 in the same wave is fully healthy (wifi helloing .112).
 - Proven good: 15.4 TX/RX/ED on C5; SDK ceiling clean (zero banned symbols). Evidence: ~/hwscratch/c5s31/ (durable).
 - Needed from human: (1) physically unplug ACM2 USB, wait 10s, replug (different free port if possible), report — a worker will re-run wifi-scan. (2) If still deaf, approve 15.4-ONLY quarantine (no wifi-node duty; keep for 15.4 experiments). (3) Ratify or lift the standing +10dBm 15.4 TX cap imposed lab-wide after this third unit (H2 precedent at 10dBm is clean).
 - Lab policy meanwhile: ACM2 is 15.4-ONLY. TX power capped at +10dBm on all units; keep TX sessions short.
+- Verdict 2026-10-28 (head, wave-34): RECOVERED, cause unattributed. C5 observed healthy and helloing (up=19367 at 11:19 on 2026-10-28); prior deafness episode never reproduced under test. Reopen on recurrence with fresh scan evidence. Evidence: wifi-hello.log + ~/hwscratch/deaf/ (4th-unit census).
 
 ### B-003 (2026-10-27): healthy C6 e510 went wifi-deaf after cap-compliant 15.4 session — replug protocol + quarantine approval + correlation review
-Status: NEEDS-HUMAN (remote recovery ladder exhausted).
+Status: CLOSED (diagnosed wave-34 — see verdict bullet).
 - Symptom: ESP32-C6 e510 (post-restart /dev/ttyACM5, A0:F2:62:86:E5:10) helloing healthy at 22:01 (rssi -49) → after a 15.4-only interop session it never rejoined: `disconnected, retrying` loop, ACTIVE scan 0 APs, PASSIVE (RX-only, 13ch x2) scan 0 APs, zero AP-side auth attempts, zero packets on tcpdump. 15.4 RX/TX proven good minutes earlier on the same radio (bidirectional MG24 exchange + sniffer captures).
 - Excluded remotely: antenna abuse (LOW/LOW verified in both firmwares' consoles), high-power TX (only brief cap-compliant +10dBm / 0dBm traffic: ~40 MG24 frames + 247 C6 frames), flash (2x hash-verified backup restores), NVS (region erase/regen), phy partition (byte-identical to backup — RF cal intact), power (uhubctl VBUS cycle, stable re-enumeration), AP-side (3 other STAs connected, no ghost entry). Evidence: ~/hwscratch/sonoff/ (durable: backups, c6_*.log, sniff_*.txt, exchange_run*.log).
 - Significance: 4th wifi-deaf unit (joins B-001 pair + B-002 C5) and the FIRST with no antenna abuse and no high-power TX — weakens the +20dBm theory. e510 had a prior intermittent join-flake (wave-15 restore saga); leading theory is spontaneous/marginal failure, but 4/4 deaf units had 15.4 sessions in-window, so a session-correlated factor cannot be excluded.
 - Needed from human: (1) physically unplug ACM5 USB, wait 10s, replug, report — a worker will re-run wifi-scan. (2) If still deaf, approve 15.4-ONLY quarantine (already recorded in arbitrator quarantine for /dev/ttyACM5; unit left in canonical retrying state so it rejoins on its own if it recovers). (3) Review the 15.4-TX/deafness correlation across B-001/B-002/B-003 and advise: no remaining unit has both wifi+15.4 (risk moot for planning), but root-cause guidance affects how hard we push 15.4 duty on the deaf units.
 - Lab policy meanwhile: e510 is 15.4-ONLY. ZERO healthy C6 remain — all C6 work is 15.4/BLE-only (BLE expected alive per 7F68 precedent; confirm with a BLE-scan diagnostic when convenient). Wifi fleet = 2x S3 + S31.
+- Verdict 2026-10-28 (head, wave-34): UNIT-HW (wifi subsystem). e510 wifi TX+RX dead (stock scan after full erase 0 APs; fails vs live ESP-AP too; e510-as-softAP invisible to S3 across 16/18/6-AP scans), 15.4 two-way alive. NVS/cal/efuse bit-identical healthy-vs-dead, Pi-AP excluded. C6 wifi not functional per role ruling; unit returned to service for 15.4/BLE-only roles (currently c6-blink). Evidence: ~/hwscratch/deaf/.
 
 ### B-004 (2026-10-28): MG24 coordinator in persistent stealth after transient-key import — factory-reset/reflash approval + peer hygiene
 Status: NEEDS-HUMAN (only known clear is destructive).

@@ -3,8 +3,8 @@
 //! so a downgrade can never happen silently.
 
 use crate::profile::{
-    method_mask, CompatPeer, BASELINE_SEC_LEVEL, GP_VERSION_SHARED_30_40, MAX_SEC_LEVEL,
-    NWK_VERSION_SHARED_30_40,
+    method_mask, CompatPeer, StackProfile, BASELINE_SEC_LEVEL, GP_VERSION_SHARED_30_40,
+    MAX_SEC_LEVEL, NWK_VERSION_SHARED_30_40, PRO_STACK_PROFILE,
 };
 
 /// Compatibility failure: the peer cannot be admitted without
@@ -25,6 +25,13 @@ pub enum CompatError {
     /// No key-establishment method is common to both sides (or the
     /// only common methods are forbidden by policy).
     NoCommonKeyMethod,
+    /// Discovery stack-profile field is not the PRO value, or the
+    /// peer's profile tag is not the PRO-legacy one the best-effort
+    /// path serves.
+    UnsupportedStackProfile(u8),
+    /// The candidate network is closed to joining; no key decision
+    /// is taken for a closed network.
+    JoiningClosed,
 }
 
 impl core::fmt::Display for CompatError {
@@ -37,6 +44,8 @@ impl core::fmt::Display for CompatError {
                 "security downgrade refused (floor {floor}, peer offers {offered})"
             ),
             Self::NoCommonKeyMethod => write!(f, "no common key-establishment method"),
+            Self::UnsupportedStackProfile(p) => write!(f, "unsupported stack profile {p}"),
+            Self::JoiningClosed => write!(f, "candidate network is closed to joining"),
         }
     }
 }
@@ -203,6 +212,71 @@ pub fn admit_30_peer(
     floor: u8,
 ) -> Result<(SelectedMethod, u8), CompatError> {
     admit_nwk_version(peer.nwk_version)?;
+    let method = select_key_method(peer, we_offer_negotiation, key_policy)?;
+    let level = agree_security_level(BASELINE_SEC_LEVEL, peer.max_sec_level, floor)?;
+    Ok((method, level))
+}
+
+// PRO best-effort boundary (doc `22-65816-030` v3.1).
+//
+// What this path covers: recognition of a PRO-legacy peer (shared
+// NWK version 2 + PRO stack-profile value + symmetric-only key
+// capabilities), one typed accept/refuse decision per candidate
+// network (`admit_pro_peer`), and the version-gate extension that
+// keeps unknown versions out of the join machine. The decision is
+// zero-alloc and infallible in resources: it touches only the
+// caller's descriptor and returns a value, so there is no
+// allocator budget to declare.
+//
+// What it does NOT cover (explicit non-goals, full PRO
+// commissioning stays out): BDB formation/steering procedures,
+// Trust-Center PRO policies, PRO install-code policy tables, and
+// any translation of PRO commissioning frames. A PRO-legacy peer
+// admitted here joins over the same symmetric exchange the 3.0
+// path already proves; anything PRO-specific beyond admission is
+// refused with a typed error, never silently downgraded.
+
+/// Admit a heard discovery stack-profile value on the PRO
+/// best-effort path: exactly [`PRO_STACK_PROFILE`], the value the
+/// PRO profile, the 3.0 profile, and the R23.2 core all beacon
+/// (version-gate extension: the shared value is now explicitly
+/// recognized as the PRO value instead of merely tolerated).
+///
+/// Requirement `RD-PRO-02` (repo-minted, MINTED-pending-confirm).
+pub const fn admit_pro_stack_profile(profile: u8) -> Result<(), CompatError> {
+    match profile {
+        PRO_STACK_PROFILE => Ok(()),
+        p => Err(CompatError::UnsupportedStackProfile(p)),
+    }
+}
+
+/// Full PRO-legacy admission in one call: NWK version gate, PRO
+/// stack-profile gate (raw field + profile tag), joining-permission
+/// gate, key-method selection, and security-level agreement, in
+/// that order, so a candidate network cannot skip a gate and no
+/// key decision is ever taken for a closed network.
+///
+/// Requirement `RD-PRO-01` (admission) + `RD-PRO-03` (typed
+/// accept/refuse matrix, repo-minted, MINTED-pending-confirm).
+/// Version-gate extension is `RD-PRO-04`: the shared version-2
+/// recognition from `admit_nwk_version` now explicitly covers PRO
+/// beacons via this bundle.
+pub fn admit_pro_peer(
+    peer: &CompatPeer,
+    stack_profile_field: u8,
+    joining_permitted: bool,
+    we_offer_negotiation: bool,
+    key_policy: &KeyPolicy,
+    floor: u8,
+) -> Result<(SelectedMethod, u8), CompatError> {
+    admit_nwk_version(peer.nwk_version)?;
+    admit_pro_stack_profile(stack_profile_field)?;
+    if peer.profile != StackProfile::Pro {
+        return Err(CompatError::UnsupportedStackProfile(stack_profile_field));
+    }
+    if !joining_permitted {
+        return Err(CompatError::JoiningClosed);
+    }
     let method = select_key_method(peer, we_offer_negotiation, key_policy)?;
     let level = agree_security_level(BASELINE_SEC_LEVEL, peer.max_sec_level, floor)?;
     Ok((method, level))

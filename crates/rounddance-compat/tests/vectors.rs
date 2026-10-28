@@ -9,13 +9,14 @@
 //! itself is `RD-COMPAT-*` (repo-minted, MINTED-pending-confirm).
 
 use rounddance_compat::negotiate::{
-    admit_30_peer, admit_gp_version, admit_nwk_version, admit_touchlink_sub_version,
-    agree_security_level, highest_common_key_index, select_key_method, tolerates_cluster_revision,
-    zcl_reserved_bits_need_no_negotiation, CompatError, KeyPolicy, SelectedMethod,
+    admit_30_peer, admit_gp_version, admit_nwk_version, admit_pro_peer, admit_pro_stack_profile,
+    admit_touchlink_sub_version, agree_security_level, highest_common_key_index, select_key_method,
+    tolerates_cluster_revision, zcl_reserved_bits_need_no_negotiation, CompatError, KeyPolicy,
+    SelectedMethod,
 };
 use rounddance_compat::profile::{
     method_mask, CompatPeer, StackProfile, BASELINE_SEC_LEVEL, GP_VERSION_SHARED_30_40,
-    NWK_VERSION_SHARED_30_40,
+    NWK_VERSION_SHARED_30_40, PRO_STACK_PROFILE,
 };
 
 /// NWK data header as a 3.0 peer emits it: version 2, no security
@@ -228,4 +229,120 @@ fn vector_forward_compat_corners() {
     assert!(tolerates_cluster_revision(3, 2));
     assert!(tolerates_cluster_revision(2, 2));
     assert_eq!(NWK_VERSION_SHARED_30_40, 2);
+}
+
+/// PRO stack-profile gate: exactly the PRO value passes, anything
+/// else is a typed refusal (`RD-PRO-02`).
+#[test]
+fn vector_pro_stack_profile_gate() {
+    assert_eq!(PRO_STACK_PROFILE, 0x02);
+    assert!(admit_pro_stack_profile(0x02).is_ok());
+    for p in [0x00u8, 0x01, 0x03, 0xFF] {
+        assert_eq!(
+            admit_pro_stack_profile(p),
+            Err(CompatError::UnsupportedStackProfile(p))
+        );
+    }
+}
+
+/// PRO best-effort accept matrix: an open PRO-legacy peer with a
+/// symmetric key path is accepted at the baseline level
+/// (`RD-PRO-01` accept leg + `RD-PRO-04` version-gate extension).
+#[test]
+fn vector_pro_peer_accepted() {
+    let peer = CompatPeer::profile_pro();
+    assert_eq!(peer.profile, StackProfile::Pro);
+    assert!(!peer.profile.supports_key_negotiation());
+    assert_eq!(
+        admit_pro_peer(
+            &peer,
+            PRO_STACK_PROFILE,
+            true,
+            true,
+            &KeyPolicy::ALLOW_SYMMETRIC,
+            BASELINE_SEC_LEVEL
+        ),
+        Ok((SelectedMethod::InstallCode, 5))
+    );
+}
+
+/// PRO best-effort refusal matrix: every gate refuses with its own
+/// typed error and no key decision leaks past a refusal
+/// (`RD-PRO-03`). Order: version, stack profile, profile tag,
+/// joining permission, key method, security level.
+#[test]
+fn vector_pro_peer_refusal_matrix() {
+    let peer = CompatPeer::profile_pro();
+    let allow = &KeyPolicy::ALLOW_SYMMETRIC;
+    // Unknown NWK version never reaches the later gates.
+    let mut bad_version = CompatPeer::profile_pro();
+    bad_version.nwk_version = 9;
+    assert_eq!(
+        admit_pro_peer(
+            &bad_version,
+            PRO_STACK_PROFILE,
+            true,
+            true,
+            allow,
+            BASELINE_SEC_LEVEL
+        ),
+        Err(CompatError::UnsupportedNwkVersion(9))
+    );
+    // Wrong raw stack-profile field value.
+    assert_eq!(
+        admit_pro_peer(&peer, 0x01, true, true, allow, BASELINE_SEC_LEVEL),
+        Err(CompatError::UnsupportedStackProfile(0x01))
+    );
+    // Non-PRO profile tag, even with a good field value.
+    let not_pro = CompatPeer::profile_30();
+    assert_eq!(
+        admit_pro_peer(
+            &not_pro,
+            PRO_STACK_PROFILE,
+            true,
+            true,
+            allow,
+            BASELINE_SEC_LEVEL
+        ),
+        Err(CompatError::UnsupportedStackProfile(PRO_STACK_PROFILE))
+    );
+    // Closed network: refused before any key decision.
+    assert_eq!(
+        admit_pro_peer(
+            &peer,
+            PRO_STACK_PROFILE,
+            false,
+            true,
+            allow,
+            BASELINE_SEC_LEVEL
+        ),
+        Err(CompatError::JoiningClosed)
+    );
+    // Symmetric-only peer under the mandatory-negotiation posture.
+    assert_eq!(
+        admit_pro_peer(
+            &peer,
+            PRO_STACK_PROFILE,
+            true,
+            true,
+            &KeyPolicy::STRICT_NEGOTIATION,
+            BASELINE_SEC_LEVEL
+        ),
+        Err(CompatError::NoCommonKeyMethod)
+    );
+    // Floor above the baseline refuses instead of downgrading.
+    assert_eq!(
+        admit_pro_peer(
+            &peer,
+            PRO_STACK_PROFILE,
+            true,
+            true,
+            allow,
+            BASELINE_SEC_LEVEL + 1
+        ),
+        Err(CompatError::SecurityDowngradeRefused {
+            floor: BASELINE_SEC_LEVEL + 1,
+            offered: BASELINE_SEC_LEVEL,
+        })
+    );
 }

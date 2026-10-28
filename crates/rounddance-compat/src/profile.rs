@@ -18,6 +18,15 @@ pub const BASELINE_SEC_LEVEL: u8 = 5;
 /// Maximum security level value (3-bit field).
 pub const MAX_SEC_LEVEL: u8 = 7;
 
+/// Stack-profile value the PRO profile carries in the discovery
+/// stack-profile field (doc `22-65816-030` v3.1 body, pp 16–103;
+/// same value the R23.2 discovery filter expects, see requirement
+/// `05-3474-23-3615-01`). PRO-legacy, 3.0-profile, and 4.0 devices
+/// all beacon this value; the profile tag ([`StackProfile`]) comes
+/// from key capabilities and commissioning posture, never from this
+/// field alone.
+pub const PRO_STACK_PROFILE: u8 = 0x02;
+
 /// Stack profile of a peer, as inferred from its beacons and
 /// commissioning capabilities.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -26,6 +35,10 @@ pub enum StackProfile {
     Profile30,
     /// 4.0 (R23.2-era) peer: shared NWK version, negotiation capable.
     Profile40,
+    /// PRO-legacy peer (doc `22-65816-030` v3.1): shared NWK version,
+    /// symmetric key paths only. Best-effort only — see the PRO
+    /// boundary in [`crate::negotiate`].
+    Pro,
 }
 
 impl StackProfile {
@@ -43,6 +56,7 @@ impl StackProfile {
         match self {
             Self::Profile30 => false,
             Self::Profile40 => true,
+            Self::Pro => false,
         }
     }
 }
@@ -78,6 +92,20 @@ impl CompatPeer {
     pub const fn profile_30() -> Self {
         Self {
             profile: StackProfile::Profile30,
+            nwk_version: NWK_VERSION_SHARED_30_40,
+            key_methods: method_mask::PRECONFIGURED | method_mask::INSTALL_CODE,
+            max_sec_level: BASELINE_SEC_LEVEL,
+        }
+    }
+
+    /// Describe a PRO-legacy peer: shared NWK version, shared
+    /// stack-profile value, symmetric methods only, baseline
+    /// security level. Best-effort only — see the PRO boundary in
+    /// [`crate::negotiate`].
+    #[must_use]
+    pub const fn profile_pro() -> Self {
+        Self {
+            profile: StackProfile::Pro,
             nwk_version: NWK_VERSION_SHARED_30_40,
             key_methods: method_mask::PRECONFIGURED | method_mask::INSTALL_CODE,
             max_sec_level: BASELINE_SEC_LEVEL,
