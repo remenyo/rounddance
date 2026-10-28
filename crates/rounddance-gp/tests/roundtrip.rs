@@ -295,3 +295,75 @@ fn fuzz_commissioning_session_never_panics() {
         session.reset();
     }
 }
+
+#[test]
+fn fuzz_reply_round_trip() {
+    let mut rng = Fuzz(0xB1D1);
+    let mut buf = [0u8; CommissioningReply::MAX_LEN + 8];
+    for _ in 0..CASES {
+        let level = [0, 2, 3][rng.below(3) as usize];
+        // Level zero carries no key material: only nonzero levels
+        // may set the key flag (see `ReplyOptions::check_shape`).
+        let options = ReplyOptions {
+            pan_id_present: rng.below(2) == 0,
+            key_present: rng.below(2) == 0 && level != 0,
+            key_encrypted: rng.below(2) == 0 && level != 0,
+            level,
+            key_type: if level == 0 { 0 } else { rng.below(8) as u8 },
+        };
+        let reply = CommissioningReply {
+            options,
+            pan_id: options.pan_id_present.then(|| rng.below(0x1_0000) as u16),
+            key: options.key_present.then(|| {
+                let mut k = [0u8; 16];
+                for slot in k.iter_mut() {
+                    *slot = rng.below(0x100) as u8;
+                }
+                k
+            }),
+            key_mic: (options.key_present && options.key_encrypted && options.level != 0).then(
+                || {
+                    let mut m = [0u8; 4];
+                    for slot in m.iter_mut() {
+                        *slot = rng.below(0x100) as u8;
+                    }
+                    m
+                },
+            ),
+            frame_counter: (options.key_present && options.key_encrypted && options.level != 0)
+                .then(|| rng.next() as u32),
+        };
+        reply.check_shape().unwrap();
+        let n = reply.encode_into(&mut buf).unwrap();
+        assert!(n <= CommissioningReply::MAX_LEN);
+        let (back, used) = CommissioningReply::decode(&buf[..n]).unwrap();
+        assert_eq!(used, n);
+        assert_eq!(back, reply);
+        // Channel codecs are total over their octet (config drops
+        // the reserved top bits on re-encode).
+        let req_byte = rng.below(0x100) as u8;
+        let req = ChannelRequest::decode(req_byte);
+        assert_eq!(req.encode().unwrap(), req_byte);
+        let cfg_byte = rng.below(0x100) as u8;
+        let cfg = ChannelConfig::decode(cfg_byte);
+        assert_eq!(cfg.encode().unwrap(), cfg_byte & 0x1F);
+    }
+}
+
+#[test]
+fn fuzz_reply_malformed_never_panics() {
+    let mut rng = Fuzz(0xBE11);
+    let mut buf = [0u8; CommissioningReply::MAX_LEN + 8];
+    for _ in 0..CASES {
+        let len = rng.below(buf.len() as u64) as usize;
+        for slot in buf[..len].iter_mut() {
+            *slot = rng.below(0x100) as u8;
+        }
+        if let Ok((reply, used)) = CommissioningReply::decode(&buf[..len]) {
+            assert!(used <= len);
+            let mut out = [0u8; CommissioningReply::MAX_LEN];
+            let n = reply.encode_into(&mut out).unwrap();
+            assert_eq!(&out[..n], &buf[..used]);
+        }
+    }
+}

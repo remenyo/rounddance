@@ -193,6 +193,14 @@ pub enum GpError {
     BadState,
     /// Bidirectional completion needs the follow-up reply path.
     BidirectionalPending,
+    /// Bidirectional reply window elapsed with no Success frame.
+    ReplyTimeout,
+    /// Success (or reply-targeted) frame names a GPD the session is
+    /// not waiting on.
+    TransactionMismatch,
+    /// GPD asked for a key without opening a receive window, or
+    /// without the security capability the request needs.
+    PeerIncapable,
 }
 
 /// NWK frame control octet (Figure 6 geometry).

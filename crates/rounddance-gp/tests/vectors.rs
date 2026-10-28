@@ -654,8 +654,8 @@ fn vector_uni_commissioning_populates_table_14_0563_19_a36_07() {
         .is_some());
 }
 
-// Bidirectional completion is structures + stubs: the session parks
-// and the reply builder reports pending.
+// Bidirectional completion parks awaiting the reply: with nothing
+// staged yet the reply builder reports pending.
 #[test]
 fn vector_bi_commissioning_parks_pending_reply() {
     let mut session = CommissioningSession::new();
@@ -682,4 +682,300 @@ fn vector_bi_commissioning_parks_pending_reply() {
     assert!(is_commissioning_command(0xF0));
     assert!(is_commissioning_command(0xFF));
     assert!(!is_commissioning_command(0x20));
+}
+
+// ---- Wave-34 bidirectional reply vectors ---------------------------------
+// Requirement IDs: repo-minted `14-0563-19-A173-*` / `-A4211-*` /
+// `-A4212-*` / `-A4214-*` / `-A4215-*` (MINTED-pending-confirm).
+
+fn bidir_ann() -> CommissioningAnnouncement {
+    CommissioningAnnouncement {
+        app: AppId::SrcId,
+        gpd: 0x1234_5678,
+        endpoint: 0xFF,
+        pan_id_request: true,
+        key_request: true,
+        rx_after_tx: true,
+        security_capable: true,
+        key_present: true,
+    }
+}
+
+// 14-0563-19-A4211-01: commissioning command identifiers.
+#[test]
+fn vector_bidir_command_ids_14_0563_19_a4211_01() {
+    assert_eq!(CMD_COMMISSIONING, 0xE0);
+    assert_eq!(CMD_DECOMMISSIONING, 0xE1);
+    assert_eq!(CMD_SUCCESS, 0xE2);
+    assert_eq!(CMD_CHANNEL_REQUEST, 0xE3);
+    assert_eq!(CMD_COMMISSIONING_REPLY, 0xF0);
+    assert_eq!(CMD_CHANNEL_CONFIG, 0xF3);
+    assert!(is_payloadless_commissioning(CMD_SUCCESS));
+    assert!(is_payloadless_commissioning(CMD_DECOMMISSIONING));
+    assert!(!is_payloadless_commissioning(CMD_COMMISSIONING));
+    assert!(!is_payloadless_commissioning(CMD_COMMISSIONING_REPLY));
+}
+
+// 14-0563-19-A4212-01: PANID-only reply, level zero.
+// Options 0x01 = PANID present; payload [0x01, 0x2B, 0x1A].
+#[test]
+fn vector_reply_panid_only_14_0563_19_a4212_01() {
+    let wire = [0x01u8, 0x2B, 0x1A];
+    let (reply, used) = CommissioningReply::decode(&wire).unwrap();
+    assert_eq!(used, 3);
+    assert_eq!(
+        reply.options,
+        ReplyOptions {
+            pan_id_present: true,
+            key_present: false,
+            key_encrypted: false,
+            level: 0,
+            key_type: 0,
+        }
+    );
+    assert_eq!(reply.pan_id, Some(0x1A2B));
+    assert_eq!(reply.key, None);
+    assert_eq!(reply.key_mic, None);
+    assert_eq!(reply.frame_counter, None);
+    let mut buf = [0u8; CommissioningReply::MAX_LEN];
+    let n = reply.encode_into(&mut buf).unwrap();
+    assert_eq!(&buf[..n], &wire);
+}
+
+// 14-0563-19-A4212-01: PANID + clear key reply.
+// Options 0x33 = PANID + key present, level 0b10, key type 0b001.
+#[test]
+fn vector_reply_clear_key_14_0563_19_a4212_01() {
+    let key = [0x77u8; 16];
+    let mut wire = [0u8; 19];
+    wire[0] = 0x33;
+    wire[1] = 0x2B;
+    wire[2] = 0x1A;
+    wire[3..].copy_from_slice(&key);
+    let (reply, used) = CommissioningReply::decode(&wire).unwrap();
+    assert_eq!(used, 19);
+    assert_eq!(reply.pan_id, Some(0x1A2B));
+    assert_eq!(reply.key, Some(key));
+    assert_eq!(reply.key_mic, None);
+    assert_eq!(reply.frame_counter, None);
+    let mut buf = [0u8; CommissioningReply::MAX_LEN];
+    let n = reply.encode_into(&mut buf).unwrap();
+    assert_eq!(&buf[..n], &wire);
+}
+
+// 14-0563-19-A4212-01: PANID + protected key reply (27 octets).
+// Options 0x9F = PANID + key + encryption, level 0b11, type 0b100.
+#[test]
+fn vector_reply_protected_key_14_0563_19_a4212_01() {
+    let key = [0xABu8; 16];
+    let mic = [0x11u8, 0x22, 0x33, 0x44];
+    let mut wire = [0u8; 27];
+    wire[0] = 0x9F;
+    wire[1] = 0x2B;
+    wire[2] = 0x1A;
+    wire[3..19].copy_from_slice(&key);
+    wire[19..23].copy_from_slice(&mic);
+    wire[23..27].copy_from_slice(&0x0000_0042u32.to_le_bytes());
+    let (reply, used) = CommissioningReply::decode(&wire).unwrap();
+    assert_eq!(used, 27);
+    assert_eq!(reply.key_mic, Some(mic));
+    assert_eq!(reply.frame_counter, Some(0x42));
+    let mut buf = [0u8; CommissioningReply::MAX_LEN];
+    let n = reply.encode_into(&mut buf).unwrap();
+    assert_eq!(&buf[..n], &wire);
+}
+
+// 14-0563-19-A4212-01: reply rejection legs — truncated, reserved
+// level 0b01, and level-zero carrying key flags.
+#[test]
+fn vector_reply_rejection_14_0563_19_a4212_01() {
+    assert_eq!(
+        CommissioningReply::decode(&[]).unwrap_err(),
+        GpError::Truncated
+    );
+    // Options 0x0B: reserved level 0b01.
+    assert_eq!(
+        CommissioningReply::decode(&[0x0B]).unwrap_err(),
+        GpError::ReservedSecurityLevel(0x01)
+    );
+    // Options 0x03: level zero with key present.
+    assert_eq!(
+        CommissioningReply::decode(&[0x03, 0x2B, 0x1A]).unwrap_err(),
+        GpError::UnsecuredCommissioning
+    );
+    // Cut key: options promise 16 key octets, only 3 follow.
+    assert_eq!(
+        CommissioningReply::decode(&[0x33, 0x2B, 0x1A, 0x00]).unwrap_err(),
+        GpError::Truncated
+    );
+    // Protected key missing its MIC/counter tail.
+    let mut short = [0u8; 23];
+    short[0] = 0x9F;
+    short[1] = 0x2B;
+    short[2] = 0x1A;
+    assert_eq!(
+        CommissioningReply::decode(&short).unwrap_err(),
+        GpError::Truncated
+    );
+}
+
+// 14-0563-19-A4214-01 + A4215-01: channel request/config octet shapes.
+// Request 0x94 = next ch15 (low nibble), second ch20 (high nibble);
+// config 0x04 = ch15 infra, 0x19 = ch20 basic-only.
+#[test]
+fn vector_channel_codecs_14_0563_19_a4214_01_a4215_01() {
+    let req = ChannelRequest::decode(0x94);
+    assert_eq!(req.rx_next, 15);
+    assert_eq!(req.rx_second, 20);
+    assert_eq!(req.encode().unwrap(), 0x94);
+    let cfg = ChannelConfig::decode(0x04);
+    assert_eq!(cfg.channel, 15);
+    assert!(!cfg.basic);
+    assert_eq!(cfg.encode().unwrap(), 0x04);
+    let basic = ChannelConfig::decode(0x19);
+    assert_eq!(basic.channel, 20);
+    assert!(basic.basic);
+    assert_eq!(basic.encode().unwrap(), 0x19);
+    assert_eq!(
+        ChannelConfig {
+            channel: 27,
+            basic: false
+        }
+        .encode()
+        .unwrap_err(),
+        GpError::BadIdentifier
+    );
+}
+
+// 14-0563-19-A4212-02: full bidirectional exchange — park, stage,
+// serve, Success completes with a translation seed.
+#[test]
+fn vector_bidir_full_exchange_14_0563_19_a4212_02() {
+    let mut session = CommissioningSession::new();
+    session.begin(bidir_ann());
+    assert_eq!(
+        session.complete_at(1_000).unwrap_err(),
+        GpError::BidirectionalPending
+    );
+    assert_eq!(session.state(), CommissioningState::AwaitingReply);
+    assert_eq!(session.deadline_ms(), 1_000 + REPLY_TIMEOUT_MS);
+    assert!(!session.reply_staged());
+
+    let reply = CommissioningReply {
+        options: ReplyOptions {
+            pan_id_present: true,
+            key_present: false,
+            key_encrypted: false,
+            level: 0,
+            key_type: 0,
+        },
+        pan_id: Some(0xA4D3),
+        key: None,
+        key_mic: None,
+        frame_counter: None,
+    };
+    session.stage_reply(reply).unwrap();
+    assert!(session.reply_staged());
+    let mut buf = [0u8; CommissioningReply::MAX_LEN];
+    let n = session.build_reply(&mut buf).unwrap();
+    assert_eq!(&buf[..n], &[0x01, 0xD3, 0xA4]);
+
+    // A Success frame for another GPD belongs to another transaction.
+    assert_eq!(
+        session.note_success(0xDEAD_BEEF, 0xFF).unwrap_err(),
+        GpError::TransactionMismatch
+    );
+    assert_eq!(session.state(), CommissioningState::AwaitingReply);
+
+    let seed = session.note_success(0x1234_5678, 0xFF).unwrap().unwrap();
+    assert_eq!(session.state(), CommissioningState::Commissioned);
+    let mut translations = TranslationTable::<4>::new();
+    translations.upsert(seed.materialize()).unwrap();
+    assert!(translations
+        .lookup(GpdId::SrcId(0x1234_5678), 0x20, 0)
+        .is_some());
+    // Serving after completion is a state error.
+    assert_eq!(
+        session.build_reply(&mut buf).unwrap_err(),
+        GpError::BadState
+    );
+}
+
+// 14-0563-19-A173-02: parked exchange lapses past the window.
+#[test]
+fn vector_bidir_reply_timeout_14_0563_19_a173_02() {
+    let mut session = CommissioningSession::new();
+    session.begin(bidir_ann());
+    assert_eq!(
+        session.complete_at(0).unwrap_err(),
+        GpError::BidirectionalPending
+    );
+    session.tick(REPLY_TIMEOUT_MS - 1).unwrap();
+    assert_eq!(session.state(), CommissioningState::AwaitingReply);
+    assert_eq!(
+        session.tick(REPLY_TIMEOUT_MS).unwrap_err(),
+        GpError::ReplyTimeout
+    );
+    assert_eq!(session.state(), CommissioningState::Idle);
+    assert_eq!(session.deadline_ms(), u64::MAX);
+}
+
+// 14-0563-19-A173-01: incapable peer — key request with no receive
+// window, or with no security capability, refuses.
+#[test]
+fn vector_bidir_incapable_peer_14_0563_19_a173_01() {
+    // No receive window behind the key request.
+    let mut ann = bidir_ann();
+    ann.rx_after_tx = false;
+    assert_eq!(
+        check_bidir_capable(ann).unwrap_err(),
+        GpError::PeerIncapable
+    );
+    let mut session = CommissioningSession::new();
+    session.begin(ann);
+    assert_eq!(session.complete().unwrap_err(), GpError::PeerIncapable);
+    assert_eq!(session.state(), CommissioningState::Idle);
+
+    // No security capability behind the key request.
+    let mut ann = bidir_ann();
+    ann.security_capable = false;
+    assert_eq!(
+        check_bidir_capable(ann).unwrap_err(),
+        GpError::PeerIncapable
+    );
+    let mut session = CommissioningSession::new();
+    session.begin(ann);
+    assert_eq!(session.complete().unwrap_err(), GpError::PeerIncapable);
+
+    // Capable peer passes the gate.
+    assert!(check_bidir_capable(bidir_ann()).is_ok());
+}
+
+// Reply staging and Success are state-gated outside the window.
+#[test]
+fn vector_bidir_state_gates_14_0563_19_a4212_02() {
+    let mut session = CommissioningSession::new();
+    let reply = CommissioningReply {
+        options: ReplyOptions {
+            pan_id_present: false,
+            key_present: false,
+            key_encrypted: false,
+            level: 0,
+            key_type: 0,
+        },
+        pan_id: None,
+        key: None,
+        key_mic: None,
+        frame_counter: None,
+    };
+    assert_eq!(session.stage_reply(reply).unwrap_err(), GpError::BadState);
+    assert_eq!(
+        session.note_success(0x1234_5678, 0xFF).unwrap_err(),
+        GpError::BadState
+    );
+    let mut buf = [0u8; CommissioningReply::MAX_LEN];
+    assert_eq!(
+        session.build_reply(&mut buf).unwrap_err(),
+        GpError::BadState
+    );
 }

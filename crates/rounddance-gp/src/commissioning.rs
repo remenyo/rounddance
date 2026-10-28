@@ -7,17 +7,25 @@
 //! p0191-L5380-L5394) and §A.3.9 (commissioning behavior, entry
 //! points). All wording here is paraphrase (D1, `SCOPE.md` §2).
 //!
-//! Translation-table commissioning lands in this wave: successful
-//! unidirectional commissioning and pairing-configuration flows
-//! populate [`crate::sink::TranslationTable`] entries. Bidirectional
-//! completion (configuration replies delivered to the GPD) is
-//! structures plus explicit stubs — the reply path is a follow-up
-//! wave.
+//! Translation-table commissioning: successful unidirectional and
+//! bidirectional commissioning flows populate
+//! [`crate::sink::TranslationTable`] entries. The bidirectional reply
+//! path (configuration replies delivered to the GPD inside its
+//! receive window, completed by the GPD's Success frame) is fully
+//! implemented here plus [`crate::reply`].
 //!
-//! Requirement IDs below are corpus-mined `14-0563-19-*`.
+//! Requirement IDs below are corpus-mined `14-0563-19-*`, plus
+//! repo-minted `14-0563-19-A173-*` / `-A4212-*` (MINTED-pending-confirm).
 
 use crate::frame::{AppId, GpError};
+use crate::reply::CommissioningReply;
 use crate::sink::{TranslationTableEntry, COMPACT_SENSOR_GROUP_CMD};
+
+/// Bidirectional reply window in milliseconds: the exchange lapses
+/// when no Success frame arrives within this bound after collection.
+///
+/// Requirement `14-0563-19-A173-02` (repo-minted).
+pub const REPLY_TIMEOUT_MS: u64 = 5_000;
 
 /// First commissioning-range command identifier.
 ///
@@ -137,14 +145,27 @@ impl TranslationSeed {
     }
 }
 
+/// Check the GPD's request flags for reply deliverability: a key
+/// request with no receive window, or with no security capability
+/// behind it, can never be answered, so the exchange is refused.
+///
+/// Requirement `14-0563-19-A173-01` (repo-minted).
+pub const fn check_bidir_capable(ann: CommissioningAnnouncement) -> Result<(), GpError> {
+    if ann.key_request && (!ann.rx_after_tx || !ann.security_capable) {
+        return Err(GpError::PeerIncapable);
+    }
+    Ok(())
+}
+
 /// Commissioning session machine for one GPD.
 ///
 /// Unidirectional sessions run to completion and emit translation
 /// seeds; bidirectional sessions park in [`CommissioningState::AwaitingReply`]
-/// and report [`GpError::BidirectionalPending`] until the follow-up
-/// reply path lands.
+/// with a bounded reply window, serve one staged reply, and complete
+/// when the GPD's Success frame arrives.
 ///
-/// Requirement `14-0563-19-A36-07`.
+/// Requirements `14-0563-19-A36-07`, `-A173-01`, `-A173-02`,
+/// `-A4212-02` (last three repo-minted).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CommissioningSession {
     state: CommissioningState,
@@ -152,6 +173,11 @@ pub struct CommissioningSession {
     gpd: u64,
     app: AppId,
     endpoint: u8,
+    key_request: bool,
+    rx_after_tx: bool,
+    security_capable: bool,
+    pending: Option<CommissioningReply>,
+    deadline_ms: u64,
 }
 
 impl CommissioningSession {
@@ -164,6 +190,11 @@ impl CommissioningSession {
             gpd: 0,
             app: AppId::SrcId,
             endpoint: 0xFF,
+            key_request: false,
+            rx_after_tx: false,
+            security_capable: false,
+            pending: None,
+            deadline_ms: 0,
         }
     }
 
@@ -173,6 +204,22 @@ impl CommissioningSession {
         self.state
     }
 
+    /// Reply-window deadline in caller milliseconds (`u64::MAX` when
+    /// no bidirectional exchange is parked).
+    #[must_use]
+    pub const fn deadline_ms(&self) -> u64 {
+        match self.state {
+            CommissioningState::AwaitingReply => self.deadline_ms,
+            _ => u64::MAX,
+        }
+    }
+
+    /// True when a reply is staged and ready to serve.
+    #[must_use]
+    pub const fn reply_staged(&self) -> bool {
+        self.pending.is_some()
+    }
+
     /// Begin an exchange from a commissioning announcement.
     ///
     /// Requirement `14-0563-19-A36-07`.
@@ -180,48 +227,148 @@ impl CommissioningSession {
         self.gpd = ann.gpd;
         self.app = ann.app;
         self.endpoint = ann.endpoint;
+        self.key_request = ann.key_request;
+        self.rx_after_tx = ann.rx_after_tx;
+        self.security_capable = ann.security_capable;
         self.mode = if ann.rx_after_tx && (ann.pan_id_request || ann.key_request) {
             CommissioningMode::Bidirectional
         } else {
             CommissioningMode::Unidirectional
         };
+        self.pending = None;
+        self.deadline_ms = 0;
         self.state = CommissioningState::Collecting;
     }
 
-    /// Finish collection: unidirectional sessions commission and
-    /// expose the seeds for one default translation entry
-    /// (all-commands wildcard); bidirectional sessions park awaiting
-    /// the reply path.
+    /// Finish collection at clock `now_ms`: unidirectional sessions
+    /// commission and expose the seeds for one default translation
+    /// entry (all-commands wildcard); bidirectional sessions park
+    /// awaiting the reply path with a bounded window.
+    ///
+    /// A key request the GPD cannot receive (no window, or no
+    /// security capability) refuses with [`GpError::PeerIncapable`]
+    /// in either mode and the session returns to idle.
+    ///
+    /// Requirements `14-0563-19-A36-07`, `-A173-01`, `-A173-02`.
+    pub const fn complete_at(&mut self, now_ms: u64) -> Result<Option<TranslationSeed>, GpError> {
+        match self.state {
+            CommissioningState::Collecting => {
+                if self.key_request && (!self.rx_after_tx || !self.security_capable) {
+                    self.state = CommissioningState::Idle;
+                    return Err(GpError::PeerIncapable);
+                }
+                match self.mode {
+                    CommissioningMode::Unidirectional => {
+                        self.state = CommissioningState::Commissioned;
+                        Ok(Some(TranslationSeed {
+                            app: self.app,
+                            gpd: self.gpd,
+                            endpoint: self.endpoint,
+                            gpd_command: crate::sink::GENERIC_GPD_COMMAND,
+                            profile: 0x0104,
+                            cluster: 0xFFFF,
+                            command: 0x00,
+                        }))
+                    }
+                    CommissioningMode::Bidirectional => {
+                        self.state = CommissioningState::AwaitingReply;
+                        self.deadline_ms = now_ms.saturating_add(REPLY_TIMEOUT_MS);
+                        Err(GpError::BidirectionalPending)
+                    }
+                }
+            }
+            _ => Err(GpError::BadState),
+        }
+    }
+
+    /// Finish collection at clock zero (see [`Self::complete_at`]).
     ///
     /// Requirement `14-0563-19-A36-07`.
     pub const fn complete(&mut self) -> Result<Option<TranslationSeed>, GpError> {
+        self.complete_at(0)
+    }
+
+    /// Stage the reply to serve inside the GPD's receive window.
+    /// Only valid while awaiting the reply; shape-checked on intake.
+    ///
+    /// Requirement `14-0563-19-A4212-02` (repo-minted).
+    pub const fn stage_reply(&mut self, reply: CommissioningReply) -> Result<(), GpError> {
         match self.state {
-            CommissioningState::Collecting => match self.mode {
-                CommissioningMode::Unidirectional => {
-                    self.state = CommissioningState::Commissioned;
-                    Ok(Some(TranslationSeed {
-                        app: self.app,
-                        gpd: self.gpd,
-                        endpoint: self.endpoint,
-                        gpd_command: crate::sink::GENERIC_GPD_COMMAND,
-                        profile: 0x0104,
-                        cluster: 0xFFFF,
-                        command: 0x00,
-                    }))
+            CommissioningState::AwaitingReply => match reply.check_shape() {
+                Ok(()) => {
+                    self.pending = Some(reply);
+                    Ok(())
                 }
-                CommissioningMode::Bidirectional => {
-                    self.state = CommissioningState::AwaitingReply;
-                    Err(GpError::BidirectionalPending)
-                }
+                Err(e) => Err(e),
             },
             _ => Err(GpError::BadState),
         }
     }
 
-    /// Bidirectional reply builder (stub): the reply path is a
-    /// follow-up wave; this always reports pending.
-    pub const fn build_reply(&self, _out: &mut [u8]) -> Result<usize, GpError> {
-        Err(GpError::BidirectionalPending)
+    /// Encode the staged reply into the caller buffer for
+    /// transmission inside the receive window. Reports pending while
+    /// nothing is staged yet.
+    ///
+    /// Requirement `14-0563-19-A4212-02` (repo-minted).
+    pub fn build_reply(&self, out: &mut [u8]) -> Result<usize, GpError> {
+        match self.state {
+            CommissioningState::AwaitingReply => match self.pending {
+                Some(reply) => reply.encode_into(out),
+                None => Err(GpError::BidirectionalPending),
+            },
+            _ => Err(GpError::BadState),
+        }
+    }
+
+    /// Record the GPD's Success frame: identity must match the parked
+    /// exchange, else the frame belongs to another transaction and is
+    /// refused. On match the session commissions and emits the
+    /// default translation seed.
+    ///
+    /// Requirement `14-0563-19-A4212-02` (repo-minted).
+    pub const fn note_success(
+        &mut self,
+        gpd: u64,
+        endpoint: u8,
+    ) -> Result<Option<TranslationSeed>, GpError> {
+        match self.state {
+            CommissioningState::AwaitingReply => {
+                if gpd != self.gpd || endpoint != self.endpoint {
+                    return Err(GpError::TransactionMismatch);
+                }
+                self.state = CommissioningState::Commissioned;
+                self.pending = None;
+                Ok(Some(TranslationSeed {
+                    app: self.app,
+                    gpd: self.gpd,
+                    endpoint: self.endpoint,
+                    gpd_command: crate::sink::GENERIC_GPD_COMMAND,
+                    profile: 0x0104,
+                    cluster: 0xFFFF,
+                    command: 0x00,
+                }))
+            }
+            _ => Err(GpError::BadState),
+        }
+    }
+
+    /// Age the parked exchange against clock `now_ms`: past the reply
+    /// window the session returns to idle and reports
+    /// [`GpError::ReplyTimeout`].
+    ///
+    /// Requirement `14-0563-19-A173-02` (repo-minted).
+    pub const fn tick(&mut self, now_ms: u64) -> Result<(), GpError> {
+        match self.state {
+            CommissioningState::AwaitingReply => {
+                if now_ms >= self.deadline_ms {
+                    self.state = CommissioningState::Idle;
+                    self.pending = None;
+                    return Err(GpError::ReplyTimeout);
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
     }
 
     /// Sensor-report helper: compact-group seed covering the
