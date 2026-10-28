@@ -36,8 +36,9 @@ pub mod touchlink;
 pub use classical::{
     EccJoinKdf, InstallCode, JoinError, JoinKdf, JoinMethod, JoinPolicy, JoinedDevice,
     JoinerMachine, JoinerState, KeyAttributes, LeaveMachine, MmoJoinKdf, RejoinMachine,
-    RejoinState, TrustCenter, INSTALL_CODE_LENS, MAX_INSTALL_CODE_LEN, MAX_JOINED_DEVICES,
-    TRANSPORT_KEY_CMD, TRANSPORT_KEY_TYPE_NETWORK, UNSECURED_VENDOR_CMD,
+    RejoinState, TrustCenter, INSTALL_CODE_LENS, JOINER_TRANSPORT_GRACE_TICKS,
+    MAX_INSTALL_CODE_LEN, MAX_JOINED_DEVICES, TRANSPORT_KEY_CMD, TRANSPORT_KEY_TYPE_NETWORK,
+    UNSECURED_VENDOR_CMD,
 };
 pub use finding::{
     FinderInitiator, FinderTarget, FindingError, InitiatorState, Respondent, TargetState,

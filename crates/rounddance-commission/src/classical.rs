@@ -53,6 +53,18 @@ pub const UNSECURED_VENDOR_CMD: u8 = 0x30;
 /// any other first frame.
 pub const TRANSPORT_KEY_CMD: u8 = 0x05;
 
+/// Caller-tick bound for the post-association transport wait: the
+/// parent ejects an uncompleted joiner after about ten seconds (seen
+/// on air as the per-poll eject unicast captured in
+/// `~/hwscratch/w39/sniff_b1.txt`), so the caller time-boxes the
+/// wait with this many ticks and reports the outcome through
+/// [`JoinerMachine::on_transport_timeout`] (silence) or
+/// [`JoinerMachine::on_leave`] (eject received).
+///
+/// Requirement `22-65816-030-56-04` (join time-boxing; no new ID —
+/// this names the existing bound for the joiner side).
+pub const JOINER_TRANSPORT_GRACE_TICKS: u32 = 10;
+
 /// Key-type field selecting the standard network key inside the
 /// transport-key command. The TC-first delivery the lab coordinator
 /// sends carries this type; any other type is not the network-key
@@ -345,13 +357,22 @@ pub struct JoinPolicy {
 
 /// Joiner-side driver.
 ///
+/// Full TC-first path this machine sequences: transport-wait
+/// (`Authenticating`, bounded by [`JOINER_TRANSPORT_GRACE_TICKS`) →
+/// open (`note_transport_frame` classification, then
+/// `on_transport_open` MIC + counter check) → netkey-adopt (the
+/// `netkey_adopted` latch) → verify (`on_verify_confirm`) →
+/// `DeviceAnnce` (`device_annce`) → close-out (`close_out` →
+/// `Joined`). Wait timeouts surface as [`JoinError::NoTransport`]
+/// via [`JoinerMachine::on_transport_timeout`]; a parent eject
+/// received mid-wait surfaces as [`JoinError::JoinTimeout`] via
+/// [`JoinerMachine::on_leave`] instead of polling to the bound.
+///
 /// Post-association unsecured traffic (level-0 vendor APS commands
 /// such as [`UNSECURED_VENDOR_CMD`]) is tolerated: it is counted and
 /// classified, never transitions the machine, and never installs key
 /// material — the note path takes only a command id, so latching is
-/// impossible by construction. Timeouts and retries are unchanged:
-/// the caller still drives its existing poll clock and reports the
-/// transport-missing outcome through [`JoinerMachine::on_transport_timeout`].
+/// impossible by construction.
 pub struct JoinerMachine {
     state: JoinerState,
     error: Option<JoinError>,
@@ -360,6 +381,8 @@ pub struct JoinerMachine {
     announced: bool,
     unsecured_count: u32,
     last_unsecured_cmd: Option<u8>,
+    netkey_adopted: bool,
+    last_aux_counter: Option<u32>,
 }
 
 impl JoinerMachine {
@@ -374,6 +397,8 @@ impl JoinerMachine {
             announced: false,
             unsecured_count: 0,
             last_unsecured_cmd: None,
+            netkey_adopted: false,
+            last_aux_counter: None,
         }
     }
 
@@ -399,6 +424,21 @@ impl JoinerMachine {
     #[must_use]
     pub const fn last_unsecured_cmd(&self) -> Option<u8> {
         self.last_unsecured_cmd
+    }
+
+    /// Whether the network key was adopted from a MIC-checked
+    /// transport open. Set only by a successful
+    /// [`JoinerMachine::on_transport_open`]; never set by
+    /// classification, vendor traffic, or timeouts.
+    #[must_use]
+    pub const fn netkey_adopted(&self) -> bool {
+        self.netkey_adopted
+    }
+
+    /// Auxiliary counter of the last adopted transport open, if any.
+    #[must_use]
+    pub const fn last_aux_counter(&self) -> Option<u32> {
+        self.last_aux_counter
     }
 
     /// Record one post-association unsecured/vendor APS command frame
@@ -439,6 +479,43 @@ impl JoinerMachine {
             }
             _ => {}
         }
+    }
+
+    /// Open one classified transport-key frame: the caller hands over
+    /// the auxiliary-layer open outcome — whether the message
+    /// integrity check passed (`mic_ok`, computed by the caller with
+    /// the derived transport key, which never enters this crate) and
+    /// the frame's auxiliary counter — and the machine applies the
+    /// join decision. Success latches the network-key adoption
+    /// (`netkey_adopted`, `last_aux_counter`) and stays in `KeyWait`
+    /// for the verify round; a MIC failure ends the attempt with
+    /// [`JoinError::ConfirmMismatch`] (a tampered or forged transport
+    /// never promotes); a counter that does not strictly advance the
+    /// last adopted one ends the attempt the same way (replay or
+    /// duplicate of an already-opened frame — the joiner-side
+    /// application of the strictly-monotonic counter window,
+    /// `05-3474-23-4312-01`). Called outside `KeyWait` this is a
+    /// caller bug ([`JoinError::BadState`]).
+    ///
+    /// Requirement `05-3474-23-4434-01` (repo-minted,
+    /// MINTED-pending-confirm).
+    pub fn on_transport_open(&mut self, mic_ok: bool, aux_counter: u32) {
+        if self.state != JoinerState::KeyWait {
+            self.fail(JoinError::BadState);
+            return;
+        }
+        if !mic_ok {
+            self.fail(JoinError::ConfirmMismatch);
+            return;
+        }
+        if let Some(last) = self.last_aux_counter {
+            if aux_counter <= last {
+                self.fail(JoinError::ConfirmMismatch);
+                return;
+            }
+        }
+        self.last_aux_counter = Some(aux_counter);
+        self.netkey_adopted = true;
     }
 
     /// Report that the post-association wait ended with no

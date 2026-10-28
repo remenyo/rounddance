@@ -1776,6 +1776,88 @@ fn vector_join_leave_evicts_mid_join() {
     assert_eq!(early.error(), Some(JoinError::BadState));
 }
 
+// 05-3474-23-4434-01: TC-first transport open. After the exact-pair
+// classification promotes the joiner to the key wait, the auxiliary
+// open outcome decides: a MIC-checked frame with a fresh counter
+// latches the network-key adoption and the join rides to Joined; a
+// MIC failure, a replayed or duplicate counter, or an open outside
+// the key wait ends the attempt and never promotes.
+#[test]
+fn vector_tc_first_transport_open_05_3474_23_4434_01() {
+    let policy = JoinPolicy {
+        cbke_supported: false,
+        cbke_required: false,
+        interview_tc: false,
+        parent_is_r20_earlier: false,
+    };
+    // Open outside the key wait is a caller bug.
+    let mut early = JoinerMachine::new(JoinMethod::InstallCode, policy);
+    early.on_candidate();
+    early.on_assoc_confirm(true);
+    early.on_transport_open(true, 0x0001_d000);
+    assert_eq!(early.state(), JoinerState::Failed);
+    assert_eq!(early.error(), Some(JoinError::BadState));
+    assert!(!early.netkey_adopted());
+
+    // MIC failure: tampered or forged transport never promotes and
+    // never latches an adoption.
+    let mut mic = JoinerMachine::new(JoinMethod::InstallCode, policy);
+    mic.on_candidate();
+    mic.on_assoc_confirm(true);
+    mic.note_transport_frame(TRANSPORT_KEY_CMD, TRANSPORT_KEY_TYPE_NETWORK);
+    assert_eq!(mic.state(), JoinerState::KeyWait);
+    mic.on_transport_open(false, 0x0001_d000);
+    assert_eq!(mic.state(), JoinerState::Failed);
+    assert_eq!(mic.error(), Some(JoinError::ConfirmMismatch));
+    assert!(!mic.netkey_adopted());
+    assert_eq!(mic.last_aux_counter(), None);
+
+    // Counter replay: the same auxiliary counter opened twice, or a
+    // lower one, is a replay — the attempt ends, nothing promotes.
+    let mut replay = JoinerMachine::new(JoinMethod::InstallCode, policy);
+    replay.on_candidate();
+    replay.on_assoc_confirm(true);
+    replay.note_transport_frame(TRANSPORT_KEY_CMD, TRANSPORT_KEY_TYPE_NETWORK);
+    replay.on_transport_open(true, 0x0001_d000);
+    assert!(replay.netkey_adopted());
+    assert_eq!(replay.last_aux_counter(), Some(0x0001_d000));
+    replay.on_transport_open(true, 0x0001_d000);
+    assert_eq!(replay.state(), JoinerState::Failed);
+    assert_eq!(replay.error(), Some(JoinError::ConfirmMismatch));
+
+    let mut lower = JoinerMachine::new(JoinMethod::InstallCode, policy);
+    lower.on_candidate();
+    lower.on_assoc_confirm(true);
+    lower.note_transport_frame(TRANSPORT_KEY_CMD, TRANSPORT_KEY_TYPE_NETWORK);
+    lower.on_transport_open(true, 0x0001_d000);
+    lower.on_transport_open(true, 0x0001_3000);
+    assert_eq!(lower.state(), JoinerState::Failed);
+    assert_eq!(lower.error(), Some(JoinError::ConfirmMismatch));
+
+    // Fresh counters strictly advance; the full path rides the
+    // adoption through verify, announce, and close-out to Joined.
+    let mut j = JoinerMachine::new(JoinMethod::InstallCode, policy);
+    assert!(!j.netkey_adopted());
+    assert_eq!(j.last_aux_counter(), None);
+    j.on_candidate();
+    j.on_assoc_confirm(true);
+    j.note_transport_frame(TRANSPORT_KEY_CMD, TRANSPORT_KEY_TYPE_NETWORK);
+    assert_eq!(j.state(), JoinerState::KeyWait);
+    j.on_transport_open(true, 0x0001_d000);
+    assert!(j.netkey_adopted());
+    assert_eq!(j.last_aux_counter(), Some(0x0001_d000));
+    assert_eq!(j.state(), JoinerState::KeyWait);
+    j.on_verify_confirm(true, KeyAttributes::SYMMETRIC);
+    assert_eq!(j.state(), JoinerState::Announced);
+    let annce = j.device_annce(0x33, 0x5160, 0x6d49_11fe_ff13_8d34);
+    assert_eq!(
+        (annce.nwk_addr, annce.ieee),
+        (0x5160, 0x6d49_11fe_ff13_8d34)
+    );
+    j.close_out(false);
+    assert_eq!(j.state(), JoinerState::Joined);
+}
+
 // 22-65816-030-91-01: the field policy admits a strong link the old
 // absolute gate refused. Transcript replayed from the wave-27 bench
 // logs (`join_run5/6.log`): tail-LQI 10–11 with tail-RSSI −28 dBm on a

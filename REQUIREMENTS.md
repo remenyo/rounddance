@@ -1108,3 +1108,30 @@ MINTED-pending-confirm. Paraphrase only (D1).
 | 05-3474-23-B14-01 | implemented + verified | `security::mmo::hmac_mmo_128` (HMAC over AES-MMO-128, 16-octet block, inner pad `0x36` / outer pad `0x5C`; §B.1.4 shape, anchor p0541-L13301-L13312; 48-octet input cap keeps both legs under the hash cap) | `security/tests/vectors.rs::vector_hmac_mmo_worked_05_3474_23_b14_01` (128-bit keyed-hash worked example incl. outer leg) + `vector_hmac_mmo_kdf_shape_05_3474_23_b14_01` (one-octet KDF shape) + `keyhierarchy::tests::keyed_input_too_long_is_refused` (over-cap refusal) |
 | 05-3474-23-453-01 | implemented + verified | `security::keyhierarchy::{derive_key_transport_key (0x00), derive_key_load_key (0x02), data_key_is_link_key}` (hierarchy clause, anchor p0481-L11489-L11497); `commission::MmoJoinKdf` + `TrustCenter::install_code_key` supply the link-key leg (full code incl. check field, BDB §6.11.1.2, pre-existing `22-65816-030-56-08` vector) | `security/tests/vectors.rs::vector_key_hierarchy_from_worked_link_05_3474_23_453_01` (transport/load pinned from the BDB worked link key, cross-checked against an independent Python model before freezing) + `keyhierarchy::tests::hierarchy_is_deterministic_and_domain_separated` + offline battery `~/hwscratch/w45/transport_open.py` (3 KATs + 5 A-frames × key battery; SOLVED report `~/hwscratch/w45/REPORT.md`) |
 | 05-3474-23-4433-01 | implemented + verified | `commission::classical::{TRANSPORT_KEY_CMD (0x05), TRANSPORT_KEY_TYPE_NETWORK (0x01)}` + `JoinerMachine::note_transport_frame` (exact-pair classification: genuine pair moves `Authenticating`→`KeyWait`, repeat in `KeyWait` tolerated, all other pairs and all other states leave the wait unchanged; transport-key receipt clause, anchors p0438-L10533-L10550) | `commission/tests/vectors.rs::vector_tc_first_transport_classification_05_3474_23_4433_01` (pre-association ignore + foreign-pair tolerance + genuine promotion + repeat tolerance + full path to Joined) + `rounddance-sim/tests/join_tc_first.rs` (real k1 capture envelope through the NWK codec + aux-shape asserts with opaque 39-octet tail, foreign-first tolerance, transport→verify→announce→join, wrong-type-first→NoTransport, deterministic replay) |
+
+## Wave-46 traceability — TC-first joiner path complete (lane 2)
+
+Wave-45 classified the TC-first transport (exact `0x05`/`0x01` pair)
+and proved the key chain (the HMAC-derived transport key opens all
+five proactive `0x30` A-frames MIC-valid). This wave completes the
+joiner path through the states the capture implies: the
+post-association wait is now bounded by the named
+`JOINER_TRANSPORT_GRACE_TICKS` grace (≈10 s parent eject, seen on air
+in `~/hwscratch/w39/sniff_b1.txt`, surfaced via `on_leave` as
+`JoinTimeout` instead of polling to `NoTransport`); the classified
+frame is opened with the caller-computed integrity outcome plus its
+auxiliary counter (`on_transport_open`: MIC failure and
+non-advancing counters end the attempt with `ConfirmMismatch`, the
+joiner-side application of the strictly-monotonic counter window);
+success latches the network-key adoption and rides
+verify→`DeviceAnnce`→close-out to `Joined`. The five battery
+A-frames (w42 x2/x4/x5/x6 + w44 k1) ride in-repo as envelope
+metadata + tail hashes only (procedure:
+`python3 ~/hwscratch/w45/transport_open.py` with the lab `0600`
+files; report `~/hwscratch/w45/REPORT_lane2_spec_derivation.md`);
+key bytes stay local-only outside the repo. 1 repo-minted ID
+(`05-3474-23-4434-01`), MINTED-pending-confirm. Paraphrase only (D1).
+
+| Requirement ID | State | Implementing code | Verifying test |
+|----------------|-------|-------------------|----------------|
+| 05-3474-23-4434-01 | implemented + verified | `commission::classical::JoinerMachine::on_transport_open` (MIC-checked open in `KeyWait`: failure → `ConfirmMismatch`, never promotes, never latches; auxiliary counter must strictly advance the last adopted one — replay/duplicate → `ConfirmMismatch`; success latches `netkey_adopted` + `last_aux_counter`, stays in `KeyWait` for verify; outside `KeyWait` → `BadState`) + `JOINER_TRANSPORT_GRACE_TICKS` (10-tick ≈10 s bound for the post-association wait, `22-65816-030-56-04` time-box, no new ID) | `commission/tests/vectors.rs::vector_tc_first_transport_open_05_3474_23_4434_01` (wrong-state open, MIC-fail, same-counter replay, lower-counter replay, fresh-counter adopt + full path to Joined) + `rounddance-sim/tests/join_tc_first.rs` (complete flow through open→adopt→verify→announce→join, MIC-fail→`ConfirmMismatch`, leave-eject on both wait legs→`JoinTimeout`, counter-replay→`ConfirmMismatch`, 5-frame air panel + k1-row capture consistency, deterministic replay) |

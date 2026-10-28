@@ -20,14 +20,44 @@
 //! `~/hwscratch/w45/` and are cited there, not re-proved here.
 //!
 //! Requirement traceability: `05-3474-23-4433-01` (TC-first
-//! transport classification), `22-65816-030-91-02` (no
-//! verify/promote without transport), `22-65816-030-56-04` (the
-//! wait is still time-boxed: a wrong-type-first peer ends in
-//! `NoTransport`).
+//! transport classification), `05-3474-23-4434-01` (transport open:
+//! MIC-checked open, strictly-monotonic auxiliary-counter window,
+//! netkey-adopt latch; MIC/counter failures never promote),
+//! `22-65816-030-91-02` (no verify/promote without transport),
+//! `22-65816-030-56-04` (the wait is still time-boxed: a
+//! wrong-type-first peer ends in `NoTransport`, a parent eject ends
+//! it in `JoinTimeout` via `on_leave`).
+//!
+//! Captured-air panel: the offline battery opened all five proactive
+//! `0x30` A-frames below MIC-valid with network-key-bearing
+//! plaintexts (command `0x05`, key type `0x01`, sequence `0x00`,
+//! joiner + coordinator EUIs; nonce = source-EUI LE + counter LE +
+//! restored control `0x35`; AAD = APS header + restored aux;
+//! MIC-32). Only hashes and envelope metadata ride in-repo — the
+//! secured tails stay opaque here and the key bytes live only in the
+//! lab `0600` files (never in SUMMARY/logs/repo). The full battery is
+//! re-runnable offline with those files present:
+//! `python3 ~/hwscratch/w45/transport_open.py` (3 derivation KATs +
+//! 5-frame × key battery; SOLVED report
+//! `~/hwscratch/w45/REPORT_lane2_spec_derivation.md` and
+//! `~/hwscratch/w45/SUMMARY.md`). Panel (all share the coordinator
+//! source `5f75f4feffe5e304`, 39-octet tails):
+//!
+//! | tag | capture | auxctr | aps | ct-sha16 |
+//! |-----|---------|--------|-----|----------|
+//! | x2 | w42 `sniff_x2.txt:50` | `00300100` | `21 03` | `847ddbe556dd1f6d` |
+//! | x4 | w42 `sniff_x4.txt:44` | `00400100` | `21 f0` | `892a32e5358f5562` |
+//! | x5 | w42 `sniff_x5.txt:47` | `00500100` | `21 5b` | `40077f09ea47dfb0` |
+//! | x6 | w42 `sniff_x6.txt:47` | `00600100` | `21 f7` | `7115c4e7764b43d2` |
+//! | k1 | w44 `sniff_k1.txt:38` | `00d00100` | `21 51` | `ed9c786f18789719` |
+//!
+//! Counters climb `+0x1000` per join from a restarted zero base (the
+//! w44 cadence finding, reproduced under rotation in w45 lane 1).
 
 use rounddance_commission::{
-    JoinError, JoinMethod, JoinPolicy, JoinerMachine, JoinerState, TrustCenter, TRANSPORT_KEY_CMD,
-    TRANSPORT_KEY_TYPE_NETWORK, UNSECURED_VENDOR_CMD,
+    JoinError, JoinMethod, JoinPolicy, JoinerMachine, JoinerState, TrustCenter,
+    JOINER_TRANSPORT_GRACE_TICKS, TRANSPORT_KEY_CMD, TRANSPORT_KEY_TYPE_NETWORK,
+    UNSECURED_VENDOR_CMD,
 };
 use rounddance_nwk::decode as decode_nwk;
 
@@ -53,6 +83,46 @@ const TC_EUI: [u8; 8] = [0x5f, 0x75, 0xf4, 0xfe, 0xff, 0xe5, 0xe3, 0x04];
 /// Update-device APS command id: the UD-first alternative the joiner
 /// must never promote.
 const UPDATE_DEVICE_CMD: u8 = 0x06;
+
+/// k1 auxiliary counter from the capture (`00d00100` LE on air), the
+/// value the genuine TC-first open reports.
+const K1_AUX_COUNTER: u32 = 0x0001_d000;
+
+/// Captured-air panel: (tag, auxctr LE bytes, APS header, tail
+/// ciphertext sha16 prefix) for the five battery A-frames. Hashes
+/// and envelope metadata only — no key material, no plaintext.
+const AFRAMES: [(&str, [u8; 4], [u8; 2], &str); 5] = [
+    (
+        "x2",
+        [0x00, 0x30, 0x01, 0x00],
+        [0x21, 0x03],
+        "847ddbe556dd1f6d",
+    ),
+    (
+        "x4",
+        [0x00, 0x40, 0x01, 0x00],
+        [0x21, 0xf0],
+        "892a32e5358f5562",
+    ),
+    (
+        "x5",
+        [0x00, 0x50, 0x01, 0x00],
+        [0x21, 0x5b],
+        "40077f09ea47dfb0",
+    ),
+    (
+        "x6",
+        [0x00, 0x60, 0x01, 0x00],
+        [0x21, 0xf7],
+        "7115c4e7764b43d2",
+    ),
+    (
+        "k1",
+        [0x00, 0xd0, 0x01, 0x00],
+        [0x21, 0x51],
+        "ed9c786f18789719",
+    ),
+];
 
 fn policy() -> JoinPolicy {
     JoinPolicy {
@@ -119,10 +189,18 @@ fn replay_tc_first() -> (Vec<String>, JoinerState) {
     trace.push("foreign-first-frames tolerated state=Authenticating".to_string());
 
     // The genuine TC-first transport (decrypted fields per the
-    // hwscratch open) ends the wait.
+    // hwscratch open) ends the wait; the auxiliary open — MIC valid
+    // (checked offline against the derived transport key, which never
+    // enters the repo) at the captured counter — adopts the network
+    // key.
     joiner.note_transport_frame(TRANSPORT_KEY_CMD, TRANSPORT_KEY_TYPE_NETWORK);
     assert_eq!(joiner.state(), JoinerState::KeyWait);
     trace.push("transport-0501 state=KeyWait".to_string());
+
+    joiner.on_transport_open(true, K1_AUX_COUNTER);
+    assert!(joiner.netkey_adopted());
+    assert_eq!(joiner.last_aux_counter(), Some(K1_AUX_COUNTER));
+    trace.push("open-mic-ok counter=0001d000 netkey-adopted".to_string());
 
     joiner.on_verify_confirm(true, rounddance_commission::KeyAttributes::SYMMETRIC);
     assert_eq!(joiner.state(), JoinerState::Announced);
@@ -142,8 +220,9 @@ fn replay_tc_first() -> (Vec<String>, JoinerState) {
     (trace, joiner.state())
 }
 
-// 05-3474-23-4433-01 + 22-65816-030-91-02: the joiner rides the
-// TC-first transport to Joined; foreign first-frames never promote.
+// 05-3474-23-4433-01 + 05-3474-23-4434-01 + 22-65816-030-91-02:
+// the joiner rides the TC-first transport through open and adoption
+// to Joined; foreign first-frames never promote.
 #[test]
 fn tc_first_challenge_then_joined() {
     let (trace, state) = replay_tc_first();
@@ -155,6 +234,7 @@ fn tc_first_challenge_then_joined() {
             "envelope nwk=5160<-0000 aps-fc=0x21 aux-sc=0x30 tail=39-opaque".to_string(),
             "foreign-first-frames tolerated state=Authenticating".to_string(),
             "transport-0501 state=KeyWait".to_string(),
+            "open-mic-ok counter=0001d000 netkey-adopted".to_string(),
             "verified+announced".to_string(),
             "closed-out state=Joined".to_string(),
         ]
@@ -169,7 +249,8 @@ fn tc_first_replay_replays_deterministically() {
 
 // 05-3474-23-4433-01 + 22-65816-030-56-04: a peer that only ever
 // sends foreign first-frames (wrong key type here) never promotes
-// the join — the wait ends in NoTransport.
+// the join — the wait ends in NoTransport once the caller exhausts
+// the grace bound.
 #[test]
 fn wrong_type_first_never_promotes() {
     let mut joiner = JoinerMachine::new(JoinMethod::InstallCode, policy());
@@ -178,7 +259,118 @@ fn wrong_type_first_never_promotes() {
     joiner.note_transport_frame(TRANSPORT_KEY_CMD, 0x04);
     joiner.note_transport_frame(UPDATE_DEVICE_CMD, 0x00);
     assert_eq!(joiner.state(), JoinerState::Authenticating);
+    assert!(!joiner.netkey_adopted());
+    // The caller polls its clock to the grace bound, then names the
+    // missing transport.
+    for _ in 0..JOINER_TRANSPORT_GRACE_TICKS {
+        assert_eq!(joiner.state(), JoinerState::Authenticating);
+    }
     joiner.on_transport_timeout();
     assert_eq!(joiner.state(), JoinerState::Failed);
     assert_eq!(joiner.error(), Some(JoinError::NoTransport));
+}
+
+// 05-3474-23-4434-01: a transport that fails the integrity check —
+// tampered or forged on air — never promotes and never latches an
+// adoption, even though the classification pair was genuine.
+#[test]
+fn mic_fail_never_promotes() {
+    let mut joiner = JoinerMachine::new(JoinMethod::InstallCode, policy());
+    joiner.on_candidate();
+    joiner.on_assoc_confirm(true);
+    joiner.note_transport_frame(TRANSPORT_KEY_CMD, TRANSPORT_KEY_TYPE_NETWORK);
+    assert_eq!(joiner.state(), JoinerState::KeyWait);
+    joiner.on_transport_open(false, K1_AUX_COUNTER);
+    assert_eq!(joiner.state(), JoinerState::Failed);
+    assert_eq!(joiner.error(), Some(JoinError::ConfirmMismatch));
+    assert!(!joiner.netkey_adopted());
+    assert_eq!(joiner.last_aux_counter(), None);
+}
+
+// 22-65816-030-56-04 (joiner side): a parent eject received mid-wait
+// ends the attempt at once with JoinTimeout — the "asked to leave"
+// outcome — instead of polling to the grace bound. Both the
+// transport-wait leg and the post-open wait leg eject the same way.
+#[test]
+fn leave_eject_ends_wait_at_once() {
+    // Transport-wait leg: the eject lands before any transport.
+    let mut waiting = JoinerMachine::new(JoinMethod::InstallCode, policy());
+    waiting.on_candidate();
+    waiting.on_assoc_confirm(true);
+    waiting.on_leave();
+    assert_eq!(waiting.state(), JoinerState::Failed);
+    assert_eq!(waiting.error(), Some(JoinError::JoinTimeout));
+    assert!(!waiting.netkey_adopted());
+
+    // Post-open leg: adopted, verified, but the eject still wins —
+    // no announce, no close-out, no Joined.
+    let mut open = JoinerMachine::new(JoinMethod::InstallCode, policy());
+    open.on_candidate();
+    open.on_assoc_confirm(true);
+    open.note_transport_frame(TRANSPORT_KEY_CMD, TRANSPORT_KEY_TYPE_NETWORK);
+    open.on_transport_open(true, K1_AUX_COUNTER);
+    assert!(open.netkey_adopted());
+    open.on_leave();
+    assert_eq!(open.state(), JoinerState::Failed);
+    assert_eq!(open.error(), Some(JoinError::JoinTimeout));
+}
+
+// 05-3474-23-4434-01: the auxiliary-counter window — a replayed or
+// duplicate transport open (counter at or below the adopted one)
+// ends the attempt; only a strictly fresher counter would advance.
+#[test]
+fn counter_replay_never_promotes() {
+    let mut joiner = JoinerMachine::new(JoinMethod::InstallCode, policy());
+    joiner.on_candidate();
+    joiner.on_assoc_confirm(true);
+    joiner.note_transport_frame(TRANSPORT_KEY_CMD, TRANSPORT_KEY_TYPE_NETWORK);
+    joiner.on_transport_open(true, K1_AUX_COUNTER);
+    assert!(joiner.netkey_adopted());
+    // Attacker replays the exact captured open: same counter.
+    joiner.on_transport_open(true, K1_AUX_COUNTER);
+    assert_eq!(joiner.state(), JoinerState::Failed);
+    assert_eq!(joiner.error(), Some(JoinError::ConfirmMismatch));
+
+    // A lower counter (older capture, e.g. the x6 frame's
+    // `00600100`) against the k1 adoption fails the same way.
+    let mut older = JoinerMachine::new(JoinMethod::InstallCode, policy());
+    older.on_candidate();
+    older.on_assoc_confirm(true);
+    older.note_transport_frame(TRANSPORT_KEY_CMD, TRANSPORT_KEY_TYPE_NETWORK);
+    older.on_transport_open(true, K1_AUX_COUNTER);
+    older.on_transport_open(true, 0x0001_6000);
+    assert_eq!(older.state(), JoinerState::Failed);
+    assert_eq!(older.error(), Some(JoinError::ConfirmMismatch));
+}
+
+// Captured-air panel consistency: the k1 row of the panel matches
+// the captured PSDU above field by field (aux control shaping,
+// counter, source, APS header, tail length) — the sha16 pins the
+// exact 39-octet tail the battery opened.
+#[test]
+fn air_panel_k1_row_matches_capture() {
+    let k1 = AFRAMES.iter().find(|(tag, _, _, _)| *tag == "k1").unwrap();
+    assert_eq!(u32::from_le_bytes(k1.1), K1_AUX_COUNTER);
+    let msdu = &CAPTURED_TC_FIRST_PSDU[MAC_HEADER_LEN..];
+    let nwk = decode_nwk(msdu).expect("captured NWK header decodes");
+    assert_eq!(&nwk.payload[0..2], &k1.2);
+    assert_eq!(&nwk.payload[3..7], &k1.1);
+    assert_eq!(&nwk.payload[7..15], &TC_EUI);
+    assert_eq!(nwk.payload[15..].len(), 39);
+    // The five panel rows share one coordinator source and climb
+    // +0x1000 per join.
+    let ctrs: Vec<u32> = AFRAMES
+        .iter()
+        .map(|(_, c, _, _)| u32::from_le_bytes(*c))
+        .collect();
+    assert_eq!(
+        ctrs,
+        vec![
+            0x0001_3000,
+            0x0001_4000,
+            0x0001_5000,
+            0x0001_6000,
+            0x0001_d000
+        ]
+    );
 }
