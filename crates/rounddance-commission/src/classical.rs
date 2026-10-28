@@ -40,6 +40,13 @@ pub const MAX_INSTALL_CODE_LEN: usize = 18;
 /// Largest joined-device table (declared budget).
 pub const MAX_JOINED_DEVICES: usize = 32;
 
+/// Vendor APS command id observed on real post-association traffic
+/// from a stock coordinator: a level-0 (plaintext, counter-less)
+/// command frame that is NOT the standard transport-key command. The
+/// value is a field observation, not a normative assignment — the
+/// join machine treats every unsecured command id the same way.
+pub const UNSECURED_VENDOR_CMD: u8 = 0x30;
+
 /// Classical-join failures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JoinError {
@@ -55,6 +62,13 @@ pub enum JoinError {
     TableFull,
     /// No entry for this device.
     NotFound,
+    /// Post-association wait ended with no transport-key frame: the
+    /// coordinator spoke only unsecured/vendor traffic or stayed
+    /// silent. Distinct from [`JoinError::JoinTimeout`] (whole-window
+    /// eviction): this names the transport-missing cause so callers
+    /// can tell "TC talked but never delivered keys" apart from "TC
+    /// never admitted us".
+    NoTransport,
     /// Join window elapsed: the device is asked to leave
     /// (`22-65816-030-56-04`).
     JoinTimeout,
@@ -318,12 +332,22 @@ pub struct JoinPolicy {
 }
 
 /// Joiner-side driver.
+///
+/// Post-association unsecured traffic (level-0 vendor APS commands
+/// such as [`UNSECURED_VENDOR_CMD`]) is tolerated: it is counted and
+/// classified, never transitions the machine, and never installs key
+/// material — the note path takes only a command id, so latching is
+/// impossible by construction. Timeouts and retries are unchanged:
+/// the caller still drives its existing poll clock and reports the
+/// transport-missing outcome through [`JoinerMachine::on_transport_timeout`].
 pub struct JoinerMachine {
     state: JoinerState,
     error: Option<JoinError>,
     method: JoinMethod,
     policy: JoinPolicy,
     announced: bool,
+    unsecured_count: u32,
+    last_unsecured_cmd: Option<u8>,
 }
 
 impl JoinerMachine {
@@ -336,6 +360,8 @@ impl JoinerMachine {
             method,
             policy,
             announced: false,
+            unsecured_count: 0,
+            last_unsecured_cmd: None,
         }
     }
 
@@ -349,6 +375,49 @@ impl JoinerMachine {
     #[must_use]
     pub const fn error(&self) -> Option<JoinError> {
         self.error
+    }
+
+    /// How many post-association unsecured frames were noted.
+    #[must_use]
+    pub const fn unsecured_count(&self) -> u32 {
+        self.unsecured_count
+    }
+
+    /// Command id of the most recent noted unsecured frame, if any.
+    #[must_use]
+    pub const fn last_unsecured_cmd(&self) -> Option<u8> {
+        self.last_unsecured_cmd
+    }
+
+    /// Record one post-association unsecured/vendor APS command frame
+    /// (`cmd` is the APS command id, e.g. [`UNSECURED_VENDOR_CMD`]).
+    /// Counted only in the post-association states
+    /// (`Authenticating`, `KeyWait`); ignored anywhere else. Never
+    /// transitions, never fails, never touches key material.
+    pub fn note_unsecured(&mut self, cmd: u8) {
+        if matches!(
+            self.state,
+            JoinerState::Authenticating | JoinerState::KeyWait
+        ) {
+            self.unsecured_count = self.unsecured_count.saturating_add(1);
+            self.last_unsecured_cmd = Some(cmd);
+        }
+    }
+
+    /// Report that the post-association wait ended with no
+    /// transport-key frame. Fails with [`JoinError::NoTransport`] from
+    /// the post-association states (`Authenticating`, `KeyWait`);
+    /// [`JoinError::BadState`] anywhere else. The caller's existing
+    /// timeout/retry clock is unchanged — this only names the outcome.
+    pub fn on_transport_timeout(&mut self) {
+        if matches!(
+            self.state,
+            JoinerState::Authenticating | JoinerState::KeyWait
+        ) {
+            self.fail(JoinError::NoTransport);
+        } else {
+            self.fail(JoinError::BadState);
+        }
     }
 
     fn fail(&mut self, err: JoinError) {

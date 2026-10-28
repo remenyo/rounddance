@@ -1624,3 +1624,72 @@ fn vector_auxiliary_order_discipline_22_65816_030_122_03() {
     assert!(target.on_reset(CERT_TID));
     assert_eq!(target.state(), TouchlinkTargetState::Restarted);
 }
+
+// 22-65816-030-91-02 + 22-65816-030-56-04: post-association wait with
+// only unsecured vendor traffic. The joiner tolerates the observed
+// vendor command id (counted and classified, no transition, no key
+// latch) and the transport-missing timeout reports `NoTransport` —
+// distinct from whole-window `JoinTimeout`.
+#[test]
+fn vector_join_tolerates_unsecured_then_no_transport() {
+    let policy = JoinPolicy {
+        cbke_supported: false,
+        cbke_required: false,
+        interview_tc: false,
+        parent_is_r20_earlier: false,
+    };
+    let mut j = JoinerMachine::new(JoinMethod::PreconfiguredKey, policy);
+    j.on_candidate();
+    j.on_assoc_confirm(true);
+    assert_eq!(j.state(), JoinerState::Authenticating);
+    // Two post-association vendor frames, as captured on air: the
+    // state never moves and nothing is latched.
+    j.note_unsecured(UNSECURED_VENDOR_CMD);
+    j.note_unsecured(UNSECURED_VENDOR_CMD);
+    assert_eq!(j.state(), JoinerState::Authenticating);
+    assert_eq!(j.error(), None);
+    assert_eq!(j.unsecured_count(), 2);
+    assert_eq!(j.last_unsecured_cmd(), Some(UNSECURED_VENDOR_CMD));
+    // No transport-key frame ever arrives: the wait ends with
+    // `NoTransport`, not a generic timeout.
+    j.on_transport_timeout();
+    assert_eq!(j.state(), JoinerState::Failed);
+    assert_eq!(j.error(), Some(JoinError::NoTransport));
+}
+
+// 22-65816-030-91-02: same tolerance on the KeyWait leg, plus the
+// edges — pre-association notes are ignored (no count, no fail) and
+// a transport timeout outside the post-association states is
+// `BadState`. Timeouts/retries elsewhere are unchanged.
+#[test]
+fn vector_join_unsecured_keywait_leg_and_edges() {
+    let policy = JoinPolicy {
+        cbke_supported: false,
+        cbke_required: false,
+        interview_tc: false,
+        parent_is_r20_earlier: false,
+    };
+    // Pre-association chatter is ignored, never counted, never fatal.
+    let mut early = JoinerMachine::new(JoinMethod::PreconfiguredKey, policy);
+    early.note_unsecured(UNSECURED_VENDOR_CMD);
+    assert_eq!(early.state(), JoinerState::Unjoined);
+    assert_eq!(early.unsecured_count(), 0);
+    assert_eq!(early.last_unsecured_cmd(), None);
+    // A transport timeout with nothing pending is a caller bug.
+    early.on_transport_timeout();
+    assert_eq!(early.error(), Some(JoinError::BadState));
+
+    // KeyWait leg: unsecured traffic is tolerated mid-wait, then the
+    // missing transport is named.
+    let mut j = JoinerMachine::new(JoinMethod::PreconfiguredKey, policy);
+    j.on_candidate();
+    j.on_assoc_confirm(true);
+    j.on_key_transport(true);
+    assert_eq!(j.state(), JoinerState::KeyWait);
+    j.note_unsecured(UNSECURED_VENDOR_CMD);
+    assert_eq!(j.state(), JoinerState::KeyWait);
+    assert_eq!(j.unsecured_count(), 1);
+    j.on_transport_timeout();
+    assert_eq!(j.state(), JoinerState::Failed);
+    assert_eq!(j.error(), Some(JoinError::NoTransport));
+}

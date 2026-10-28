@@ -430,3 +430,56 @@ fn vector_link_key_update_07_5356_c41_02() {
         Err(SecError::DuplicateKey)
     );
 }
+
+// 05-3474-23-451-01: level-0 reception. Captured post-association
+// coordinator traffic (NWK data frame, plaintext APS command id
+// 0x30): the auxiliary header is the lone control octet 0x00 — no
+// counter, no key identifier, no MIC — and the payload starts at the
+// very next octet. `AuxReception::decode` consumes exactly one octet
+// and routes to `Plaintext`; the secured-shape `AuxHeader::decode`
+// would misread payload as a counter, so RX must not use it here.
+#[test]
+fn vector_aux_level0_plaintext_reception() {
+    // Auxiliary header + plaintext exactly as captured on air: the
+    // coordinator's post-association vendor command. Only the shape
+    // (one control octet, then plaintext) is load-bearing below.
+    let aux_and_plain: [u8; 51] = [
+        0x00, 0x10, 0x00, 0x00, 0x6d, 0x49, 0x11, 0xfe, 0xff, 0x13, 0x8d, 0x34, 0x52, 0x98, 0xd2,
+        0x8c, 0x21, 0xe4, 0xf9, 0xe5, 0xb7, 0xd4, 0x56, 0x0c, 0x5b, 0xaa, 0xec, 0x1c, 0x0b, 0xdb,
+        0xa7, 0x1b, 0xec, 0x94, 0xb5, 0xa2, 0x77, 0x53, 0xab, 0xa1, 0x0d, 0xda, 0x1c, 0x27, 0x7a,
+        0x04, 0xfd, 0xf9, 0x42, 0x9d, 0x87,
+    ];
+    let (rx, used) = AuxReception::decode(&aux_and_plain).unwrap();
+    assert!(rx.is_plaintext());
+    assert_eq!(used, 1);
+    let control = rx.control();
+    assert_eq!(control.level, UNSECURED_LEVEL);
+    assert_eq!(control.key_id, KeyIdMode::DataKey);
+    assert!(!control.extended_nonce);
+    // The payload starts at the next octet (the tag octet the field
+    // capture read at header+1); nothing was consumed as a counter
+    // and 50 plaintext octets remain.
+    assert_eq!(&aux_and_plain[used..used + 4], &[0x10, 0x00, 0x00, 0x6d]);
+    assert_eq!(aux_and_plain.len() - used, 50);
+}
+
+// 05-3474-23-451-01: every level-0 control shape (level bits zero,
+// any key-id/ext bits) decodes as one-octet plaintext; secured
+// levels still take the full secured shape; empty input is truncated.
+#[test]
+fn vector_aux_level0_all_control_shapes() {
+    for ctrl in [0x00u8, 0x08, 0x10, 0x18, 0x20, 0x28, 0x30, 0x38] {
+        let buf = [ctrl, 0xAA, 0xBB];
+        let (rx, used) = AuxReception::decode(&buf).unwrap();
+        assert!(rx.is_plaintext(), "ctrl 0x{ctrl:02x}");
+        assert_eq!(used, 1);
+        assert_eq!(rx.control().level, UNSECURED_LEVEL);
+    }
+    // Secured shape still routes the long way: control 0x05 (level 5,
+    // DataKey) + counter + seq.
+    let secured = [0x05u8, 0x78, 0x56, 0x34, 0x12, 0x03];
+    let (rx, used) = AuxReception::decode(&secured).unwrap();
+    assert!(!rx.is_plaintext());
+    assert_eq!(used, 6);
+    assert_eq!(AuxReception::decode(&[]), Err(SecError::Truncated));
+}

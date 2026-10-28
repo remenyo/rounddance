@@ -627,3 +627,19 @@ expanded-point profile stays the wire form).
 | 07-5123-08-1025-01 | implemented + verified | `price.rs`: PublishBlockPeriod 19-octet codec (anchors p0661-L14802-L14804) | `tests/se_vectors.rs::vector_block_period_codec_*`, `se_roundtrip.rs::fuzz_block_codecs_stay_bounded` |
 | 07-5123-08-1025-02 | implemented + verified | `price.rs::BlockTable::insert`: newer issuer wins, cancel removes by provider + issuer, full table evicts oldest (anchors p0661-L14808-L14819) | `tests/se_vectors.rs::vector_block_table_supersede_cancel_*` |
 | 07-5123-08-1026-01 | implemented + verified | `price.rs`: PublishBlockThresholds codec (19-octet header + tier/count-nibble sets + uint48 thresholds; anchors p0668-L15045-L15046 + p0669-L15075-L15080 + p0670-L15081-L15087) | `tests/se_vectors.rs::vector_block_thresholds_codec_*`, `se_roundtrip.rs::fuzz_block_codecs_stay_bounded`, sim `se_block_loop.rs` threshold leg |
+
+## Wave-23 traceability — level-0 AUX RX + classical-join hardening
+
+All IDs below are corpus-reused (no repo-minted IDs: the observed
+vendor command id rides a named constant, not a requirement ID).
+Wording in code/tests is paraphrase only, never spec text (D1). The
+captured bytes in tests are field observations from a stock
+coordinator's post-association traffic (level-0 plaintext vendor APS
+command, never the standard transport-key command).
+
+| Requirement ID | State | Implementing code | Verifying test |
+|----------------|-------|-------------------|----------------|
+| 05-3474-23-451-01 | implemented + verified (extended: level-0 RX) | `classical.rs::AuxReception::decode` routes level 0 to `Plaintext` (one control octet consumed, never decrypted; §4.5.1, anchors p0479-L11436-L11440) | security `tests/vectors.rs::vector_aux_level0_plaintext_reception` (captured 51-octet shape), `vector_aux_level0_all_control_shapes`, sim `join_unsecured_tc.rs` |
+| 05-3474-23-4312-01 | implemented + verified (extended) | counter-less frames take no replay slot — enforced by the `Plaintext` shape (carries no counter to check; §4.3.1.2, anchor p0422-L10156-L10164) | type shape (nothing to feed `ReplayTable::check`); sim replay decodes the same capture twice with no replay state |
+| 22-65816-030-91-02 | implemented + verified (extended) | `JoinerMachine::note_unsecured` counts/classifies vendor frames with no transition and no key latch (command-id-only signature); `UNSECURED_VENDOR_CMD` names the observed id (anchors p0061-L1307-L1334) | commission `tests/vectors.rs::vector_join_tolerates_unsecured_then_no_transport`, `vector_join_unsecured_keywait_leg_and_edges`, sim `join_unsecured_tc.rs` |
+| 22-65816-030-56-04 | implemented + verified (extended) | `JoinError::NoTransport` names the transport-missing outcome (TC talked but never delivered keys vs never admitted); existing tick/window behavior unchanged (anchors p0032-L525-L561) | `vector_join_*_no_transport` legs, sim `unsecured_tc_challenge_then_no_transport` |

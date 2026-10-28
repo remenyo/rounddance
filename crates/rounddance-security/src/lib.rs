@@ -53,8 +53,9 @@ pub use cbke::{
 };
 pub use cert::{ImplicitCert, PeerIdentity, IMPLICIT_CERT_LEN};
 pub use classical::{
-    AuxHeader, FrameCounter, KeyIdMode, KeyIdentifier, KeySet, LinkKeyEntry, LinkKeyTable,
-    NetworkKey, ReplayTable, SecError, SecurityControl, MAX_AUX_LEN, NETWORK_KEY_LEN,
+    AuxHeader, AuxReception, FrameCounter, KeyIdMode, KeyIdentifier, KeySet, LinkKeyEntry,
+    LinkKeyTable, NetworkKey, ReplayTable, SecError, SecurityControl, MAX_AUX_LEN, NETWORK_KEY_LEN,
+    UNSECURED_LEVEL,
 };
 pub use ecc::{
     mqv_agree, reconstruct_static, scalar_from_kdf, session_keys, EccBackend, EccError, MAC_LEN,

@@ -635,6 +635,12 @@ impl AuxHeader {
 
     /// Decode from the front of `buf`; returns the header plus octets
     /// consumed. Rejects truncated inputs and flag/shape mismatches.
+    ///
+    /// This is the secured-shape path only: it always expects the
+    /// 4-octet counter. A level-0 (plaintext) frame must go through
+    /// [`AuxReception::decode`] instead, which routes it to
+    /// [`AuxReception::Plaintext`] rather than misreading payload
+    /// octets as a counter.
     pub fn decode(buf: &[u8]) -> Result<(Self, usize), SecError> {
         if buf.len() < 5 {
             return Err(SecError::Truncated);
@@ -700,6 +706,72 @@ impl AuxHeader {
             },
             pos,
         ))
+    }
+}
+
+/// Security level meaning "no protection": no counter, no key
+/// identifier, no MIC, plaintext payload.
+///
+/// Requirement `05-3474-23-451-01` (auxiliary-header shapes). Stock
+/// coordinators have been observed sending this level on real
+/// post-association traffic, so the receive path must model it.
+pub const UNSECURED_LEVEL: u8 = 0;
+
+/// Reception shape of one auxiliary header.
+///
+/// The secured levels all share the counter/key-identifier/MIC
+/// envelope ([`AuxHeader`]); level 0 carries a lone control octet
+/// with plaintext after it. Routing on the level before touching the
+/// counter keeps a plaintext frame from ever entering the
+/// decrypt/replay path.
+///
+/// Requirement `05-3474-23-451-01` (auxiliary-header shapes) +
+/// `05-3474-23-4312-01` (counter-less frames take no replay slot).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuxReception {
+    /// Secured frame: full [`AuxHeader`] envelope follows.
+    Secured(AuxHeader),
+    /// Level-0 frame: exactly one control octet was consumed and
+    /// everything after it is plaintext. Never decrypt, never
+    /// replay-check, never treat trailing octets as a counter.
+    Plaintext {
+        /// Parsed control octet (`level` is [`UNSECURED_LEVEL`]).
+        control: SecurityControl,
+    },
+}
+
+impl AuxReception {
+    /// Decode one auxiliary header from the front of `buf`; returns
+    /// the reception plus octets consumed (1 for level 0, the full
+    /// header length otherwise). Empty input is [`SecError::Truncated`].
+    ///
+    /// Requirement `05-3474-23-451-01`.
+    pub fn decode(buf: &[u8]) -> Result<(Self, usize), SecError> {
+        let first = buf.first().ok_or(SecError::Truncated)?;
+        let control = SecurityControl::decode(*first);
+        if control.level == UNSECURED_LEVEL {
+            // No counter, no key identifier, no MIC: the payload
+            // starts at the very next octet. Consume only the control
+            // octet so no payload byte is ever read as a counter.
+            return Ok((Self::Plaintext { control }, 1));
+        }
+        let (header, used) = AuxHeader::decode(buf)?;
+        Ok((Self::Secured(header), used))
+    }
+
+    /// True for the level-0 plaintext shape.
+    #[must_use]
+    pub const fn is_plaintext(&self) -> bool {
+        matches!(self, Self::Plaintext { .. })
+    }
+
+    /// The parsed control octet, either shape.
+    #[must_use]
+    pub const fn control(&self) -> SecurityControl {
+        match *self {
+            Self::Secured(h) => h.control,
+            Self::Plaintext { control } => control,
+        }
     }
 }
 
