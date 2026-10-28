@@ -175,6 +175,32 @@ impl SessionEngine {
         &self.keys
     }
 
+    /// Rebuild an engine from saved snapshot fields (see
+    /// [`crate::report::session_from_json`]). Table order is
+    /// preserved; recency counters restart at zero and the key
+    /// rotation counter restarts at the restored slot count — none
+    /// of those are rendered, so a save/load round trip re-renders
+    /// byte-identically.
+    #[must_use]
+    pub fn restore(
+        trees: u32,
+        devices: [Option<DeviceEntry>; MAX_DEVICES],
+        networks: [Option<NetworkEntry>; MAX_NETWORKS],
+        secured_decryptable: u32,
+        secured_orphan: u32,
+        key_slots: usize,
+    ) -> Self {
+        Self {
+            devices,
+            networks,
+            keys: KeySlots::restore(key_slots, key_slots.min(u32::MAX as usize) as u32),
+            now: 0,
+            trees,
+            secured_decryptable,
+            secured_orphan,
+        }
+    }
+
     /// Fold one dissected tree into the tables.
     pub fn note_tree(&mut self, tree: &DecodeTree) {
         self.now = self.now.wrapping_add(1);

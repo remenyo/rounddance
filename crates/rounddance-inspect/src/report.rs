@@ -265,6 +265,308 @@ pub fn session_to_json(eng: &crate::session::SessionEngine) -> String {
     s
 }
 
+/// Session snapshot load failure.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionLoadError {
+    /// Schema version missing or not [`SESSION_SCHEMA`]: the
+    /// snapshot comes from an incompatible writer.
+    BadSchema,
+    /// Truncated, mistyped, out-of-range, or over-capacity input.
+    Malformed,
+}
+
+/// Load a session snapshot written by [`session_to_json`].
+///
+/// The schema version gates first: anything but [`SESSION_SCHEMA`]
+/// is [`SessionLoadError::BadSchema`]. Key material is never in the
+/// snapshot, so restored slots hold zeroed placeholders (see
+/// [`crate::keys::KeySlots::restore`]); the network member caches
+/// restart empty, which only affects future distinct-device counts,
+/// never rendered state.
+pub fn session_from_json(s: &str) -> Result<crate::session::SessionEngine, SessionLoadError> {
+    Parser {
+        b: s.as_bytes(),
+        i: 0,
+    }
+    .parse_session()
+}
+
+/// Byte-cursor parser for exactly the [`session_to_json`] shape
+/// (fixed key order, no duplicate or unknown keys).
+struct Parser<'a> {
+    b: &'a [u8],
+    i: usize,
+}
+
+impl<'a> Parser<'a> {
+    fn parse_session(mut self) -> Result<crate::session::SessionEngine, SessionLoadError> {
+        use crate::session::SessionEngine;
+        use crate::session::{MAX_DEVICES, MAX_NETWORKS};
+        self.ch(b'{')?;
+        self.key("v")?;
+        let v = self.num()?;
+        if v != u64::from(SESSION_SCHEMA) {
+            return Err(SessionLoadError::BadSchema);
+        }
+        self.ch(b',')?;
+        self.key("trees")?;
+        let trees = self.num_u32()?;
+        self.ch(b',')?;
+        self.key("devices")?;
+        self.ch(b'[')?;
+        let mut devices = [None; MAX_DEVICES];
+        let mut nd = 0usize;
+        if !self.peek(b']') {
+            loop {
+                if nd >= MAX_DEVICES {
+                    return Err(SessionLoadError::Malformed);
+                }
+                devices[nd] = Some(self.device()?);
+                nd += 1;
+                if self.consume(b',') {
+                    continue;
+                }
+                break;
+            }
+        }
+        self.ch(b']')?;
+        self.ch(b',')?;
+        self.key("networks")?;
+        self.ch(b'[')?;
+        let mut networks = [None; MAX_NETWORKS];
+        let mut nn = 0usize;
+        if !self.peek(b']') {
+            loop {
+                if nn >= MAX_NETWORKS {
+                    return Err(SessionLoadError::Malformed);
+                }
+                networks[nn] = Some(self.network()?);
+                nn += 1;
+                if self.consume(b',') {
+                    continue;
+                }
+                break;
+            }
+        }
+        self.ch(b']')?;
+        self.ch(b',')?;
+        self.key("sec")?;
+        self.ch(b'{')?;
+        self.key("decryptable")?;
+        let decryptable = self.num_u32()?;
+        self.ch(b',')?;
+        self.key("orphan")?;
+        let orphan = self.num_u32()?;
+        self.ch(b',')?;
+        self.key("slots")?;
+        let slots = self.num()?;
+        if slots > crate::keys::MAX_NWK_KEYS as u64 {
+            return Err(SessionLoadError::Malformed);
+        }
+        self.ch(b'}')?;
+        self.ch(b'}')?;
+        self.end()?;
+        Ok(SessionEngine::restore(
+            trees,
+            devices,
+            networks,
+            decryptable,
+            orphan,
+            slots as usize,
+        ))
+    }
+
+    fn device(&mut self) -> Result<crate::session::DeviceEntry, SessionLoadError> {
+        self.ch(b'{')?;
+        self.key("short")?;
+        let short = self.num_u16()?;
+        self.ch(b',')?;
+        self.key("ieee")?;
+        let ieee = if self.consume_str("null") {
+            None
+        } else {
+            Some(self.num()?)
+        };
+        self.ch(b',')?;
+        self.key("last_seq")?;
+        let last_seq = self.num_u8()?;
+        self.ch(b',')?;
+        self.key("frames")?;
+        let frames = self.num_u32()?;
+        self.ch(b',')?;
+        self.key("secured")?;
+        let secured = self.num_u32()?;
+        self.ch(b',')?;
+        self.key("nwk")?;
+        let nwk_window = self.window()?;
+        self.ch(b',')?;
+        self.key("aps")?;
+        let aps_window = self.window()?;
+        self.ch(b'}')?;
+        Ok(crate::session::DeviceEntry {
+            short_addr: short,
+            ieee,
+            last_seq,
+            frames,
+            secured,
+            nwk_window,
+            aps_window,
+            last_seen: 0,
+        })
+    }
+
+    fn network(&mut self) -> Result<crate::session::NetworkEntry, SessionLoadError> {
+        use crate::session::EMPTY_MEMBER;
+        self.ch(b'{')?;
+        self.key("pan")?;
+        let pan_id = self.num_u16()?;
+        self.ch(b',')?;
+        self.key("frames")?;
+        let frames = self.num_u32()?;
+        self.ch(b',')?;
+        self.key("devices")?;
+        let ndev = self.num_u8()?;
+        self.ch(b',')?;
+        self.key("secured")?;
+        let secured = self.num_u32()?;
+        self.ch(b'}')?;
+        Ok(crate::session::NetworkEntry {
+            pan_id,
+            frames,
+            devices: ndev,
+            secured,
+            members: [EMPTY_MEMBER; crate::session::MEMBERS_PER_NETWORK],
+            last_seen: 0,
+        })
+    }
+
+    fn window(&mut self) -> Result<Option<crate::session::SeqWindow>, SessionLoadError> {
+        if self.consume_str("null") {
+            return Ok(None);
+        }
+        self.ch(b'{')?;
+        self.key("base")?;
+        let base = self.num_u8()?;
+        self.ch(b',')?;
+        self.key("replays")?;
+        let replays = self.num_u16()?;
+        self.ch(b',')?;
+        self.key("gaps")?;
+        let gaps = self.num_u16()?;
+        self.ch(b',')?;
+        self.key("late")?;
+        let late = self.num_u16()?;
+        self.ch(b'}')?;
+        // `seen` is not rendered; mark the restored base as received
+        // so the next fold advances from it instead of re-anchoring.
+        Ok(Some(crate::session::SeqWindow {
+            base,
+            seen: 1,
+            replays,
+            gaps,
+            late,
+        }))
+    }
+
+    fn skip_ws(&mut self) {
+        while self.i < self.b.len() && matches!(self.b[self.i], b' ' | b'\t' | b'\n' | b'\r') {
+            self.i += 1;
+        }
+    }
+
+    fn peek(&mut self, c: u8) -> bool {
+        self.skip_ws();
+        self.b.get(self.i) == Some(&c)
+    }
+
+    fn consume(&mut self, c: u8) -> bool {
+        if self.peek(c) {
+            self.i += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn ch(&mut self, c: u8) -> Result<(), SessionLoadError> {
+        if self.consume(c) {
+            Ok(())
+        } else {
+            Err(SessionLoadError::Malformed)
+        }
+    }
+
+    fn consume_str(&mut self, s: &str) -> bool {
+        self.skip_ws();
+        if self.b.len() - self.i >= s.len() && &self.b[self.i..self.i + s.len()] == s.as_bytes() {
+            self.i += s.len();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn key(&mut self, k: &str) -> Result<(), SessionLoadError> {
+        self.skip_ws();
+        // Keys render as `"name":` with no gaps.
+        let kb = k.as_bytes();
+        if self.b.len() >= self.i + kb.len() + 3
+            && self.b[self.i] == b'"'
+            && &self.b[self.i + 1..self.i + 1 + kb.len()] == kb
+            && self.b[self.i + 1 + kb.len()] == b'"'
+            && self.b[self.i + 2 + kb.len()] == b':'
+        {
+            self.i += kb.len() + 3;
+            Ok(())
+        } else {
+            Err(SessionLoadError::Malformed)
+        }
+    }
+
+    /// Unsigned decimal, one or more digits, no sign.
+    fn num(&mut self) -> Result<u64, SessionLoadError> {
+        self.skip_ws();
+        let start = self.i;
+        let mut v: u64 = 0;
+        while self.i < self.b.len() && self.b[self.i].is_ascii_digit() {
+            let d = u64::from(self.b[self.i] - b'0');
+            v = v
+                .checked_mul(10)
+                .and_then(|x| x.checked_add(d))
+                .ok_or(SessionLoadError::Malformed)?;
+            self.i += 1;
+        }
+        if self.i == start {
+            return Err(SessionLoadError::Malformed);
+        }
+        Ok(v)
+    }
+
+    fn num_u8(&mut self) -> Result<u8, SessionLoadError> {
+        let v = self.num()?;
+        u8::try_from(v).map_err(|_| SessionLoadError::Malformed)
+    }
+
+    fn num_u16(&mut self) -> Result<u16, SessionLoadError> {
+        let v = self.num()?;
+        u16::try_from(v).map_err(|_| SessionLoadError::Malformed)
+    }
+
+    fn num_u32(&mut self) -> Result<u32, SessionLoadError> {
+        let v = self.num()?;
+        u32::try_from(v).map_err(|_| SessionLoadError::Malformed)
+    }
+
+    fn end(&mut self) -> Result<(), SessionLoadError> {
+        self.skip_ws();
+        if self.i == self.b.len() {
+            Ok(())
+        } else {
+            Err(SessionLoadError::Malformed)
+        }
+    }
+}
+
 fn window_json(w: Option<crate::session::SeqWindow>) -> String {
     w.map(|v| {
         format!(
@@ -293,6 +595,26 @@ fn detail_text(d: &crate::tree::ZclDetail) -> String {
             format!("level cmd={cmd:#04x} arg0={arg0:#04x} arg1={arg1:#06x}")
         }
         D::IasZone { cmd } => format!("iaszone cmd={cmd:#04x}"),
+        D::Metering {
+            cmd,
+            arg0,
+            arg1,
+            arg2,
+        } => format!("metering cmd={cmd:#04x} arg0={arg0:#04x} arg1={arg1:#04x} arg2={arg2:#010x}"),
+        D::Price { cmd, arg0, arg1 } => {
+            format!("price cmd={cmd:#04x} arg0={arg0:#010x} arg1={arg1:#010x}")
+        }
+        D::KeyInit {
+            suite,
+            eph_time,
+            confirm_time,
+        } => format!("keyinit suite={suite:#06x} eph={eph_time:#04x} confirm={confirm_time:#04x}"),
+        D::KeyMsg { cmd, len } => format!("keymsg cmd={cmd:#04x} len={len}"),
+        D::KeyTerminate {
+            status,
+            wait_s,
+            suite,
+        } => format!("keyterm status={status:#04x} wait={wait_s} suite={suite:#06x}"),
         D::Unknown { cmd } => format!("unknown cmd={cmd:#04x}"),
     }
 }
@@ -314,6 +636,32 @@ fn detail_json(d: &crate::tree::ZclDetail) -> String {
             format!("{{\"kind\":\"level\",\"cmd\":{cmd},\"arg0\":{arg0},\"arg1\":{arg1}}}")
         }
         D::IasZone { cmd } => format!("{{\"kind\":\"iaszone\",\"cmd\":{cmd}}}"),
+        D::Metering {
+            cmd,
+            arg0,
+            arg1,
+            arg2,
+        } => format!(
+            "{{\"kind\":\"metering\",\"cmd\":{cmd},\"arg0\":{arg0},\"arg1\":{arg1},\"arg2\":{arg2}}}"
+        ),
+        D::Price { cmd, arg0, arg1 } => {
+            format!("{{\"kind\":\"price\",\"cmd\":{cmd},\"arg0\":{arg0},\"arg1\":{arg1}}}")
+        }
+        D::KeyInit {
+            suite,
+            eph_time,
+            confirm_time,
+        } => format!(
+            "{{\"kind\":\"keyinit\",\"suite\":{suite},\"eph_time\":{eph_time},\"confirm_time\":{confirm_time}}}"
+        ),
+        D::KeyMsg { cmd, len } => format!("{{\"kind\":\"keymsg\",\"cmd\":{cmd},\"len\":{len}}}"),
+        D::KeyTerminate {
+            status,
+            wait_s,
+            suite,
+        } => format!(
+            "{{\"kind\":\"keyterm\",\"status\":{status},\"wait\":{wait_s},\"suite\":{suite}}}"
+        ),
         D::Unknown { cmd } => format!("{{\"kind\":\"unknown\",\"cmd\":{cmd}}}"),
     }
 }

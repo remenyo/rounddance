@@ -1052,3 +1052,27 @@ selector) for the updated vectors.
 | Requirement ID | State | Implementing code | Verifying test |
 |----------------|-------|-------------------|----------------|
 | 05-3474-23-4514-01 | implemented + verified | `classical.rs`: `KeyIdentifier::DataKey` (zero-length mode-0 shape) + `encoded_len` 0 + encode/decode arms consuming no octet (§4.5.1.4, anchor p0481-L11467-L11469; data-key identity §4.5.3, anchor p0481-L11490-L11497); `AuxHeader` doc (presence conditioned on the mode bits) | `security/tests/vectors.rs::vector_aux_mode0_no_trailing_octet_05_3474_23_4514_01` (5/13-octet mode-0 layouts + roundtrip, 6-octet mode-1 contrast, truncation + flag/shape-mismatch legs), updated `vector_aux_data_key` (exact 5-octet layout), updated `vector_aps_seal_shape_keyid_modes_05_3474_23_451_02` F leg (captured `06 00*4` decodes 5 octets, `a5` is payload), updated `vector_aux_level0_all_control_shapes`, `tests/roundtrip.rs::fuzz_aux_header_roundtrip` (mode-0 fuzz legs over the unit shape) |
+
+## Wave-44 traceability — Smart-Energy + key-establishment decode depth (`rounddance-inspect`)
+
+Offline engine growth only: no live drivers, no corpus writes, no keyed
+decryption and no CBKE crypto in the inspector — ephemeral points are
+length-gated but never decompressed, confirm tags length-gated but never
+verified, certificates never parsed, and no key material is retained or
+rendered. 4 repo-minted IDs (`RD-INSPECT-15..18`), MINTED-pending-confirm.
+Paraphrase only (D1).
+
+Prepayment (`0x0705`) and tunneling (`0x0704`) are out of scope with cause:
+`rounddance-zcl` carries no codecs for either cluster, so there is nothing
+to reuse; their payloads stay `Unknown` under the existing RD-INSPECT-09
+contract, no new ID minted. Lab captures exist only as a wave-41 beacon
+baseline (`~/hwscratch/w41/sniff_ch26baseline.txt.pcap`, no SE traffic), so
+goldens are repo-codec-built frames per the wave-40/41 precedent — no new
+captures were taken.
+
+| Requirement ID | State | Implementing code | Verifying test |
+|----------------|-------|-------------------|----------------|
+| RD-INSPECT-15 | implemented + verified | `zcl::summarize_metering` → `tree::ZclDetail::Metering`: GetProfile via `decode_get_profile` (channel/periods/end-time) + GetProfileResponse 7-octet prefix shape (status/count/newest end) + FastPollMode 2-octet / FastPoll response 5-octet shapes, direction-disambiguated; mirror/snapshot/sampling/supply/notification-scheme commands stay `Unknown` by design; `report` text/JSON gain the `metering` kind | `inspect/tests/se_decode.rs::se_metering_get_profile_req` (codec-built req, cluster/profile/direction asserts) + `se_metering_get_profile_rsp` (genuine `ProfileBuffer::answer` body) + `se_metering_fast_poll_shapes` + `se_metering_submodule_cmds_stay_unknown` (mirror/snapshot + truncated legs) |
+| RD-INSPECT-16 | implemented + verified | `zcl::summarize_price` → `tree::ZclDetail::Price`: PublishPrice / PriceAck / GetScheduledPrices / GetBlockPeriods via cluster codecs + GetCurrentPrice 1-octet options + tariff-id 4-octet requests + PublishBlockPeriod / PublishBlockThresholds / PublishTierLabels (bounded 4-entry scratch) shapes, direction-disambiguated (0x00 GetCurrentPrice vs PublishPrice); `report` text/JSON gain the `price` kind | `se_price_publish_and_ack` (codec-built publish + ack, direction asserts) + `se_price_requests_and_direction_split` + `se_price_block_and_tier_publishes` (incl. zero-total thresholds and bad-count tier-label Unknown legs) |
+| RD-INSPECT-17 | implemented + verified | `zcl::summarize_keyest` → `tree::ZclDetail::{KeyInit, KeyMsg, KeyTerminate}`: Initiate/Terminate via cluster codecs (either direction, identical shapes), ephemeral 33/64-octet length gate + confirm 16-octet length gate, decode-only; `report` text/JSON gain the `keyinit`/`keymsg`/`keyterm` kinds | `se_keyest_initiate_and_terminate` (codec-built bodies both directions + truncated legs) + `se_keyest_ephemeral_and_confirm_shapes` (both wire forms both directions, 14 wrong-length Unknown legs, unmodeled command) |
+| RD-INSPECT-18 | implemented + verified | `report::session_from_json` (hand-rolled fixed-schema parser, schema-version gate → `SessionLoadError::BadSchema`, typed `Malformed` for truncation/mistype/range/over-capacity) + `SessionEngine::restore` + `KeySlots::restore` (zeroed placeholder slots, rotation counter restarts at slot count, member caches restart empty); schema stays v1, round trip re-renders byte-identically | `se_session_save_load_roundtrip` (windows + PAN rows + orphan/decryptable + 2 key slots + IEEE row, byte-identical re-render, whitespace leg, empty engine) + `se_session_load_rejects` (version/missing/type/range/slots/overflow/trailing legs + every-truncation-prefix sweep + 33-device over-capacity) |

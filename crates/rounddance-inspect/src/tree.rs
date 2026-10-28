@@ -154,6 +154,80 @@ pub enum ZclDetail {
         /// Command identifier.
         cmd: u8,
     },
+    /// Smart-Energy Metering cluster (0x0702) command summary.
+    ///
+    /// Direction-disambiguated: `cmd` 0x00 is GetProfile
+    /// (client→server) or GetProfileResponse (server→client), 0x03
+    /// is RequestFastPollMode or its response. Anything else on
+    /// this cluster (mirror / snapshot / sampling / supply /
+    /// notification-scheme commands) stays `Unknown`.
+    Metering {
+        /// Command identifier.
+        cmd: u8,
+        /// GetProfile: interval channel; GetProfileResponse: status;
+        /// FastPoll request/response: period seconds; else 0.
+        arg0: u8,
+        /// GetProfile: requested period count; GetProfileResponse:
+        /// interval count; FastPoll request: duration minutes; else 0.
+        arg1: u8,
+        /// GetProfile: end-time anchor; GetProfileResponse: newest
+        /// interval end time; FastPoll response: fast-poll end time;
+        /// else 0.
+        arg2: u32,
+    },
+    /// Smart-Energy Price cluster (0x0700) command summary.
+    ///
+    /// Direction-disambiguated: `cmd` 0x00 is GetCurrentPrice
+    /// (client→server, 1-octet options) or PublishPrice
+    /// (server→client). Block-period (0x01), block-threshold (0x06),
+    /// and tier-label (0x08) publishes keep their issuer / start
+    /// fields; the matching client requests keep their start /
+    /// tariff fields.
+    Price {
+        /// Command identifier.
+        cmd: u8,
+        /// PublishPrice / PriceAck / PublishBlockPeriod /
+        /// PublishBlockThresholds / PublishTierLabels: issuer event
+        /// id; GetScheduledPrices / GetBlockPeriods: start time;
+        /// GetCurrentPrice: options; GetBlockThresholds /
+        /// GetTierLabels: tariff id; else 0.
+        arg0: u32,
+        /// PublishPrice: price; PriceAck: ack time;
+        /// PublishBlockPeriod / PublishBlockThresholds: start time;
+        /// PublishTierLabels: label count; GetScheduledPrices:
+        /// requested count; GetBlockPeriods: max events; else 0.
+        arg1: u32,
+    },
+    /// Key Establishment cluster (0x0800) Initiate summary, either
+    /// direction: the 52-octet suite negotiation body, validated
+    /// only (no crypto, no certificate parsing).
+    KeyInit {
+        /// Negotiated suite mask.
+        suite: u16,
+        /// Peer ephemeral-generation hint.
+        eph_time: u8,
+        /// Peer confirm-generation hint.
+        confirm_time: u8,
+    },
+    /// Key Establishment fixed-shape key-material flight, either
+    /// direction: ephemeral point (0x01, 33- or 64-octet form) or
+    /// confirm tag (0x02, 16 octets). Length-validated only; the
+    /// point is never decompressed and the tag never checked here.
+    KeyMsg {
+        /// Command identifier (0x01 ephemeral, 0x02 confirm).
+        cmd: u8,
+        /// Validated payload length.
+        len: u8,
+    },
+    /// Key Establishment Terminate summary, either direction.
+    KeyTerminate {
+        /// Terminate status (`TERM_*`).
+        status: u8,
+        /// Wait hint in seconds before retrying.
+        wait_s: u8,
+        /// Sender suite mask.
+        suite: u16,
+    },
     /// Anything else: unrecognized cluster or command.
     Unknown {
         /// Command identifier.

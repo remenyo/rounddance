@@ -83,4 +83,24 @@ impl KeySlots {
     pub fn has_key(&self) -> bool {
         self.slots.iter().any(|s| s.is_some())
     }
+
+    /// Rebuild slot state from a saved snapshot (see
+    /// [`crate::report::session_from_json`]): the first `loaded`
+    /// slots hold zeroed placeholder octets — never rendered, never
+    /// key material, only the loaded-slot count survives the JSON
+    /// snapshot — and the rotation counter restarts at `loads`.
+    #[must_use]
+    pub fn restore(loaded: usize, loads: u32) -> Self {
+        let n = loaded.min(MAX_NWK_KEYS);
+        let mut slots = [None; MAX_NWK_KEYS];
+        let mut i = 0;
+        while i < n {
+            slots[i] = Some(KeySlot {
+                key: [0u8; 16],
+                seq: i as u8,
+            });
+            i += 1;
+        }
+        Self { slots, loads }
+    }
 }
