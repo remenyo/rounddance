@@ -1698,6 +1698,44 @@ fn vector_join_unsecured_keywait_leg_and_edges() {
     assert_eq!(j.error(), Some(JoinError::NoTransport));
 }
 
+// 22-65816-030-56-04 (extended: joiner side of the time-box
+// eviction): an incoming NWK leave mid-join ends the attempt with
+// `JoinTimeout` — the "asked to leave" outcome — instead of polling
+// until the transport timeout. Observed on air as the coordinator's
+// per-poll eject unicast after the ~10 s grace
+// (`~/hwscratch/w39/sniff_b1.txt`, decoded by
+// `rounddance-nwk::decode_leave` as request-form).
+#[test]
+fn vector_join_leave_evicts_mid_join() {
+    let policy = JoinPolicy {
+        cbke_supported: false,
+        cbke_required: false,
+        interview_tc: false,
+        parent_is_r20_earlier: false,
+    };
+    // Authenticating leg: the eject ends the attempt at once.
+    let mut j = JoinerMachine::new(JoinMethod::PreconfiguredKey, policy);
+    j.on_candidate();
+    j.on_assoc_confirm(true);
+    assert_eq!(j.state(), JoinerState::Authenticating);
+    j.on_leave();
+    assert_eq!(j.state(), JoinerState::Failed);
+    assert_eq!(j.error(), Some(JoinError::JoinTimeout));
+    // KeyWait leg: same outcome after the exchange started.
+    let mut k = JoinerMachine::new(JoinMethod::PreconfiguredKey, policy);
+    k.on_candidate();
+    k.on_assoc_confirm(true);
+    k.on_key_transport(true);
+    assert_eq!(k.state(), JoinerState::KeyWait);
+    k.on_leave();
+    assert_eq!(k.state(), JoinerState::Failed);
+    assert_eq!(k.error(), Some(JoinError::JoinTimeout));
+    // A leave with nothing pending is a caller bug.
+    let mut early = JoinerMachine::new(JoinMethod::PreconfiguredKey, policy);
+    early.on_leave();
+    assert_eq!(early.error(), Some(JoinError::BadState));
+}
+
 // 22-65816-030-91-01: the field policy admits a strong link the old
 // absolute gate refused. Transcript replayed from the wave-27 bench
 // logs (`join_run5/6.log`): tail-LQI 10–11 with tail-RSSI −28 dBm on a

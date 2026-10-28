@@ -1,7 +1,8 @@
-//! NWK command frames: route request, route reply, link status.
+//! NWK command frames: route request, route reply, link status, leave.
 //!
-//! Bounded, fallible codecs for the three routing commands named by the
-//! R1 gap (doc `05-3474-23` R23.2 §3.4, command identifiers Table 3-54).
+//! Bounded, fallible codecs for the routing commands named by the R1
+//! gap plus the leave command (doc `05-3474-23` R23.2 §3.4, command
+//! identifiers Table 3-54).
 //! All wording here is paraphrase; citations name document, revision,
 //! and clause only (D1, `SCOPE.md` §2).
 //!
@@ -29,6 +30,9 @@ pub const CMD_ROUTE_REPLY: u8 = 0x02;
 /// Link-status command identifier (Table 3-54).
 pub const CMD_LINK_STATUS: u8 = 0x08;
 
+/// Leave command identifier (Table 3-54).
+pub const CMD_LEAVE: u8 = 0x04;
+
 /// Declared per-subsystem budget for link-status entries (D5: bounded +
 /// fallible + accountable, `SCOPE.md` §2).
 ///
@@ -55,7 +59,7 @@ pub enum Error {
     Truncated,
     /// Caller encode buffer too small for the frame.
     BufferTooSmall,
-    /// First payload octet is not one of the three routing commands
+    /// First payload octet is not one of the routing/leave commands
     /// implemented here.
     UnknownCommand(u8),
     /// Many-to-one value `3` (reserved, Table 3-55).
@@ -664,5 +668,100 @@ pub fn decode_link_status(buf: &[u8]) -> Result<DecodedLinkStatus, Error> {
         },
         entries,
         len: declared as u8,
+    })
+}
+
+/// Leave command options octet (§3.4.4.3.1, Figure 3-15): rejoin in
+/// bit 5, request in bit 6, remove-children in bit 7. Bits 0-4 are
+/// reserved: zeroed on encode, ignored on decode, matching the
+/// module convention.
+///
+/// Requirement `05-3474-23-344-01`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LeaveOptions {
+    /// Leaving device rejoins after leaving (§3.4.4.3.1.1).
+    pub rejoin: bool,
+    /// Frame orders another device to leave (§3.4.4.3.1.2).
+    pub request: bool,
+    /// Leaving device's children leave too (§3.4.4.3.1.3).
+    pub remove_children: bool,
+}
+
+impl LeaveOptions {
+    /// Pack into the options octet with the reserved bits zero.
+    #[must_use]
+    pub const fn to_u8(self) -> u8 {
+        ((self.rejoin as u8) << 5)
+            | ((self.request as u8) << 6)
+            | ((self.remove_children as u8) << 7)
+    }
+
+    /// Unpack; reserved bits pass unchecked (ignored per §1.4.2).
+    #[must_use]
+    pub const fn from_u8(raw: u8) -> Self {
+        Self {
+            rejoin: raw & (1 << 5) != 0,
+            request: raw & (1 << 6) != 0,
+            remove_children: raw & (1 << 7) != 0,
+        }
+    }
+}
+
+/// NWK leave command (§3.4.4, Figure 3-14): the command identifier
+/// plus the one-octet options field; no further payload.
+///
+/// Requirement `05-3474-23-344-01`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Leave {
+    /// Command options (rejoin/request/remove-children).
+    pub options: LeaveOptions,
+}
+
+impl Leave {
+    /// Encoded length including the command identifier octet.
+    pub const ENCODED_LEN: usize = 2;
+
+    /// Encoded length including the command identifier octet.
+    #[must_use]
+    pub const fn encoded_len(&self) -> usize {
+        Self::ENCODED_LEN
+    }
+
+    /// Encode into `out`; returns bytes written.
+    pub fn encode_into(&self, out: &mut [u8]) -> Result<usize, Error> {
+        if out.len() < Self::ENCODED_LEN {
+            return Err(Error::BufferTooSmall);
+        }
+        out[0] = CMD_LEAVE;
+        out[1] = self.options.to_u8();
+        Ok(Self::ENCODED_LEN)
+    }
+}
+
+/// Zero-copy decode view: owned body plus borrowed TLV tail.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DecodedLeave<'a> {
+    /// Parsed command body.
+    pub leave: Leave,
+    /// Trailing TLV area, preserved opaquely by forwarders.
+    pub tlvs: &'a [u8],
+}
+
+/// Decode one leave body from the front of `buf` (which must start
+/// at the command identifier octet).
+///
+/// Requirement `05-3474-23-344-01`.
+pub fn decode_leave(buf: &[u8]) -> Result<DecodedLeave<'_>, Error> {
+    if buf.is_empty() || buf[0] != CMD_LEAVE {
+        return Err(Error::UnknownCommand(buf.first().copied().unwrap_or(0)));
+    }
+    if buf.len() < Leave::ENCODED_LEN {
+        return Err(Error::Truncated);
+    }
+    Ok(DecodedLeave {
+        leave: Leave {
+            options: LeaveOptions::from_u8(buf[1]),
+        },
+        tlvs: &buf[Leave::ENCODED_LEN..],
     })
 }

@@ -420,6 +420,28 @@ impl JoinerMachine {
         }
     }
 
+    /// Report an incoming NWK leave received while joining: the parent
+    /// ejected this device (grace timer elapsed with no completed
+    /// exchange), so the attempt ends now instead of polling until the
+    /// transport timeout. Fails with [`JoinError::JoinTimeout`] — the
+    /// "asked to leave" outcome — from the post-association states
+    /// (`Authenticating`, `KeyWait`); [`JoinError::BadState`]
+    /// anywhere else. Rejoin routing after the failure stays with the
+    /// caller (see [`RejoinMachine`]).
+    ///
+    /// Requirement `22-65816-030-56-04` (extended: joiner side of the
+    /// time-box eviction).
+    pub fn on_leave(&mut self) {
+        if matches!(
+            self.state,
+            JoinerState::Authenticating | JoinerState::KeyWait
+        ) {
+            self.fail(JoinError::JoinTimeout);
+        } else {
+            self.fail(JoinError::BadState);
+        }
+    }
+
     fn fail(&mut self, err: JoinError) {
         self.state = JoinerState::Failed;
         self.error = Some(err);

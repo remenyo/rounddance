@@ -998,3 +998,26 @@ report decryptability, they do not decrypt). 6 repo-minted IDs
 | RD-INSPECT-12 | implemented + verified | `keys::KeySlots` (2 NWK slots, replace-by-seq, saturating loads) + engine secured/orphan-vs-decryptable counters; secured frames with a loaded slot count decryptable-offline, never decrypted; keys never rendered | `engine_key_slots_gate_decryptability` (genuine Ember U1: orphan 1 without key, decryptable 1 with lab key; rotation caps at 2 slots) |
 | RD-INSPECT-13 | implemented + verified | Stable session schema: `report::session_to_json` (schema `SESSION_SCHEMA = 1`, table-order arrays, null windows, key material never rendered) + `session_to_text`; tree JSON gains `cluster`/`profile`/`detail`, tree text gains cluster/profile/detail suffix | `session_schema_empty_engine_exact` (byte-exact empty snapshot) + `session_schema_one_tree_shape` (byte-exact one-tree snapshot) |
 | RD-INSPECT-14 | implemented + verified | Parser robustness: every truncation prefix yields a sub-tree or a typed `TreeError`; 3000-case deterministic mutation sweep + exhaustive 1-/2-byte `zcl::decode` sweep + constant fills; bounded engine tables throughout; typed errors only, no panics | `robustness_truncations_are_typed` + `robustness_mutation_sweep_no_panics` + `robustness_zcl_byte_sweep_typed` |
+
+## Wave-42 traceability — joiner backport (`rounddance-nwk`, `rounddance-commission`, `rounddance-security`)
+
+Audit of the wave-39 lane findings against the repo crates: the
+aux-level restore rule was already closed by wave-36, the
+counter-zero and seal-shape handling by the existing aux codec —
+those three get captured-air regression proofs under their existing
+rows, no code changes. Two genuine gaps were backported: the NWK
+leave command had no codec, and the join machine had no leave
+input (an ejected joiner polled until the transport timeout). 1
+repo-minted ID (`05-3474-23-344-01`), MINTED-pending-confirm.
+Wording in code/tests is paraphrase only, never spec text (D1).
+Reused corpus IDs where they cover behavior: `22-65816-030-56-04`
+(time-boxed join, extended to the joiner side),
+`05-3474-23-431-01` + `05-3474-23-4522-01` (level restore, proof
+only), `05-3474-23-451-01` + `05-3474-23-451-02` (aux shapes and
+key-identifier modes, proof only), `05-3474-23-4312-01` (replay
+guard, proof only).
+
+| Requirement ID | State | Implementing code | Verifying test |
+|----------------|-------|-------------------|----------------|
+| 05-3474-23-344-01 | implemented + verified | `commands.rs`: `Leave` + `LeaveOptions` (rejoin/request/remove-children bits 5/6/7, reserved bits zeroed on encode + ignored on decode) + `decode_leave` (TLV tail borrowed opaquely) + `CMD_LEAVE` 0x04 (§3.4.4 Figure 3-14, anchor p0304-L7185-L7189; options field Figure 3-15, anchor p0305-L7220-L7233) | `tests/vectors.rs::vector_leave_captured_eject_05_3474_23_344_01` (captured `04 60` eject plaintext), `vector_leave_options_and_edges_05_3474_23_344_01` + `tests/roundtrip.rs::fuzz_command_round_trip_identity`, `fuzz_command_mutations_never_panic` (leave legs) |
+| 22-65816-030-56-04 | implemented + verified (extended: joiner side of the time-box eviction) | `classical.rs`: `JoinerMachine::on_leave` (mid-join eject ends the attempt with `JoinError::JoinTimeout`; `BadState` with nothing pending; rejoin routing stays with the caller) (anchor p0033-L554-L561) | `tests/vectors.rs::vector_join_leave_evicts_mid_join` (Authenticating + KeyWait + wrong-state legs) |

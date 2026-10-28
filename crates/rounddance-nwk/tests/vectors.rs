@@ -6,14 +6,15 @@
 //! §3.2.1.1.3 — never copied from spec text (D1, `SCOPE.md` §2).
 
 use rounddance_nwk::{
-    add_path_cost, build_data_header, decode, decode_link_status, decode_route_reply,
-    decode_route_request, indication_for_local, is_broadcast_addr, radius_for_request, Decoded,
-    DecodedLinkStatus, DiscoverRoute, DiscoveryTable, FrameControl, FrameType, LinkStatus,
-    LinkStatusEntry, LinkStatusOptions, ManyToOne, NeighborCosts, NldeDataRequest, NldeError,
-    NwkError, NwkHeader, RouteReply, RouteReplyOptions, RouteRequest, RouteRequestOptions,
-    RouteTable, RoutingError, SeenRequests, SourceRoute, TxPipeline, BROADCAST_ALL_DEVICES,
-    BROADCAST_RESERVED_HIGH, BROADCAST_RESERVED_LOW, BROADCAST_ROUTERS, CMD_LINK_STATUS,
-    CMD_ROUTE_REPLY, CMD_ROUTE_REQUEST, ROUTE_LIFETIME_MS,
+    add_path_cost, build_data_header, decode, decode_leave, decode_link_status, decode_route_reply,
+    decode_route_request, indication_for_local, is_broadcast_addr, radius_for_request,
+    CommandError, Decoded, DecodedLeave, DecodedLinkStatus, DiscoverRoute, DiscoveryTable,
+    FrameControl, FrameType, Leave, LeaveOptions, LinkStatus, LinkStatusEntry, LinkStatusOptions,
+    ManyToOne, NeighborCosts, NldeDataRequest, NldeError, NwkError, NwkHeader, RouteReply,
+    RouteReplyOptions, RouteRequest, RouteRequestOptions, RouteTable, RoutingError, SeenRequests,
+    SourceRoute, TxPipeline, BROADCAST_ALL_DEVICES, BROADCAST_RESERVED_HIGH,
+    BROADCAST_RESERVED_LOW, BROADCAST_ROUTERS, CMD_LEAVE, CMD_LINK_STATUS, CMD_ROUTE_REPLY,
+    CMD_ROUTE_REQUEST, ROUTE_LIFETIME_MS,
 };
 
 // 05-3474-23-331-01: minimal data frame on the wire.
@@ -630,4 +631,85 @@ fn vector_link_cost_aging_05_3474_23_348_02() {
     // Aging drops the estimate; the count reports it.
     assert_eq!(links.tick(2_000 + 61_000), 1);
     assert_eq!(links.outgoing_to(0x0002, 2_000 + 61_001), None);
+}
+
+// 05-3474-23-344-01: leave command on the wire.
+//
+// Provenance: opened plaintext of genuine captured-air secured NWK
+// command frames — the lab coordinator's per-poll eject unicast
+// (`04 60`, `~/hwscratch/w39/sniff_b1.txt`, hundreds per run with
+// the first landing about 10 s after association) and the
+// wave-36 Ember U1 vector (the same two octets under the lab
+// network key). Per Figure 3-15 the options octet 0x60 names a
+// leave REQUEST with rejoin set and no remove-children.
+#[test]
+fn vector_leave_captured_eject_05_3474_23_344_01() {
+    assert_eq!(CMD_LEAVE, 0x04);
+    let wire: &[u8] = &[0x04, 0x60];
+    let DecodedLeave { leave, tlvs } = decode_leave(wire).unwrap();
+    assert_eq!(
+        leave.options,
+        LeaveOptions {
+            rejoin: true,
+            request: true,
+            remove_children: false,
+        }
+    );
+    assert!(tlvs.is_empty());
+    assert_eq!(leave.encoded_len(), 2);
+
+    let mut out = [0u8; 8];
+    let n = leave.encode_into(&mut out).unwrap();
+    assert_eq!(&out[..n], wire);
+}
+
+// 05-3474-23-344-01: options bit legs — reserved bits are ignored on
+// decode and zeroed on encode; short/foreign/empty inputs are
+// typed errors, never panics.
+#[test]
+fn vector_leave_options_and_edges_05_3474_23_344_01() {
+    // All-clear options round-trip as 0x00.
+    let plain = Leave {
+        options: LeaveOptions {
+            rejoin: false,
+            request: false,
+            remove_children: false,
+        },
+    };
+    let mut out = [0u8; 8];
+    let n = plain.encode_into(&mut out).unwrap();
+    assert_eq!(&out[..n], &[0x04, 0x00]);
+    // Reserved bits set on air are ignored, then zeroed on encode.
+    let DecodedLeave { leave, .. } = decode_leave(&[0x04, 0xFF]).unwrap();
+    assert_eq!(
+        leave.options,
+        LeaveOptions {
+            rejoin: true,
+            request: true,
+            remove_children: true,
+        }
+    );
+    let n = leave.encode_into(&mut out).unwrap();
+    assert_eq!(&out[..n], &[0x04, 0xE0]);
+    // Remove-children-only leg.
+    let DecodedLeave { leave, .. } = decode_leave(&[0x04, 0x80]).unwrap();
+    assert_eq!(
+        leave.options,
+        LeaveOptions {
+            rejoin: false,
+            request: false,
+            remove_children: true,
+        }
+    );
+
+    assert_eq!(decode_leave(&[]), Err(CommandError::UnknownCommand(0)));
+    assert_eq!(
+        decode_leave(&[0x08]),
+        Err(CommandError::UnknownCommand(0x08))
+    );
+    assert_eq!(decode_leave(&[0x04]), Err(CommandError::Truncated));
+    assert_eq!(
+        plain.encode_into(&mut out[..1]),
+        Err(CommandError::BufferTooSmall)
+    );
 }

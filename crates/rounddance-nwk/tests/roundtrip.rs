@@ -174,8 +174,8 @@ fn fuzz_nlde_built_headers_round_trip() {
 }
 
 use rounddance_nwk::{
-    LinkStatus, LinkStatusEntry, LinkStatusOptions, ManyToOne, RouteReply, RouteReplyOptions,
-    RouteRequest, RouteRequestOptions,
+    Leave, LeaveOptions, LinkStatus, LinkStatusEntry, LinkStatusOptions, ManyToOne, RouteReply,
+    RouteReplyOptions, RouteRequest, RouteRequestOptions,
 };
 
 /// Case budget for the command-codec fuzz (smaller frames, same stream
@@ -220,6 +220,16 @@ fn random_route_reply(rng: &mut Fuzz) -> RouteReply {
     }
 }
 
+fn random_leave(rng: &mut Fuzz) -> Leave {
+    Leave {
+        options: LeaveOptions {
+            rejoin: rng.below(2) == 0,
+            request: rng.below(2) == 0,
+            remove_children: rng.below(2) == 0,
+        },
+    }
+}
+
 fn random_link_status(rng: &mut Fuzz) -> LinkStatus {
     let n = rng.below(17) as usize;
     let mut entries = [LinkStatusEntry::new(0, 1, 0).unwrap(); 16];
@@ -245,16 +255,18 @@ fn random_link_status(rng: &mut Fuzz) -> LinkStatus {
 
 // Requirement traceability: `05-3474-23-341-01` (route request),
 // `05-3474-23-342-01` (route reply), `05-3474-23-348-01`
-// (link status): encode/decode round-trip identity over the full
-// option/presence cross-product, plus mutation/truncation rejection
-// without panics.
+// (link status), `05-3474-23-344-01` (leave): encode/decode
+// round-trip identity over the full option/presence cross-product,
+// plus mutation/truncation rejection without panics.
 #[test]
 fn fuzz_command_round_trip_identity() {
-    use rounddance_nwk::{decode_link_status, decode_route_reply, decode_route_request};
+    use rounddance_nwk::{
+        decode_leave, decode_link_status, decode_route_reply, decode_route_request,
+    };
     let mut rng = Fuzz(0x0ECA_F001);
     let mut buf = [0u8; 128];
     for _ in 0..CMD_CASES {
-        match rng.below(3) {
+        match rng.below(4) {
             0 => {
                 let req = random_route_request(&mut rng);
                 let n = req.encode_into(&mut buf).unwrap();
@@ -269,6 +281,14 @@ fn fuzz_command_round_trip_identity() {
                 assert_eq!(n, rep.encoded_len());
                 let decoded = decode_route_reply(&buf[..n]).unwrap();
                 assert_eq!(decoded.reply, rep, "rrep round-trip identity");
+                assert!(decoded.tlvs.is_empty());
+            }
+            2 => {
+                let leave = random_leave(&mut rng);
+                let n = leave.encode_into(&mut buf).unwrap();
+                assert_eq!(n, leave.encoded_len());
+                let decoded = decode_leave(&buf[..n]).unwrap();
+                assert_eq!(decoded.leave, leave, "leave round-trip identity");
                 assert!(decoded.tlvs.is_empty());
             }
             _ => {
@@ -286,16 +306,18 @@ fn fuzz_command_round_trip_identity() {
 #[test]
 fn fuzz_command_mutations_never_panic() {
     use rounddance_nwk::{
-        decode_link_status, decode_route_reply, decode_route_request, LinkStatus, LinkStatusOptions,
+        decode_leave, decode_link_status, decode_route_reply, decode_route_request, LinkStatus,
+        LinkStatusOptions,
     };
     let mut rng = Fuzz(0xC04D_40C4);
     let mut buf = [0u8; 128];
     for _ in 0..CMD_CASES {
-        let n = match rng.below(3) {
+        let n = match rng.below(4) {
             0 => random_route_request(&mut rng)
                 .encode_into(&mut buf)
                 .unwrap(),
             1 => random_route_reply(&mut rng).encode_into(&mut buf).unwrap(),
+            2 => random_leave(&mut rng).encode_into(&mut buf).unwrap(),
             _ => random_link_status(&mut rng).encode_into(&mut buf).unwrap(),
         };
         let at = rng.below(n as u64) as usize;
@@ -308,6 +330,7 @@ fn fuzz_command_mutations_never_panic() {
             let _ = decode_route_request(frame);
             let _ = decode_route_reply(frame);
             let _ = decode_link_status(frame);
+            let _ = decode_leave(frame);
         }
         // Empty input always fails fallibly.
         assert!(decode_route_request(&[]).is_err());
