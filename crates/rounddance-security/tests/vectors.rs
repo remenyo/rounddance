@@ -483,3 +483,337 @@ fn vector_aux_level0_all_control_shapes() {
     assert_eq!(used, 6);
     assert_eq!(AuxReception::decode(&[]), Err(SecError::Truncated));
 }
+
+// Wave-36 NWK decrypt-gap vectors (new behavior `05-3474-23-431-01`
+// + `05-3474-23-4522-01`).
+//
+// Provenance: genuine over-the-air Ember frames captured from the
+// lab MG21 coordinator (PAN 0xB21D, channel 25) during formation
+// traffic, with the lab network key captured alongside. U1 is a
+// secured NWK command unicast (dst 0x021d, NWK seq 0x44); B1 is a
+// secured NWK command broadcast (dst 0xfffc routers, NWK seq 0x3d).
+// Both carry the on-air zeroed level octet 0x28 (network key,
+// extended nonce): the wave-33 off-repo scripts fed 0x28 into the
+// nonce/AAD and every open failed, which is the (b)-class gap this
+// closes — receivers must restore the network-base level (5) first.
+//
+// The embedded key is the retired lab-capture key for PAN 0xB21D
+// only; it pins this interop vector and must never ship as a
+// default or test key elsewhere.
+const EMBER_LAB_KEY: [u8; 16] = [
+    0x86, 0x8e, 0x5c, 0xd4, 0x56, 0x98, 0x93, 0x1d, 0xf4, 0x95, 0xec, 0x8c, 0x66, 0x95, 0x70, 0xab,
+];
+const EMBER_U1: [u8; 45] = [
+    0x61, 0x88, 0x60, 0x1d, 0xb2, 0x1d, 0x02, 0x00, 0x00, 0x09, 0x12, 0x1d, 0x02, 0x00, 0x00, 0x01,
+    0x44, 0x5f, 0x75, 0xf4, 0xfe, 0xff, 0xe5, 0xe3, 0x04, 0x28, 0x04, 0x40, 0x00, 0x00, 0x5f, 0x75,
+    0xf4, 0xfe, 0xff, 0xe5, 0xe3, 0x04, 0x00, 0x00, 0xab, 0x53, 0x68, 0xca, 0xee,
+];
+const EMBER_B1: [u8; 45] = [
+    0x41, 0x88, 0x48, 0x1d, 0xb2, 0xff, 0xff, 0x00, 0x00, 0x09, 0x12, 0xfc, 0xff, 0x00, 0x00, 0x01,
+    0x3d, 0x5f, 0x75, 0xf4, 0xfe, 0xff, 0xe5, 0xe3, 0x04, 0x28, 0x00, 0x40, 0x00, 0x00, 0x5f, 0x75,
+    0xf4, 0xfe, 0xff, 0xe5, 0xe3, 0x04, 0x00, 0xd9, 0x4f, 0xa2, 0xf7, 0x42, 0x4b,
+];
+
+fn ember_parts(frame: &[u8; 45]) -> (&[u8], &[u8], &[u8]) {
+    (&frame[9..25], &frame[25..39], &frame[39..])
+}
+
+/// Test-local CCM\* open (MIC-32, 2-octet length field) over the
+/// crate block cipher. Production keeps payload crypto in the radio
+/// assist; this helper only lets the interop vector prove the
+/// nonce/AAD construction end to end.
+fn ccm_star_open(key: &[u8; 16], nonce13: &[u8; 13], aad: &[u8], ct_tag: &[u8]) -> Option<Vec<u8>> {
+    if ct_tag.len() < 4 {
+        return None;
+    }
+    let (ct, tag) = ct_tag.split_at(ct_tag.len() - 4);
+    let keystream = |ctr: u32| -> [u8; 16] {
+        let mut blk = [0u8; 16];
+        blk[0] = 0x01;
+        blk[1..14].copy_from_slice(nonce13);
+        blk[14..16].copy_from_slice(&(ctr as u16).to_be_bytes());
+        encrypt_block_aes128(key, &blk)
+    };
+    let mut pt = vec![0u8; ct.len()];
+    for (i, chunk) in ct.chunks(16).enumerate() {
+        let ks = keystream(1 + i as u32);
+        for (j, b) in chunk.iter().enumerate() {
+            pt[i * 16 + j] = b ^ ks[j];
+        }
+    }
+    // CBC-MAC over: B0 (flags M=4 L=2, nonce, message length) then
+    // length-prefixed AAD and the candidate plaintext, each padded
+    // separately to the block edge.
+    let mut b0 = [0u8; 16];
+    b0[0] = 0x40 | 0x08 | 0x01;
+    b0[1..14].copy_from_slice(nonce13);
+    b0[14..16].copy_from_slice(&(pt.len() as u16).to_be_bytes());
+    let mut mac_in = Vec::new();
+    if !aad.is_empty() {
+        mac_in.extend_from_slice(&(aad.len() as u16).to_be_bytes());
+        mac_in.extend_from_slice(aad);
+        while mac_in.len() % 16 != 0 {
+            mac_in.push(0);
+        }
+    }
+    mac_in.extend_from_slice(&pt);
+    while mac_in.len() % 16 != 0 {
+        mac_in.push(0);
+    }
+    let mut x = encrypt_block_aes128(key, &b0);
+    for blk in mac_in.chunks(16) {
+        let mut mix = [0u8; 16];
+        for (i, b) in blk.iter().enumerate() {
+            mix[i] = x[i] ^ b;
+        }
+        x = encrypt_block_aes128(key, &mix);
+    }
+    let s0 = keystream(0);
+    let mut expect = [0u8; 4];
+    for (i, e) in expect.iter_mut().enumerate() {
+        *e = x[i] ^ s0[i];
+    }
+    if expect == tag {
+        Some(pt)
+    } else {
+        None
+    }
+}
+
+/// Test-local CCM\* seal, mirror of [`ccm_star_open`]: only feeds the
+/// positive roundtrip leg below.
+fn ccm_star_seal(key: &[u8; 16], nonce13: &[u8; 13], aad: &[u8], pt: &[u8]) -> Vec<u8> {
+    let keystream = |ctr: u32| -> [u8; 16] {
+        let mut blk = [0u8; 16];
+        blk[0] = 0x01;
+        blk[1..14].copy_from_slice(nonce13);
+        blk[14..16].copy_from_slice(&(ctr as u16).to_be_bytes());
+        encrypt_block_aes128(key, &blk)
+    };
+    let mut ct = vec![0u8; pt.len()];
+    for (i, chunk) in pt.chunks(16).enumerate() {
+        let ks = keystream(1 + i as u32);
+        for (j, b) in chunk.iter().enumerate() {
+            ct[i * 16 + j] = b ^ ks[j];
+        }
+    }
+    let mut b0 = [0u8; 16];
+    b0[0] = 0x40 | 0x08 | 0x01;
+    b0[1..14].copy_from_slice(nonce13);
+    b0[14..16].copy_from_slice(&(pt.len() as u16).to_be_bytes());
+    let mut mac_in = Vec::new();
+    if !aad.is_empty() {
+        mac_in.extend_from_slice(&(aad.len() as u16).to_be_bytes());
+        mac_in.extend_from_slice(aad);
+        while mac_in.len() % 16 != 0 {
+            mac_in.push(0);
+        }
+    }
+    mac_in.extend_from_slice(pt);
+    while mac_in.len() % 16 != 0 {
+        mac_in.push(0);
+    }
+    let mut x = encrypt_block_aes128(key, &b0);
+    for blk in mac_in.chunks(16) {
+        let mut mix = [0u8; 16];
+        for (i, b) in blk.iter().enumerate() {
+            mix[i] = x[i] ^ b;
+        }
+        x = encrypt_block_aes128(key, &mix);
+    }
+    let s0 = keystream(0);
+    for i in 0..4 {
+        ct.push(x[i] ^ s0[i]);
+    }
+    ct
+}
+
+/// Restored aux header octets for AAD: the on-air aux with the
+/// network-base level written back into the control octet.
+fn restored_aux(aux: &[u8], level: u8, header: &AuxHeader) -> Vec<u8> {
+    let mut out = aux.to_vec();
+    out[0] = header.control.as_octet();
+    assert_eq!(header.control.level, level);
+    out
+}
+
+// 05-3474-23-431-01 + 05-3474-23-4522-01: the genuine Ember frames
+// open with the lab network key once the zeroed on-air level is
+// restored to the network-base level 5. Raw decode still sees the
+// on-air level 0 (the wave-33 trap); `decode_with_level` + the
+// 13-octet nonce builder close it.
+#[test]
+fn vector_nwk_ember_zeroed_level_opens() {
+    let keys = KeySet::new(NetworkKey::new(EMBER_LAB_KEY, 0));
+    for (frame, ctr, plain) in [
+        (&EMBER_U1, 0x0000_4004u32, [0x04u8, 0x60]),
+        (&EMBER_B1, 0x0000_4000u32, [0x08u8, 0x60]),
+    ] {
+        let (nwk, aux, ct) = ember_parts(frame);
+        // On-air control 0x28 parses raw as level 0: level-routed
+        // reception would file this as plaintext. That misroute is
+        // exactly the gap; NWK must restore instead.
+        let (raw, _) = AuxHeader::decode(aux).unwrap();
+        assert_eq!(raw.control.level, 0);
+        let (rx, used) = AuxReception::decode(aux).unwrap();
+        assert!(rx.is_plaintext());
+        assert_eq!(used, 1);
+
+        let (header, used) = AuxHeader::decode_with_level(aux, 5).unwrap();
+        assert_eq!(used, 14);
+        assert_eq!(header.control.as_octet(), 0x2d);
+        assert_eq!(header.frame_counter, ctr);
+        assert_eq!(
+            header.ext_source,
+            Some([0x5f, 0x75, 0xf4, 0xfe, 0xff, 0xe5, 0xe3, 0x04])
+        );
+        // NWK names the network key: one trailing octet, the key
+        // sequence number, which resolves against the key set.
+        let seq = match header.key_id {
+            KeyIdentifier::Seq(s) | KeyIdentifier::Index(s) => s,
+            _ => panic!("NWK names a one-octet network key"),
+        };
+        assert_eq!(seq, 0);
+        assert!(keys.select(seq).is_some());
+
+        let nonce = NwkNonce::from_header(&header).unwrap();
+        let mut expect_nonce = [0u8; 13];
+        expect_nonce[..8].copy_from_slice(&[0x5f, 0x75, 0xf4, 0xfe, 0xff, 0xe5, 0xe3, 0x04]);
+        expect_nonce[8..12].copy_from_slice(&ctr.to_le_bytes());
+        expect_nonce[12] = 0x2d;
+        assert_eq!(nonce.bytes, expect_nonce);
+
+        let aad = [nwk, &restored_aux(aux, 5, &header)[..]].concat();
+        assert_eq!(aad.len(), 30);
+        let pt = ccm_star_open(&EMBER_LAB_KEY, &nonce.bytes, &aad, ct);
+        assert_eq!(pt, Some(plain.to_vec()));
+    }
+}
+
+// 05-3474-23-431-01 + 05-3474-23-4522-01 (fuzz leg): the genuine U1
+// open is brittle in exactly the right way — every wrong level,
+// counter knock, sender flip, key flip, and every single-octet
+// mutation of nonce/AAD/ciphertext fails authentication.
+#[test]
+fn fuzz_nwk_ember_open_rejects_mutations() {
+    let (nwk, aux, ct) = ember_parts(&EMBER_U1);
+    let (header, _) = AuxHeader::decode_with_level(aux, 5).unwrap();
+    let nonce = NwkNonce::from_header(&header).unwrap();
+    let aad = [nwk, &restored_aux(aux, 5, &header)[..]].concat();
+    let good = ccm_star_open(&EMBER_LAB_KEY, &nonce.bytes, &aad, ct);
+    assert!(good.is_some());
+
+    // Wrong network-base level: the restored control differs, so the
+    // nonce and AAD both miss.
+    for level in [0u8, 1, 2, 3, 4, 6, 7] {
+        let (bad_h, _) = AuxHeader::decode_with_level(aux, level).unwrap();
+        let bad_n = NwkNonce::from_header(&bad_h).unwrap();
+        let bad_aad = [nwk, &restored_aux(aux, level, &bad_h)[..]].concat();
+        assert!(
+            ccm_star_open(&EMBER_LAB_KEY, &bad_n.bytes, &bad_aad, ct).is_none(),
+            "level {level} must not open"
+        );
+    }
+    assert_eq!(
+        AuxHeader::decode_with_level(aux, 8),
+        Err(SecError::BadKeyIdMode)
+    );
+
+    // Counter knock either side of the true value.
+    for ctr in [0x0000_4003u32, 0x0000_4005u32, 0, u32::MAX] {
+        let mut h = header;
+        h.frame_counter = ctr;
+        let n = NwkNonce::from_header(&h).unwrap();
+        assert!(
+            ccm_star_open(&EMBER_LAB_KEY, &n.bytes, &aad, ct).is_none(),
+            "counter {ctr:#x} must not open"
+        );
+    }
+
+    // Flipped sender, flipped key, truncated tag.
+    let mut h = header;
+    h.ext_source = Some([0x60, 0x75, 0xf4, 0xfe, 0xff, 0xe5, 0xe3, 0x04]);
+    let n = NwkNonce::from_header(&h).unwrap();
+    assert!(ccm_star_open(&EMBER_LAB_KEY, &n.bytes, &aad, ct).is_none());
+    let mut bad_key = EMBER_LAB_KEY;
+    bad_key[0] ^= 0x01;
+    assert!(ccm_star_open(&bad_key, &nonce.bytes, &aad, ct).is_none());
+    assert!(ccm_star_open(&EMBER_LAB_KEY, &nonce.bytes, &aad, &ct[..3]).is_none());
+
+    // Exhaustive single-octet mutations of nonce, AAD, ciphertext:
+    // every octet position times every nonzero delta.
+    let mut mutated = 0u32;
+    for (base, len, which) in [
+        (nonce.bytes.to_vec(), 13usize, 0u8),
+        (aad.clone(), aad.len(), 1u8),
+        (ct.to_vec(), ct.len(), 2u8),
+    ] {
+        for i in 0..len {
+            for delta in 1..=255u8 {
+                let (nn, aa, cc) = match which {
+                    0 => {
+                        let mut v = base.clone();
+                        v[i] ^= delta;
+                        let mut n13 = [0u8; 13];
+                        n13.copy_from_slice(&v);
+                        (n13, aad.clone(), ct.to_vec())
+                    }
+                    1 => {
+                        let mut v = base.clone();
+                        v[i] ^= delta;
+                        (nonce.bytes, v, ct.to_vec())
+                    }
+                    _ => {
+                        let mut v = base.clone();
+                        v[i] ^= delta;
+                        (nonce.bytes, aad.clone(), v)
+                    }
+                };
+                assert!(
+                    ccm_star_open(&EMBER_LAB_KEY, &nn, &aa, &cc).is_none(),
+                    "mutation {which}:{i}:{delta:#x} must not open"
+                );
+                mutated += 1;
+            }
+        }
+    }
+    assert_eq!(mutated, (13 + 30 + 6) * 255);
+}
+
+// 05-3474-23-4522-01: the production nonce builder stays
+// self-consistent across counters/senders through a seal/open
+// roundtrip (the genuine-frame test above is the independent oracle;
+// this leg pins the plumbing over varied inputs).
+#[test]
+fn vector_nwk_nonce_roundtrip_seal_open() {
+    let key = [0x42u8; 16];
+    let aad = [0x09u8, 0x12, 0x1d, 0x02];
+    for ctr in [0u32, 1, 0x0000_4004, u32::MAX - 1] {
+        for sender in [[0x5fu8, 0x75, 0xf4, 0xfe, 0xff, 0xe5, 0xe3, 0x04], [0u8; 8]] {
+            let header = AuxHeader {
+                control: SecurityControl::new(5, KeyIdMode::Index, true).unwrap(),
+                frame_counter: ctr,
+                ext_source: Some(sender),
+                key_id: KeyIdentifier::Index(0x02),
+            };
+            let nonce = NwkNonce::from_header(&header).unwrap();
+            assert_eq!(&nonce.bytes[..8], &sender);
+            assert_eq!(&nonce.bytes[8..12], &ctr.to_le_bytes());
+            assert_eq!(nonce.bytes[12], header.control.as_octet());
+            let pt = [0x04u8, 0x60];
+            let sealed = ccm_star_seal(&key, &nonce.bytes, &aad, &pt);
+            assert_eq!(
+                ccm_star_open(&key, &nonce.bytes, &aad, &sealed),
+                Some(pt.to_vec())
+            );
+        }
+    }
+    // No extended source: no nonce to build.
+    let nosrc = AuxHeader {
+        control: SecurityControl::new(5, KeyIdMode::DataKey, false).unwrap(),
+        frame_counter: 1,
+        ext_source: None,
+        key_id: KeyIdentifier::Seq(0),
+    };
+    assert_eq!(NwkNonce::from_header(&nosrc), Err(SecError::Truncated));
+}

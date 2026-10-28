@@ -933,3 +933,29 @@ refusal, never a silent downgrade.
 | RD-PRO-02 | implemented + verified | `profile::PRO_STACK_PROFILE` 0x02 + `negotiate::admit_pro_stack_profile` (anchors: `05-3474-23-3615-01` discovery filter) | `compat/tests/vectors.rs::vector_pro_stack_profile_gate` |
 | RD-PRO-03 | implemented + verified | refusal matrix in `admit_pro_peer` (`UnsupportedStackProfile`, `JoiningClosed`, plus reused `UnsupportedNwkVersion` / `NoCommonKeyMethod` / `SecurityDowngradeRefused`); closed networks refused before any key decision | `compat/tests/vectors.rs::vector_pro_peer_refusal_matrix`, `rounddance-sim/tests/pro_best_effort.rs::pro_closed_network_never_joins` |
 | RD-PRO-04 | implemented + verified | version-gate extension: shared version-2 recognition (`admit_nwk_version`) explicitly covers PRO beacons via the `admit_pro_peer` bundle; `profile::StackProfile::Pro` + `CompatPeer::profile_pro` (symmetric-only, baseline level) | `compat/tests/vectors.rs::vector_pro_peer_accepted` (accept leg pins the shared version) |
+
+## Wave-36 traceability — Ember NWK decrypt-gap closure (`rounddance-security`)
+
+Root-causes the (b)-class interop blocker from wave-33 forensics
+(`~/hwscratch/mg21form/nwk_decrypt.log`, `nwk_decrypt2.log`): offline
+CCM\* opens of genuine Ember NWK frames failed because the scripts
+fed the on-air auxiliary control octet (level bits zeroed by the
+sender after protection) into the nonce and authenticated bytes.
+The receiver must restore the network-base level into the control
+octet first, then build the 13-octet nonce and authenticate
+NwkHeader plus the restored auxiliary header. Proven by two
+captured-air Ember frames (MG21, channel 25, PAN 0xB21D) opening
+with the lab network key once restoration is applied.
+2 repo-minted IDs (`05-3474-23-431-01`, `05-3474-23-4522-01`),
+MINTED-pending-confirm. Wording in code/tests is paraphrase only,
+never spec text (D1). Reused corpus IDs where they cover behavior:
+`05-3474-23-4312-01` (replay guard still owns counter validation),
+`05-3474-23-451-01` (aux codec shapes + the new `as_octet`
+serializer), `05-3474-23-B11-01` (test-local opens ride the pinned
+AES-128 block cipher; production payload crypto stays a radio/HAL
+assist per the wave-2b contract).
+
+| Requirement ID | State | Implementing code | Verifying test |
+|----------------|-------|-------------------|----------------|
+| 05-3474-23-431-01 | implemented + verified | `SecurityControl::with_level` (incoming level restore) + `AuxHeader::decode_with_level` (zeroed-level NWK decode; trailing octet under network-key bits is the key sequence number) + `AuxReception::decode` doc pointer (§4.3.1.1 outgoing step 8, anchor p0422-L10154; §4.3.1.2 incoming step 1, anchor p0422-L10159-L10160; sequence-number field §4.5.1.4, anchor p0481-L11467-L11469) | `security/tests/vectors.rs::vector_nwk_ember_zeroed_level_opens` (genuine Ember U1/B1 frames: raw decode sees level 0 = the wave-33 trap, restored decode opens both) + `fuzz_nwk_ember_open_rejects_mutations` (7 wrong levels refused) |
+| 05-3474-23-4522-01 | implemented + verified | `NwkNonce::from_header` (13-octet source + counter + control order) + `NWK_NONCE_LEN` (§4.5.2.2, anchor p0481-L11480-L11488) | `security/tests/vectors.rs::vector_nwk_ember_zeroed_level_opens` (pinned nonce bytes per frame) + `vector_nwk_nonce_roundtrip_seal_open` (counter/sender sweep) + `fuzz_nwk_ember_open_rejects_mutations` (12495-case nonce/AAD/ciphertext mutation matrix all refused) |

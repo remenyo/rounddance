@@ -545,8 +545,42 @@ impl SecurityControl {
         })
     }
 
+    /// Return this control octet with the level sub-field replaced by
+    /// `level`; the key-identifier and extended-nonce sub-fields carry
+    /// over. `None` when `level` exceeds 3 bits.
+    ///
+    /// Incoming-NWK helper: the sender zeroes the on-air level bits
+    /// after protecting the frame, so the receiver restores the level
+    /// from its own network base before any nonce or integrity work.
+    ///
+    /// Requirement `05-3474-23-431-01` (§4.3.1.2 incoming step 1,
+    /// anchor p0422-L10159-L10160; on-air zeroing §4.3.1.1 outgoing
+    /// step 8, anchor p0422-L10154).
+    #[must_use]
+    pub const fn with_level(&self, level: u8) -> Option<Self> {
+        if level > 0x07 {
+            return None;
+        }
+        Some(Self {
+            level,
+            key_id: self.key_id,
+            extended_nonce: self.extended_nonce,
+        })
+    }
+
     const fn encode(self) -> u8 {
         self.level | ((self.key_id as u8) << 3) | ((self.extended_nonce as u8) << 5)
+    }
+
+    /// Wire octet: level sub-field, key-identifier sub-field, and
+    /// extended-nonce sub-field packed per the control format.
+    /// Callers rebuilding authenticated bytes (nonce, AAD) use this to
+    /// serialize a restored control octet.
+    ///
+    /// Requirement `05-3474-23-451-01`.
+    #[must_use]
+    pub const fn as_octet(self) -> u8 {
+        self.encode()
     }
 
     const fn decode(byte: u8) -> Self {
@@ -641,6 +675,13 @@ impl AuxHeader {
     /// [`AuxReception::decode`] instead, which routes it to
     /// [`AuxReception::Plaintext`] rather than misreading payload
     /// octets as a counter.
+    ///
+    /// Note: a secured NWK frame arrives with the level bits zeroed
+    /// (the sender clears them after protecting the frame), so its
+    /// on-air control parses here with `level == 0`. NWK receivers
+    /// must use [`AuxHeader::decode_with_level`] — never this raw
+    /// decode nor the level-routed [`AuxReception::decode`] — so the
+    /// network-base level is restored before nonce or integrity work.
     pub fn decode(buf: &[u8]) -> Result<(Self, usize), SecError> {
         if buf.len() < 5 {
             return Err(SecError::Truncated);
@@ -707,6 +748,39 @@ impl AuxHeader {
             pos,
         ))
     }
+
+    /// Decode a secured NWK auxiliary header whose on-air level bits
+    /// are zeroed, restoring `level` (taken from the receiver network
+    /// base) into the control octet before returning.
+    ///
+    /// The key-identifier bits and trailing octets pass through
+    /// untouched: NWK names a network key (bits `01`, one trailing
+    /// octet), and that trailing octet IS the key sequence number
+    /// even though the variant keeps its codec name. Longer key
+    /// identifier shapes pass through for the caller to refuse (they
+    /// are not NWK shapes).
+    ///
+    /// Errors when `level` exceeds 3 bits, when the input is
+    /// truncated, or when the restored shape disagrees with the
+    /// control flags.
+    ///
+    /// Requirement `05-3474-23-431-01` (§4.3.1.2 incoming step 1,
+    /// anchor p0422-L10159-L10160; sequence-number field §4.5.1.4,
+    /// anchor p0481-L11467-L11469).
+    pub fn decode_with_level(buf: &[u8], level: u8) -> Result<(Self, usize), SecError> {
+        if level > 0x07 {
+            return Err(SecError::BadKeyIdMode);
+        }
+        let (mut header, used) = Self::decode(buf)?;
+        header.control = header
+            .control
+            .with_level(level)
+            .ok_or(SecError::BadKeyIdMode)?;
+        if header.header_len().is_none() {
+            return Err(SecError::BadKeyIdMode);
+        }
+        Ok((header, used))
+    }
 }
 
 /// Security level meaning "no protection": no counter, no key
@@ -745,6 +819,11 @@ impl AuxReception {
     /// the reception plus octets consumed (1 for level 0, the full
     /// header length otherwise). Empty input is [`SecError::Truncated`].
     ///
+    /// Level routing only fits layers that mark plaintext with a true
+    /// level-0 control octet. NWK frames carry the level zeroed even
+    /// when secured, so NWK receivers must use
+    /// [`AuxHeader::decode_with_level`] instead of this router.
+    ///
     /// Requirement `05-3474-23-451-01`.
     pub fn decode(buf: &[u8]) -> Result<(Self, usize), SecError> {
         let first = buf.first().ok_or(SecError::Truncated)?;
@@ -772,6 +851,45 @@ impl AuxReception {
             Self::Secured(h) => h.control,
             Self::Plaintext { control } => control,
         }
+    }
+}
+
+/// Length of the NWK/CCM nonce in octets.
+///
+/// Requirement `05-3474-23-4522-01`.
+pub const NWK_NONCE_LEN: usize = 13;
+
+/// Thirteen-octet nonce for NWK frame protection: the extended source
+/// address (8 octets, as on air), the frame counter (4 octets, as on
+/// air, least-significant first), then the control octet (1 octet,
+/// with the receiver-restored level for incoming frames).
+///
+/// Requirement `05-3474-23-4522-01` (nonce sub-field order and length,
+/// anchor p0481-L11480-L11488).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NwkNonce {
+    /// Nonce octets in protection order.
+    pub bytes: [u8; NWK_NONCE_LEN],
+}
+
+impl NwkNonce {
+    /// Build the nonce from a decoded auxiliary header. The header
+    /// must carry the effective control octet (incoming NWK frames:
+    /// decode with [`AuxHeader::decode_with_level`] first so the
+    /// zeroed on-air level bits are restored) and an extended source
+    /// address (NWK always carries one); otherwise
+    /// [`SecError::Truncated`] (no source to bind) is returned.
+    ///
+    /// Requirement `05-3474-23-4522-01`.
+    pub fn from_header(header: &AuxHeader) -> Result<Self, SecError> {
+        let src = header.ext_source.ok_or(SecError::Truncated)?;
+        let counter = header.frame_counter.to_le_bytes();
+        let control = header.control.encode();
+        let mut bytes = [0u8; NWK_NONCE_LEN];
+        bytes[..8].copy_from_slice(&src);
+        bytes[8..12].copy_from_slice(&counter);
+        bytes[12] = control;
+        Ok(Self { bytes })
     }
 }
 
