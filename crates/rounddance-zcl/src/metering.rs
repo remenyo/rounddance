@@ -16,15 +16,17 @@
 //! mirror-table state, the mirror setup commands, the
 //! take/get-snapshot commands, and the schedule/sampling/supply
 //! commands live in their modules; this file wires them into the
-//! server behavior. Only the notification-scheme machinery
-//! (`ConfigureMirror` et al.) and non-TOU publish shapes stay
-//! bounded-opaque follow-up, never silent scope.
+//! server behavior. The notification-scheme machinery lives in
+//! `notify` (codecs + engines) with the meter-side emitters below;
+//! only non-TOU publish shapes stay bounded-opaque follow-up, never
+//! silent scope.
 
 use crate::attrs::{access, AttrDef, AttrStore, ATTR_CLUSTER_REVISION};
 use crate::behavior::{AppEvent, Behavior, Ctx, EventQueue, HandleOutcome};
 use crate::cluster::{ClusterDef, ClusterRole, CmdDef};
 use crate::frame::Header;
 use crate::mirror::{self, MirrorClient};
+use crate::notify::{self, BomdNotify};
 use crate::sampling::{self, SampleEngine};
 use crate::schedule::{self, ScheduleAssembler, ScheduleTable};
 use crate::snapshot::{self, SnapshotStore};
@@ -271,6 +273,22 @@ pub static SERVER_TX: &[CmdDef] = &[
     CmdDef {
         id: sampling::CMD_GET_SAMPLED_DATA_RESPONSE,
         name: "get-sampled-data-response",
+    },
+    CmdDef {
+        id: notify::CMD_CONFIGURE_MIRROR,
+        name: "configure-mirror",
+    },
+    CmdDef {
+        id: notify::CMD_CONFIGURE_SCHEME,
+        name: "configure-notification-scheme",
+    },
+    CmdDef {
+        id: notify::CMD_CONFIGURE_FLAG,
+        name: "configure-notification-flag",
+    },
+    CmdDef {
+        id: notify::CMD_GET_NOTIFIED_MESSAGE,
+        name: "get-notified-message",
     },
     CmdDef {
         id: supply::CMD_SUPPLY_STATUS_RESPONSE,
@@ -544,6 +562,7 @@ pub struct ServerBehavior {
     profile: ProfileBuffer,
     fast_poll_until_s: u64,
     mirror: MirrorClient,
+    notify: BomdNotify,
     snapshots: SnapshotStore,
     schedules: ScheduleTable,
     assembler: ScheduleAssembler,
@@ -566,6 +585,7 @@ impl ServerBehavior {
             profile: ProfileBuffer::new(),
             fast_poll_until_s: 0,
             mirror: MirrorClient::new(),
+            notify: BomdNotify::new(),
             snapshots: SnapshotStore::new(),
             schedules: ScheduleTable::new(),
             assembler: ScheduleAssembler::new(),
@@ -752,6 +772,116 @@ impl ServerBehavior {
         });
     }
 
+    /// Borrow the meter-side notification record (configured scheme
+    /// plus latest mirror flag report).
+    ///
+    /// Requirement `07-5123-08-1049-06` (MINTED-pending-confirm).
+    pub const fn notify(&self) -> &BomdNotify {
+        &self.notify
+    }
+
+    /// Mutable meter-side notification record.
+    pub fn notify_mut(&mut self) -> &mut BomdNotify {
+        &mut self.notify
+    }
+
+    /// Queue an outbound `ConfigureMirror` for the application to
+    /// send toward the mirror endpoint.
+    ///
+    /// Requirement `07-5123-08-1049-01` (MINTED-pending-confirm).
+    pub fn configure_mirror(
+        &mut self,
+        ctx: &mut Ctx<'_>,
+        cfg: &notify::ConfigureMirror,
+    ) -> Result<(), ZclStatus> {
+        let mut body = [0u8; 9];
+        notify::encode_configure_mirror(cfg, &mut body)
+            .map_err(|_| ZclStatus::InsufficientSpace)?;
+        let mut payload = [0u8; crate::behavior::MAX_EVENT_PAYLOAD];
+        payload[..9].copy_from_slice(&body);
+        ctx.events.push(AppEvent::OutboundCommand {
+            cluster: CLUSTER_ID,
+            cmd: notify::CMD_CONFIGURE_MIRROR,
+            tsn: 0,
+            len: 9,
+            payload,
+        });
+        self.notify.note_configured(cfg);
+        Ok(())
+    }
+
+    /// Queue an outbound `ConfigureNotificationScheme` toward the
+    /// mirror endpoint.
+    ///
+    /// Requirement `07-5123-08-1049-02` (MINTED-pending-confirm).
+    pub fn configure_scheme(
+        &mut self,
+        ctx: &mut Ctx<'_>,
+        cfg: &notify::ConfigureScheme,
+    ) -> Result<(), ZclStatus> {
+        let mut body = [0u8; 9];
+        notify::encode_configure_scheme(cfg, &mut body)
+            .map_err(|_| ZclStatus::InsufficientSpace)?;
+        let mut payload = [0u8; crate::behavior::MAX_EVENT_PAYLOAD];
+        payload[..9].copy_from_slice(&body);
+        ctx.events.push(AppEvent::OutboundCommand {
+            cluster: CLUSTER_ID,
+            cmd: notify::CMD_CONFIGURE_SCHEME,
+            tsn: 0,
+            len: 9,
+            payload,
+        });
+        Ok(())
+    }
+
+    /// Queue an outbound `ConfigureNotificationFlag` toward the
+    /// mirror endpoint.
+    ///
+    /// Requirement `07-5123-08-1049-03` (MINTED-pending-confirm).
+    pub fn configure_flag(
+        &mut self,
+        ctx: &mut Ctx<'_>,
+        cfg: &notify::ConfigureFlag,
+    ) -> Result<(), ZclStatus> {
+        let mut body = [0u8; crate::behavior::MAX_EVENT_PAYLOAD];
+        let n =
+            notify::encode_configure_flag(cfg, &mut body).map_err(|_| ZclStatus::InvalidField)?;
+        let mut payload = [0u8; crate::behavior::MAX_EVENT_PAYLOAD];
+        payload[..n].copy_from_slice(&body[..n]);
+        ctx.events.push(AppEvent::OutboundCommand {
+            cluster: CLUSTER_ID,
+            cmd: notify::CMD_CONFIGURE_FLAG,
+            tsn: 0,
+            #[allow(clippy::cast_possible_truncation)]
+            len: n as u8,
+            payload,
+        });
+        Ok(())
+    }
+
+    /// Queue an outbound `GetNotifiedMessage` toward the mirror
+    /// endpoint, fetching the buffered commands behind `msg`.
+    ///
+    /// Requirement `07-5123-08-1049-05` (MINTED-pending-confirm).
+    pub fn get_notified(
+        &mut self,
+        ctx: &mut Ctx<'_>,
+        msg: &notify::GetNotifiedMessage,
+    ) -> Result<(), ZclStatus> {
+        let mut body = [0u8; 7];
+        notify::encode_get_notified(msg, &mut body).map_err(|_| ZclStatus::InsufficientSpace)?;
+        let mut payload = [0u8; crate::behavior::MAX_EVENT_PAYLOAD];
+        payload[..7].copy_from_slice(&body);
+        ctx.events.push(AppEvent::OutboundCommand {
+            cluster: CLUSTER_ID,
+            cmd: notify::CMD_GET_NOTIFIED_MESSAGE,
+            tsn: 0,
+            len: 7,
+            payload,
+        });
+        Ok(())
+    }
+
     /// Add a raw meter count to the delivered summation (saturating
     /// at 48 bits) and mirror it into the day consumption. Internal
     /// measurement updates use the local path: the summation
@@ -867,6 +997,7 @@ impl Behavior for ServerBehavior {
                 mirror::decode_mirror_report(payload, &mut report)
                     .map_err(|_| ZclStatus::MalformedCommand)?;
                 let count = self.mirror.on_report(&report);
+                self.notify.note_report(&report);
                 ctx.events.push(AppEvent::StateChanged {
                     cluster: CLUSTER_ID,
                     from: 2,

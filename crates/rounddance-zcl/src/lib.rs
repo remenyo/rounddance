@@ -42,6 +42,7 @@ pub mod keyest;
 pub mod level;
 pub mod metering;
 pub mod mirror;
+pub mod notify;
 pub mod onoff;
 pub mod price;
 pub mod reporting;

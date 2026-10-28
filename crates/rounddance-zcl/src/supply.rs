@@ -20,9 +20,10 @@
 //!
 //! Out of scope on purpose (rarer shapes stay bounded-opaque —
 //! `metering::ServerBehavior` answers `UnsupCommand` for them, never
-//! silent misbehavior): the notification-scheme machinery behind
-//! `ConfigureMirror` / `ConfigureNotificationScheme` /
-//! `ConfigureNotificationFlag` / `GetNotifiedMessage`.
+//! silent misbehavior): non-TOU publish sub-payloads. The
+//! notification-scheme machinery behind `ConfigureMirror` /
+//! `ConfigureNotificationScheme` / `ConfigureNotificationFlag` /
+//! `GetNotifiedMessage` lives in `notify` (wave-31).
 
 use crate::{Error, ZclStatus};
 

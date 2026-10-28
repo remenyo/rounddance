@@ -8,7 +8,8 @@
 //! (key-establishment codecs), `07-5356-C41-02` (update-key path),
 //! `07-5123-08-1046-*` (schedule codecs/table),
 //! `07-5123-08-1047-*` (sampling codecs/engine),
-//! `07-5123-08-1048-*` (supply codecs/machine).
+//! `07-5123-08-1048-*` (supply codecs/machine),
+//! `07-5123-08-1049-*` (notification-scheme codecs/engines).
 
 use rounddance_security::{derive_update_mask, install_link_key, LinkKeyTable, MmoError};
 use rounddance_zcl::*;
@@ -490,6 +491,122 @@ fn fuzz_mirror_snapshot_stay_bounded() {
         client.on_removed(fz.next() as u16);
         i += 1;
     }
+}
+
+// Notification-scheme codecs and engines never panic on any input;
+// the mirror engine stays bounded (queue, flags, configuration)
+// and the meter-side record never plans a fetch it did not
+// configure.
+#[test]
+fn fuzz_notify_stay_bounded() {
+    let mut fz = Fuzz(0x5EED_1049);
+    let mut eng = notify::MirrorNotify::new();
+    let mut bomd = notify::BomdNotify::new();
+    let mut i = 0;
+    while i < CASES {
+        // Random codec inputs: decoders return Ok or Err, never panic.
+        let mut wire = [0u8; 64];
+        fz.fill(&mut wire);
+        let len = fz.below(65) as usize;
+        let slice = &wire[..len];
+        let _ = notify::decode_configure_mirror(slice);
+        let _ = notify::decode_configure_scheme(slice);
+        let mut flag_cfg = notify::ConfigureFlag::new(0, 0, 0);
+        let _ = notify::decode_configure_flag(slice, &mut flag_cfg);
+        let _ = notify::decode_get_notified(slice);
+        // Random encodes of structured values: Ok or bounded Err.
+        let mirror_cfg = notify::ConfigureMirror {
+            issuer: fz.next() as u32,
+            interval_s: fz.next() as u32,
+            reporting: fz.next() & 1 == 0,
+            scheme: fz.next() as u8,
+        };
+        let mut enc = [0u8; 9];
+        let _ = notify::encode_configure_mirror(&mirror_cfg, &mut enc);
+        let scheme_cfg = notify::ConfigureScheme {
+            issuer: fz.next() as u32,
+            scheme: fz.next() as u8,
+            order: fz.next() as u32,
+        };
+        let _ = notify::encode_configure_scheme(&scheme_cfg, &mut enc);
+        // Engine absorbs any configuration sequence; stays bounded.
+        let _ = eng.apply_configure_mirror(&mirror_cfg);
+        let _ = eng.apply_scheme(&scheme_cfg);
+        if let Ok(flag) = flag_from_fuzz(&mut fz) {
+            let _ = eng.apply_flag(&flag);
+        }
+        assert!(eng.pending_len() <= notify::MAX_PENDING);
+        // Queue absorbs any originator/payload; fetch/expire are total.
+        let origin = notify::Originator {
+            src: fz.next(),
+            endpoint: fz.next() as u8,
+            tsn: fz.next() as u8,
+            cluster: fz.next() as u16,
+            cmd: fz.next() as u8,
+        };
+        let mut payload = [0u8; 32];
+        fz.fill(&mut payload);
+        let plen = fz.below(33) as usize;
+        let _ = eng.cache(origin, &payload[..plen], fz.next());
+        assert!(eng.pending_len() <= notify::MAX_PENDING);
+        let msg = notify::GetNotifiedMessage {
+            scheme: fz.next() as u8,
+            flag_attr: (fz.next() & 0x0F) as u16,
+            flags: fz.next() as u32,
+        };
+        let _ = eng.fetch(&msg);
+        let _ = eng.raise((fz.next() & 0x0F) as u16, fz.next() as u32);
+        let _ = eng.lower((fz.next() & 0x0F) as u16, fz.next() as u32);
+        let mut expired = [origin; 4];
+        let _ = eng.expire(fz.next(), fz.below(10_000), &mut expired);
+        let words = eng.flag_words();
+        let _ = words;
+        // Meter side absorbs any report; planned fetches name the
+        // configured scheme only.
+        bomd.note_configured(&mirror_cfg);
+        let mut rep = mirror::MirrorReport::new(fz.next() as u8);
+        let _ = mirror::decode_mirror_report(slice, &mut rep);
+        bomd.note_report(&rep);
+        let mut plan = [notify::GetNotifiedMessage {
+            scheme: 0,
+            flag_attr: 0,
+            flags: 0,
+        }; 2];
+        let n = bomd.plan_fetch(&mut plan);
+        assert!(n <= 1);
+        if n == 1 {
+            assert_eq!(plan[0].scheme, bomd.scheme());
+            let mut gw = [0u8; 7];
+            assert_eq!(notify::encode_get_notified(&plan[0], &mut gw), Ok(7));
+            assert_eq!(notify::decode_get_notified(&gw), Ok(plan[0]));
+        }
+        i += 1;
+    }
+}
+
+fn flag_from_fuzz(fz: &mut Fuzz) -> Result<notify::ConfigureFlag, ()> {
+    let mut cfg =
+        notify::ConfigureFlag::new(fz.next() as u32, fz.next() as u8, (fz.next() & 0x0F) as u16);
+    let recs = 1 + fz.below(notify::MAX_ALLOC_RECORDS as u64) as usize;
+    let mut r = 0;
+    while r < recs {
+        let ncmds = 1 + fz.below(notify::MAX_ALLOC_CMDS as u64) as usize;
+        let mut cmds = [0u8; notify::MAX_ALLOC_CMDS];
+        let mut k = 0;
+        while k < ncmds {
+            cmds[k] = fz.next() as u8;
+            k += 1;
+        }
+        cfg.allocs[r] = notify::FlagAlloc {
+            cluster: fz.next() as u16,
+            mfr: fz.next() as u16,
+            cmds,
+            cmd_count: ncmds as u8,
+        };
+        r += 1;
+    }
+    cfg.alloc_count = recs as u8;
+    Ok(cfg)
 }
 
 // Update-mask derivation and table install never panic; masks stay

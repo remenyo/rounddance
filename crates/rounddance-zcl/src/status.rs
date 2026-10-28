@@ -53,6 +53,12 @@ pub enum ZclStatus {
     InvalidSelector,
     /// Exchange aborted on excessive response time.
     Timeout,
+    /// Command received and being processed; the response follows
+    /// later (mirror pending-message queue receipt; anchor p0109
+    /// status table, `0x9A` row).
+    ///
+    /// Requirement `07-5123-08-1049-05` (MINTED-pending-confirm).
+    NotificationPending,
     /// Named cluster is not implemented on this endpoint
     /// (`07-5123-08-2512-01` correction, anchor p0081-L3010-L3012:
     /// unicast to a missing cluster answers with this, never
@@ -89,6 +95,7 @@ impl ZclStatus {
             0x8d => Self::InvalidDataType,
             0x8e => Self::InvalidSelector,
             0x94 => Self::Timeout,
+            0x9a => Self::NotificationPending,
             0xc3 => Self::UnsupportedCluster,
             other => Self::Other(other),
         }
@@ -115,6 +122,7 @@ impl ZclStatus {
             Self::InvalidDataType => 0x8d,
             Self::InvalidSelector => 0x8e,
             Self::Timeout => 0x94,
+            Self::NotificationPending => 0x9a,
             Self::UnsupportedCluster => 0xc3,
             Self::Other(v) => v,
         }
