@@ -11,8 +11,7 @@
 //!
 //! Requirement IDs below reuse `17-05019-012-423-02` (corpus-mined)
 //! or are repo-minted (`07-5123-08-1045-*`, dots stripped),
-//! MINTED-pending-confirm. Schedule commands and sampled-data
-//! commands stay explicitly follow-up, not silent scope: only
+//! MINTED-pending-confirm. Timetable setup lives in `schedule`;
 //! take/get/response/publish are implemented here.
 
 use crate::{Error, ZclStatus};
@@ -85,6 +84,16 @@ pub const PAYLOAD_BLOCK_DELIVERED_NO_BILLING: u8 = 0x06;
 pub const PAYLOAD_BLOCK_RECEIVED_NO_BILLING: u8 = 0x07;
 /// Snapshot data currently unavailable.
 pub const PAYLOAD_UNAVAILABLE: u8 = 0x80;
+
+/// Whether a sub-payload selector names a carried shape here (the
+/// TOU/block sets plus the explicit unavailable marker; every other
+/// shape travels as bounded opaque bytes).
+///
+/// Requirement `07-5123-08-1046-02` (MINTED-pending-confirm).
+#[must_use]
+pub const fn payload_type_known(payload_type: u8) -> bool {
+    payload_type <= PAYLOAD_BLOCK_RECEIVED_NO_BILLING || payload_type == PAYLOAD_UNAVAILABLE
+}
 
 /// Largest snapshot backlog held (bounded ring; full stores evict
 /// the oldest snapshot).

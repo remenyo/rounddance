@@ -13,8 +13,8 @@
 //! Requirement IDs below are corpus-reused (`07-5123-08-104-01`,
 //! `17-05019-012-422-02`, `17-05019-012-423-01`) or repo-minted
 //! (`07-5123-08-1044-*`, dots stripped), MINTED-pending-confirm.
-//! Schedule/sampling/supply commands stay explicitly follow-up, not
-//! silent scope.
+//! Schedule/sampling/supply commands live in `schedule`, `sampling`,
+//! and `supply`; this module keeps the mirror-setup scope only.
 //!
 //! Direction reminder (matches the tables above): the physical meter
 //! hosts the metering server; the ESI hosts a metering client plus

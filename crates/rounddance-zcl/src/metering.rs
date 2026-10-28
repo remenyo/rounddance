@@ -13,17 +13,22 @@
 //! Requirement IDs below are repo-minted (`07-5123-08-<clause>-<seq>`,
 //! dots stripped), MINTED-pending-confirm, except the corpus-reused
 //! mirror/snapshot rows named in `mirror.rs` / `snapshot.rs`. The
-//! mirror-table state, the mirror setup commands, and the
-//! take/get-snapshot commands live in those modules; this file wires
-//! them into the server behavior. Schedule/sampling/supply commands
-//! stay explicitly follow-up, not silent scope.
+//! mirror-table state, the mirror setup commands, the
+//! take/get-snapshot commands, and the schedule/sampling/supply
+//! commands live in their modules; this file wires them into the
+//! server behavior. Only the notification-scheme machinery
+//! (`ConfigureMirror` et al.) and non-TOU publish shapes stay
+//! bounded-opaque follow-up, never silent scope.
 
 use crate::attrs::{access, AttrDef, AttrStore, ATTR_CLUSTER_REVISION};
-use crate::behavior::{AppEvent, Behavior, Ctx, HandleOutcome};
+use crate::behavior::{AppEvent, Behavior, Ctx, EventQueue, HandleOutcome};
 use crate::cluster::{ClusterDef, ClusterRole, CmdDef};
 use crate::frame::Header;
 use crate::mirror::{self, MirrorClient};
+use crate::sampling::{self, SampleEngine};
+use crate::schedule::{self, ScheduleAssembler, ScheduleTable};
 use crate::snapshot::{self, SnapshotStore};
+use crate::supply::{self, SupplyMachine};
 use crate::types::{DataType, Value};
 use crate::{Error, ZclStatus};
 
@@ -187,6 +192,10 @@ pub static SERVER_RX: &[CmdDef] = &[
         name: "request-fast-poll",
     },
     CmdDef {
+        id: schedule::CMD_SCHEDULE_SNAPSHOT,
+        name: "schedule-snapshot",
+    },
+    CmdDef {
         id: snapshot::CMD_TAKE_SNAPSHOT,
         name: "take-snapshot",
     },
@@ -195,8 +204,36 @@ pub static SERVER_RX: &[CmdDef] = &[
         name: "get-snapshot",
     },
     CmdDef {
+        id: sampling::CMD_START_SAMPLING,
+        name: "start-sampling",
+    },
+    CmdDef {
+        id: sampling::CMD_GET_SAMPLED_DATA,
+        name: "get-sampled-data",
+    },
+    CmdDef {
         id: mirror::CMD_MIRROR_REPORT_ATTR_RESPONSE,
         name: "mirror-report-attribute-response",
+    },
+    CmdDef {
+        id: supply::CMD_RESET_LOAD_LIMIT,
+        name: "reset-load-limit",
+    },
+    CmdDef {
+        id: supply::CMD_CHANGE_SUPPLY,
+        name: "change-supply",
+    },
+    CmdDef {
+        id: supply::CMD_LOCAL_CHANGE_SUPPLY,
+        name: "local-change-supply",
+    },
+    CmdDef {
+        id: supply::CMD_SET_SUPPLY_STATUS,
+        name: "set-supply-status",
+    },
+    CmdDef {
+        id: supply::CMD_SET_UNCONTROLLED_FLOW,
+        name: "set-uncontrolled-flow-threshold",
     },
 ];
 
@@ -220,12 +257,28 @@ pub static SERVER_TX: &[CmdDef] = &[
         name: "fast-poll-response",
     },
     CmdDef {
+        id: schedule::CMD_SCHEDULE_SNAPSHOT_RESPONSE,
+        name: "schedule-snapshot-response",
+    },
+    CmdDef {
         id: snapshot::CMD_TAKE_SNAPSHOT_RESPONSE,
         name: "take-snapshot-response",
     },
     CmdDef {
         id: snapshot::CMD_PUBLISH_SNAPSHOT,
         name: "publish-snapshot",
+    },
+    CmdDef {
+        id: sampling::CMD_GET_SAMPLED_DATA_RESPONSE,
+        name: "get-sampled-data-response",
+    },
+    CmdDef {
+        id: supply::CMD_SUPPLY_STATUS_RESPONSE,
+        name: "supply-status-response",
+    },
+    CmdDef {
+        id: sampling::CMD_START_SAMPLING_RESPONSE,
+        name: "start-sampling-response",
     },
 ];
 
@@ -485,12 +538,17 @@ impl ProfileBuffer {
 }
 
 /// Server behavior: reading updates plus GetProfile / fast-poll /
-/// mirror-setup / snapshot command handling.
+/// mirror-setup / snapshot / schedule / sampling / supply command
+/// handling.
 pub struct ServerBehavior {
     profile: ProfileBuffer,
     fast_poll_until_s: u64,
     mirror: MirrorClient,
     snapshots: SnapshotStore,
+    schedules: ScheduleTable,
+    assembler: ScheduleAssembler,
+    samples: SampleEngine,
+    supply: SupplyMachine,
 }
 
 impl Default for ServerBehavior {
@@ -501,7 +559,7 @@ impl Default for ServerBehavior {
 
 impl ServerBehavior {
     /// Fresh behavior: empty profile, no fast poll, no mirror
-    /// grant, no snapshots.
+    /// grant, no snapshots, schedules, sessions, or supply orders.
     #[must_use]
     pub const fn new() -> Self {
         Self {
@@ -509,6 +567,10 @@ impl ServerBehavior {
             fast_poll_until_s: 0,
             mirror: MirrorClient::new(),
             snapshots: SnapshotStore::new(),
+            schedules: ScheduleTable::new(),
+            assembler: ScheduleAssembler::new(),
+            samples: SampleEngine::new(),
+            supply: SupplyMachine::new(),
         }
     }
 
@@ -541,6 +603,123 @@ impl ServerBehavior {
     /// Mutable snapshot store (tests/sim pre-load snapshots).
     pub fn snapshots_mut(&mut self) -> &mut SnapshotStore {
         &mut self.snapshots
+    }
+
+    /// Borrow the snapshot timetable.
+    pub const fn schedules(&self) -> &ScheduleTable {
+        &self.schedules
+    }
+
+    /// Mutable timetable (tests/sim pre-file schedules).
+    pub fn schedules_mut(&mut self) -> &mut ScheduleTable {
+        &mut self.schedules
+    }
+
+    /// Borrow the sampling engine.
+    pub const fn samples(&self) -> &SampleEngine {
+        &self.samples
+    }
+
+    /// Mutable sampling engine (tests/sim push captures).
+    pub fn samples_mut(&mut self) -> &mut SampleEngine {
+        &mut self.samples
+    }
+
+    /// Borrow the supply machine.
+    pub const fn supply(&self) -> &SupplyMachine {
+        &self.supply
+    }
+
+    /// Mutable supply machine (tests/sim narrow policy + drive
+    /// meter events).
+    pub fn supply_mut(&mut self) -> &mut SupplyMachine {
+        &mut self.supply
+    }
+
+    /// Take one snapshot around the live delivered summation (the
+    /// tariff-change pair rule included); shared by command-driven
+    /// and timetable-driven takes.
+    fn take_live(&mut self, store: &AttrStore, time: u32, cause: u32) -> (u32, u8) {
+        let summation = get_u48(store, ATTR_SUMMATION_DELIVERED);
+        let mut sub = [0u8; snapshot::MAX_SNAPSHOT_SUB];
+        let sub_len =
+            match snapshot::encode_tou_sub_payload(summation, 0, 0, 0, 0, 0, &[], &mut sub) {
+                Ok(n) => n,
+                Err(_) => return (0, snapshot::CONFIRM_CAUSE_NOT_SUPPORTED),
+            };
+        if cause & (1u32 << snapshot::CAUSE_TARIFF_CHANGE_BIT) != 0 {
+            let (ids, conf) = self.snapshots.take_pair(
+                time,
+                cause,
+                snapshot::PAYLOAD_TOU_DELIVERED,
+                &sub[..sub_len],
+                &sub[..sub_len],
+            );
+            (ids[0], conf)
+        } else {
+            self.snapshots.take(
+                time,
+                cause,
+                snapshot::PAYLOAD_TOU_DELIVERED,
+                &sub[..sub_len],
+            )
+        }
+    }
+
+    /// Caller-second tick for the timetable/sampling/supply paths:
+    /// fires due timetable entries into the snapshot store (with the
+    /// scheduled bit folded in), opens due sampling sessions, and
+    /// executes a due delayed supply command (queueing its
+    /// acknowledgement when requested). Behaviors never read a
+    /// clock; the caller passes `now`.
+    ///
+    /// Requirement `07-5123-08-1046-02` (timetable firing) +
+    /// `07-5123-08-1047-04` (session opening) +
+    /// `17-05019-012-423-03` (delayed execution)
+    /// (MINTED-pending-confirm where noted).
+    pub fn tick_metering(&mut self, store: &AttrStore, events: &mut EventQueue, now: u32) {
+        // Timetable fires: this build carries the delivered-TOU
+        // shape, which the intake gate already enforces.
+        let mut due = [(0u32, 0u8); schedule::MAX_SCHEDULES];
+        let n = self.schedules.collect_due(now, &mut due);
+        let mut i = 0;
+        while i < n {
+            let cause = due[i].0 | (1u32 << snapshot::CAUSE_SCHEDULED_BIT);
+            let _ = self.take_live(store, now, cause);
+            i += 1;
+        }
+        // Sampling sessions whose start time arrived.
+        let opened = self.samples.tick(now);
+        if opened > 0 {
+            events.push(AppEvent::StateChanged {
+                cluster: CLUSTER_ID,
+                from: 4,
+                to: opened,
+            });
+        }
+        // Delayed supply execution.
+        let old = self.supply.status();
+        if let Some((rsp, ack)) = self.supply.tick(now) {
+            events.push(AppEvent::StateChanged {
+                cluster: CLUSTER_ID,
+                from: old,
+                to: rsp.status,
+            });
+            if ack {
+                let mut body = [0u8; 13];
+                if supply::encode_supply_status_response(&rsp, &mut body).is_ok() {
+                    let mut payload = [0u8; crate::behavior::MAX_EVENT_PAYLOAD];
+                    payload[..13].copy_from_slice(&body);
+                    events.push(AppEvent::OutboundCommand {
+                        cluster: CLUSTER_ID,
+                        cmd: supply::CMD_SUPPLY_STATUS_RESPONSE,
+                        tsn: 0,
+                        len: 13,
+                        payload,
+                    });
+                }
+            }
+        }
     }
 
     /// Queue an outbound `RequestMirror` (empty body) for the
@@ -705,31 +884,9 @@ impl Behavior for ServerBehavior {
                 // bits are the on-wire timestamp.
                 #[allow(clippy::cast_possible_truncation)]
                 let now = ctx.now_s as u32;
-                let summation = get_u48(ctx.store, ATTR_SUMMATION_DELIVERED);
-                let mut sub = [0u8; snapshot::MAX_SNAPSHOT_SUB];
-                let sub_len =
-                    snapshot::encode_tou_sub_payload(summation, 0, 0, 0, 0, 0, &[], &mut sub)
-                        .map_err(|_| ZclStatus::InsufficientSpace)?;
                 // A tariff-change take lands as a before/after pair;
                 // the response carries the first id.
-                let (id, confirmation) = if cause & (1u32 << snapshot::CAUSE_TARIFF_CHANGE_BIT) != 0
-                {
-                    let (ids, conf) = self.snapshots.take_pair(
-                        now,
-                        cause,
-                        snapshot::PAYLOAD_TOU_DELIVERED,
-                        &sub[..sub_len],
-                        &sub[..sub_len],
-                    );
-                    (ids[0], conf)
-                } else {
-                    self.snapshots.take(
-                        now,
-                        cause,
-                        snapshot::PAYLOAD_TOU_DELIVERED,
-                        &sub[..sub_len],
-                    )
-                };
+                let (id, confirmation) = self.take_live(ctx.store, now, cause);
                 let mut body = [0u8; 5];
                 snapshot::encode_take_snapshot_response(
                     &snapshot::TakeSnapshotResponse {
@@ -771,6 +928,167 @@ impl Behavior for ServerBehavior {
                     }
                     Err(_) => Err(ZclStatus::NotFound),
                 }
+            }
+            schedule::CMD_SCHEDULE_SNAPSHOT => {
+                if payload.len() < 6 {
+                    return Err(ZclStatus::MalformedCommand);
+                }
+                let issuer = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                let index = payload[4];
+                let total = payload[5];
+                let body = &payload[6..];
+                match self.assembler.feed(issuer, index, total, body) {
+                    Err(e) => Err(e),
+                    Ok(schedule::Assembly::Incomplete) => Ok(HandleOutcome::no_reply()),
+                    Ok(schedule::Assembly::Complete { issuer, len }) => {
+                        let mut confirmations = [(0u8, 0u8); schedule::MAX_SCHEDULE_CONFIRM];
+                        let mut count = 0usize;
+                        let mut off = 0;
+                        while off + schedule::SCHEDULE_ENTRY_LEN <= len as usize
+                            && count < schedule::MAX_SCHEDULE_CONFIRM
+                        {
+                            let entry = schedule::decode_schedule_entry(
+                                &self.assembler.assembled()
+                                    [off..off + schedule::SCHEDULE_ENTRY_LEN],
+                            )
+                            .map_err(|_| ZclStatus::MalformedCommand)?;
+                            // This build fires the delivered-TOU
+                            // shape; anything else is a typed refusal.
+                            let conf = if entry.payload_type != snapshot::PAYLOAD_TOU_DELIVERED {
+                                schedule::SCHEDULE_CONF_TYPE_NOT_SUPPORTED
+                            } else {
+                                self.schedules.intake(issuer, &entry)
+                            };
+                            confirmations[count] = (entry.id, conf);
+                            count += 1;
+                            off += schedule::SCHEDULE_ENTRY_LEN;
+                        }
+                        if off != len as usize {
+                            return Err(ZclStatus::MalformedCommand);
+                        }
+                        let mut rsp = [0u8; crate::behavior::MAX_EVENT_PAYLOAD];
+                        let n = schedule::encode_schedule_response(
+                            issuer,
+                            &confirmations[..count],
+                            &mut rsp,
+                        )
+                        .map_err(|_| ZclStatus::InsufficientSpace)?;
+                        HandleOutcome::reply(schedule::CMD_SCHEDULE_SNAPSHOT_RESPONSE, &rsp[..n])
+                            .map_err(|_| ZclStatus::InsufficientSpace)
+                    }
+                }
+            }
+            sampling::CMD_START_SAMPLING => {
+                let req = sampling::decode_start_sampling(payload)
+                    .map_err(|_| ZclStatus::MalformedCommand)?;
+                #[allow(clippy::cast_possible_truncation)]
+                let now = ctx.now_s as u32;
+                match self.samples.open(&req, now) {
+                    sampling::OpenVerdict::Opened(id) => {
+                        let mut body = [0u8; 2];
+                        sampling::encode_start_response(id, &mut body)
+                            .map_err(|_| ZclStatus::InsufficientSpace)?;
+                        HandleOutcome::reply(sampling::CMD_START_SAMPLING_RESPONSE, &body)
+                            .map_err(|_| ZclStatus::InsufficientSpace)
+                    }
+                    sampling::OpenVerdict::Full => {
+                        let mut body = [0u8; 2];
+                        sampling::encode_start_response(sampling::SAMPLE_ID_NONE, &mut body)
+                            .map_err(|_| ZclStatus::InsufficientSpace)?;
+                        HandleOutcome::reply(sampling::CMD_START_SAMPLING_RESPONSE, &body)
+                            .map_err(|_| ZclStatus::InsufficientSpace)
+                    }
+                    sampling::OpenVerdict::Stale | sampling::OpenVerdict::Cancelled => {
+                        Ok(HandleOutcome::no_reply())
+                    }
+                    sampling::OpenVerdict::Unusable => Err(ZclStatus::InvalidField),
+                }
+            }
+            sampling::CMD_GET_SAMPLED_DATA => {
+                let req = sampling::decode_get_sampled_data(payload)
+                    .map_err(|_| ZclStatus::MalformedCommand)?;
+                let mut values = [0u32; sampling::MAX_SAMPLES_PER_RESPONSE];
+                match self.samples.query(&req, &mut values) {
+                    Err(e) => Err(e),
+                    Ok((start, sample_type, interval_s, count)) => {
+                        let mut body = [0u8; crate::behavior::MAX_EVENT_PAYLOAD];
+                        let n = sampling::encode_sampled_data_response(
+                            req.sample_id,
+                            start,
+                            sample_type,
+                            interval_s,
+                            &values[..count as usize],
+                            &mut body,
+                        )
+                        .map_err(|_| ZclStatus::InsufficientSpace)?;
+                        HandleOutcome::reply(sampling::CMD_GET_SAMPLED_DATA_RESPONSE, &body[..n])
+                            .map_err(|_| ZclStatus::InsufficientSpace)
+                    }
+                }
+            }
+            supply::CMD_CHANGE_SUPPLY => {
+                let req = supply::decode_change_supply(payload)
+                    .map_err(|_| ZclStatus::MalformedCommand)?;
+                #[allow(clippy::cast_possible_truncation)]
+                let now = ctx.now_s as u32;
+                match self.supply.apply_change(&req, now) {
+                    Err(e) => Err(e),
+                    Ok(supply::SupplyOutcome::Delayed) => Ok(HandleOutcome::no_reply()),
+                    Ok(supply::SupplyOutcome::Cancelled) => Ok(HandleOutcome::no_reply()),
+                    Ok(supply::SupplyOutcome::Applied { ack }) => {
+                        let new = self.supply.status();
+                        ctx.events.push(AppEvent::StateChanged {
+                            cluster: CLUSTER_ID,
+                            from: new,
+                            to: new,
+                        });
+                        if ack {
+                            let rsp = supply::SupplyStatusResponse {
+                                provider: req.provider,
+                                issuer: req.issuer,
+                                impl_time: req.impl_time,
+                                status: new,
+                            };
+                            let mut body = [0u8; 13];
+                            supply::encode_supply_status_response(&rsp, &mut body)
+                                .map_err(|_| ZclStatus::InsufficientSpace)?;
+                            HandleOutcome::reply(supply::CMD_SUPPLY_STATUS_RESPONSE, &body)
+                                .map_err(|_| ZclStatus::InsufficientSpace)
+                        } else {
+                            Ok(HandleOutcome::no_reply())
+                        }
+                    }
+                }
+            }
+            supply::CMD_LOCAL_CHANGE_SUPPLY => {
+                let proposed = supply::decode_local_change_supply(payload)
+                    .map_err(|_| ZclStatus::MalformedCommand)?;
+                let old = self.supply.status();
+                self.supply.apply_local(proposed)?;
+                ctx.events.push(AppEvent::StateChanged {
+                    cluster: CLUSTER_ID,
+                    from: old,
+                    to: proposed,
+                });
+                Ok(HandleOutcome::no_reply())
+            }
+            supply::CMD_SET_SUPPLY_STATUS => {
+                let req = supply::decode_set_supply_status(payload)
+                    .map_err(|_| ZclStatus::MalformedCommand)?;
+                let _ = self.supply.apply_set_status(&req)?;
+                Ok(HandleOutcome::no_reply())
+            }
+            supply::CMD_SET_UNCONTROLLED_FLOW => {
+                let cfg = supply::decode_flow_threshold(payload)
+                    .map_err(|_| ZclStatus::MalformedCommand)?;
+                self.supply.apply_flow(&cfg);
+                Ok(HandleOutcome::no_reply())
+            }
+            supply::CMD_RESET_LOAD_LIMIT => {
+                let (provider, issuer) = supply::decode_reset_load_limit(payload)
+                    .map_err(|_| ZclStatus::MalformedCommand)?;
+                self.supply.reset_load_limit(provider, issuer);
+                Ok(HandleOutcome::no_reply())
             }
             _ => Err(ZclStatus::UnsupCommand),
         }

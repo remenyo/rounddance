@@ -45,8 +45,11 @@ pub mod mirror;
 pub mod onoff;
 pub mod price;
 pub mod reporting;
+pub mod sampling;
+pub mod schedule;
 pub mod snapshot;
 pub mod status;
+pub mod supply;
 pub mod types;
 pub mod wd;
 

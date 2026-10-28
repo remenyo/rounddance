@@ -5,7 +5,10 @@
 //! Requirement traceability (repo-minted, MINTED-pending-confirm):
 //! `07-5123-08-1043-*` (metering profile codec),
 //! `07-5123-08-1024-*` (price codecs), `07-5123-08-1074-*`
-//! (key-establishment codecs), `07-5356-C41-02` (update-key path).
+//! (key-establishment codecs), `07-5356-C41-02` (update-key path),
+//! `07-5123-08-1046-*` (schedule codecs/table),
+//! `07-5123-08-1047-*` (sampling codecs/engine),
+//! `07-5123-08-1048-*` (supply codecs/machine).
 
 use rounddance_security::{derive_update_mask, install_link_key, LinkKeyTable, MmoError};
 use rounddance_zcl::*;
@@ -86,6 +89,168 @@ fn fuzz_se_codecs_reject_without_panic() {
         let _ = snapshot::decode_get_snapshot(slice);
         let _ = snapshot::decode_publish_snapshot(slice);
         let _ = price::display_parts(fz.next() as u32, fz.next() as u8);
+        // Schedule/sampling/supply decoders never panic on any input.
+        let _ = schedule::decode_schedule_entry(slice);
+        let _ = schedule::decode_schedule_response(slice);
+        let _ = sampling::decode_start_sampling(slice);
+        let _ = sampling::decode_start_response(slice);
+        let _ = sampling::decode_get_sampled_data(slice);
+        let _ = sampling::decode_sampled_data_response(slice);
+        let _ = supply::decode_change_supply(slice);
+        let _ = supply::decode_supply_status_response(slice);
+        let _ = supply::decode_local_change_supply(slice);
+        let _ = supply::decode_set_supply_status(slice);
+        let _ = supply::decode_flow_threshold(slice);
+        let _ = supply::decode_reset_load_limit(slice);
+        i += 1;
+    }
+}
+
+// Schedule tables + sampling engines + supply machines never panic
+// on adversarial streams; tables stay bounded, confirms are exact,
+// and encode/decode round-trips are fixed points.
+#[test]
+fn fuzz_schedule_sample_supply_stay_bounded() {
+    let mut fz = Fuzz(0x5EED_1046);
+    let mut buf = [0u8; 64];
+    let mut i = 0;
+    while i < CASES {
+        fz.fill(&mut buf);
+        let len = fz.below(65) as usize;
+        let slice = &buf[..len];
+        // Codecs round-trip when they accept.
+        if let Ok(entry) = schedule::decode_schedule_entry(slice) {
+            let mut wire = [0u8; schedule::SCHEDULE_ENTRY_LEN];
+            assert_eq!(
+                schedule::encode_schedule_entry(&entry, &mut wire),
+                Ok(schedule::SCHEDULE_ENTRY_LEN)
+            );
+            assert_eq!(schedule::decode_schedule_entry(&wire), Ok(entry));
+        }
+        if let Ok(back) = schedule::decode_schedule_response(slice) {
+            let mut wire = [0u8; 16];
+            let pairs: [(u8, u8); schedule::MAX_SCHEDULE_CONFIRM] = back.confirmations;
+            let n = schedule::encode_schedule_response(
+                back.issuer,
+                &pairs[..back.count as usize],
+                &mut wire,
+            )
+            .unwrap();
+            assert_eq!(
+                schedule::decode_schedule_response(&wire[..n]).unwrap(),
+                back
+            );
+        }
+        if let Ok(req) = sampling::decode_start_sampling(slice) {
+            let mut wire = [0u8; 13];
+            assert_eq!(sampling::encode_start_sampling(&req, &mut wire), Ok(13));
+            assert_eq!(sampling::decode_start_sampling(&wire), Ok(req));
+        }
+        if let Ok(req) = sampling::decode_get_sampled_data(slice) {
+            let mut wire = [0u8; 9];
+            assert_eq!(sampling::encode_get_sampled_data(&req, &mut wire), Ok(9));
+            assert_eq!(sampling::decode_get_sampled_data(&wire), Ok(req));
+        }
+        if let Ok(req) = supply::decode_change_supply(slice) {
+            let mut wire = [0u8; 18];
+            assert_eq!(supply::encode_change_supply(&req, &mut wire), Ok(18));
+            assert_eq!(supply::decode_change_supply(&wire), Ok(req));
+        }
+        // Table intake stays bounded and idempotent per issuer.
+        let mut table = schedule::ScheduleTable::new();
+        let mut k = 0;
+        while k < 6 {
+            let entry = schedule::ScheduleEntry {
+                id: fz.next() as u8,
+                start: fz.next() as u32,
+                bitmap: fz.next() as u32,
+                payload_type: fz.next() as u8,
+                cause: fz.next() as u32,
+            };
+            let conf = table.intake(fz.next() as u32, &entry);
+            assert!(conf <= schedule::SCHEDULE_CONF_INSUFFICIENT_SPACE);
+            assert!(table.len() <= schedule::MAX_SCHEDULES);
+            k += 1;
+        }
+        let mut due = [(0u32, 0u8); schedule::MAX_SCHEDULES];
+        let n = table.collect_due(fz.next() as u32, &mut due);
+        assert!(n <= schedule::MAX_SCHEDULES);
+        // Engine open/push/query/tick never panic; sessions and
+        // captures stay within their bounds.
+        let mut eng = sampling::SampleEngine::new();
+        let mut j = 0;
+        while j < 4 {
+            let req = sampling::StartSampling {
+                issuer: fz.next() as u32,
+                start: fz.next() as u32,
+                sample_type: fz.next() as u8,
+                interval_s: fz.next() as u16,
+                max_samples: fz.next() as u16,
+            };
+            let _ = eng.open(&req, fz.next() as u32);
+            assert!(eng.len() <= sampling::MAX_SESSIONS);
+            let id = (fz.next() & 3) as u16;
+            let _ = eng.push(id, fz.next() as u32, fz.next() as u32);
+            let _ = eng.tick(fz.next() as u32);
+            let q = sampling::GetSampledData {
+                sample_id: id,
+                earliest: fz.next() as u32,
+                sample_type: fz.next() as u8,
+                count: fz.next() as u16,
+            };
+            let mut values = [0u32; sampling::MAX_SAMPLES_PER_RESPONSE];
+            if let Ok((_, _, _, count)) = eng.query(&q, &mut values) {
+                assert!((count as usize) <= sampling::MAX_SAMPLES_PER_RESPONSE);
+                let mut wire = [0u8; 64];
+                let n = sampling::encode_sampled_data_response(
+                    id,
+                    0,
+                    q.sample_type,
+                    0,
+                    &values[..count as usize],
+                    &mut wire,
+                )
+                .unwrap();
+                let back = sampling::decode_sampled_data_response(&wire[..n]).unwrap();
+                assert_eq!(back.sample_values(), &values[..count as usize]);
+            }
+            j += 1;
+        }
+        // Supply machines serialize delayed commands and stay in
+        // their typed states under any stream.
+        let mut m = supply::SupplyMachine::new();
+        let req = supply::ChangeSupply {
+            provider: fz.next() as u32,
+            issuer: fz.next() as u32,
+            request_time: fz.next() as u32,
+            impl_time: fz.next() as u32,
+            proposed: fz.next() as u8,
+            control: fz.next() as u8,
+        };
+        let now = fz.next() as u32;
+        match m.apply_change(&req, now) {
+            Ok(supply::SupplyOutcome::Applied { .. }) => {
+                assert!(supply::supply_status_known(m.status()))
+            }
+            Ok(_) => {}
+            Err(_) => {}
+        }
+        let _ = m.tick(now);
+        let _ = m.apply_local(fz.next() as u8);
+        let _ = m.apply_set_status(&supply::SetSupplyStatus {
+            issuer: fz.next() as u32,
+            tamper: fz.next() as u8,
+            depletion: fz.next() as u8,
+            uncontrolled: fz.next() as u8,
+            load_limit: fz.next() as u8,
+        });
+        let _ = m.apply_event(match fz.next() & 3 {
+            0 => supply::SupplyEvent::Tamper,
+            1 => supply::SupplyEvent::Depletion,
+            2 => supply::SupplyEvent::UncontrolledFlow,
+            _ => supply::SupplyEvent::LoadLimit,
+        });
+        assert!(supply::supply_status_known(m.status()) || m.status() == supply::SUPPLY_UNCHANGED);
         i += 1;
     }
 }
