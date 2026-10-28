@@ -1021,3 +1021,34 @@ guard, proof only).
 |----------------|-------|-------------------|----------------|
 | 05-3474-23-344-01 | implemented + verified | `commands.rs`: `Leave` + `LeaveOptions` (rejoin/request/remove-children bits 5/6/7, reserved bits zeroed on encode + ignored on decode) + `decode_leave` (TLV tail borrowed opaquely) + `CMD_LEAVE` 0x04 (§3.4.4 Figure 3-14, anchor p0304-L7185-L7189; options field Figure 3-15, anchor p0305-L7220-L7233) | `tests/vectors.rs::vector_leave_captured_eject_05_3474_23_344_01` (captured `04 60` eject plaintext), `vector_leave_options_and_edges_05_3474_23_344_01` + `tests/roundtrip.rs::fuzz_command_round_trip_identity`, `fuzz_command_mutations_never_panic` (leave legs) |
 | 22-65816-030-56-04 | implemented + verified (extended: joiner side of the time-box eviction) | `classical.rs`: `JoinerMachine::on_leave` (mid-join eject ends the attempt with `JoinError::JoinTimeout`; `BadState` with nothing pending; rejoin routing stays with the caller) (anchor p0033-L554-L561) | `tests/vectors.rs::vector_join_leave_evicts_mid_join` (Authenticating + KeyWait + wrong-state legs) |
+
+## Wave-43 traceability — mode-0 trailing-octet fix (`rounddance-security` + consumers)
+
+Follow-up to the wave-42 audit §5 item 2. The auxiliary-header
+codec carried a one-octet sequence number under the data-key bits
+(mode 0); per §4.5.1 Figure 4-24 the key sequence number field is
+present ONLY under the network-key bits (mode 1, anchor
+p0481-L11467-L11469), and per §4.5.3 the data key equals the
+link key (anchor p0481-L11490-L11497), so mode-0 headers end at
+the frame counter (5 octets bare, 13 with the extended-nonce
+source). `KeyIdentifier::Seq` is removed; `KeyIdentifier::DataKey`
+(unit, zero-length) is the mode-0 shape and `KeyIdentifier::Index`
+keeps carrying the NWK sequence octet under the mode-1 bits (the
+`decode_with_level` contract — NWK names a network key — is
+unchanged). Captured air agrees: the wave-39 F seal aux
+(`06 00 00 00 00`) is 5 octets with `a5...` ciphertext after it,
+and the Ember NWK frames name mode 1 with one trailing octet. All
+network-key-secured producers (sim secured frames, hal-host
+scenario APS envelope, hal-esp demo NPDU, compat baseline) move
+to the mode-1 bits with the sequence octet; no join/leave decision
+logic branches on the aux mode bits (the commission join machine
+never reads the aux), so simulator join/leave outcomes are
+unchanged. 1 repo-minted ID (`05-3474-23-4514-01`),
+MINTED-pending-confirm. Wording in code/tests is paraphrase only,
+never spec text (D1). Reused corpus IDs where they cover behavior:
+`05-3474-23-451-01` (aux shapes) + `05-3474-23-451-02` (mode
+selector) for the updated vectors.
+
+| Requirement ID | State | Implementing code | Verifying test |
+|----------------|-------|-------------------|----------------|
+| 05-3474-23-4514-01 | implemented + verified | `classical.rs`: `KeyIdentifier::DataKey` (zero-length mode-0 shape) + `encoded_len` 0 + encode/decode arms consuming no octet (§4.5.1.4, anchor p0481-L11467-L11469; data-key identity §4.5.3, anchor p0481-L11490-L11497); `AuxHeader` doc (presence conditioned on the mode bits) | `security/tests/vectors.rs::vector_aux_mode0_no_trailing_octet_05_3474_23_4514_01` (5/13-octet mode-0 layouts + roundtrip, 6-octet mode-1 contrast, truncation + flag/shape-mismatch legs), updated `vector_aux_data_key` (exact 5-octet layout), updated `vector_aps_seal_shape_keyid_modes_05_3474_23_451_02` F leg (captured `06 00*4` decodes 5 octets, `a5` is payload), updated `vector_aux_level0_all_control_shapes`, `tests/roundtrip.rs::fuzz_aux_header_roundtrip` (mode-0 fuzz legs over the unit shape) |

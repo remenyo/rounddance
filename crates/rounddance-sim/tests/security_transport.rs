@@ -37,10 +37,10 @@ fn secured_frame(
     payload: &[u8],
 ) -> Result<Vec<u8>, SecError> {
     let header = AuxHeader {
-        control: SecurityControl::new(5, KeyIdMode::DataKey, false).unwrap(),
+        control: SecurityControl::new(5, KeyIdMode::Index, false).unwrap(),
         frame_counter: tx_counter.take()?,
         ext_source: None,
-        key_id: KeyIdentifier::Seq(keys.active().seq),
+        key_id: KeyIdentifier::Index(keys.active().seq),
     };
     let hlen = header.header_len().ok_or(SecError::BadKeyIdMode)?;
     let mut out = vec![0u8; hlen + payload.len()];
@@ -59,7 +59,7 @@ fn accept_frame(
 ) -> Result<Vec<u8>, SecError> {
     let (header, used) = AuxHeader::decode(frame)?;
     let seq = match header.key_id {
-        KeyIdentifier::Seq(s) => s,
+        KeyIdentifier::Index(s) => s,
         _ => return Err(SecError::BadKeyIdMode),
     };
     let _key = keys.select(seq).ok_or(SecError::NotFound)?;

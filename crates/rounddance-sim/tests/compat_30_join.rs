@@ -132,10 +132,10 @@ fn run_30_transaction(seed: u64) -> CompatOutcome {
     // aux level 5 | ZCL toggle frame.
     let mut tx_counter = FrameCounter::new(100, 4);
     let aux = AuxHeader {
-        control: SecurityControl::new(5, KeyIdMode::DataKey, false).unwrap(),
+        control: SecurityControl::new(5, KeyIdMode::Index, false).unwrap(),
         frame_counter: tx_counter.take().unwrap(),
         ext_source: None,
-        key_id: KeyIdentifier::Seq(0x01),
+        key_id: KeyIdentifier::Index(0x01),
     };
     let mut zcl = [0u8; 8];
     let zlen = onoff::client::toggle(0x51, &mut zcl).unwrap();

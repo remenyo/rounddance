@@ -49,7 +49,7 @@ fn random_header(rng: &mut Rng) -> AuxHeader {
         frame_counter: u32::from_le_bytes(ctr),
         ext_source: extended.then_some(s8),
         key_id: match mode {
-            KeyIdMode::DataKey => KeyIdentifier::Seq(idx[0]),
+            KeyIdMode::DataKey => KeyIdentifier::DataKey,
             KeyIdMode::Index => KeyIdentifier::Index(idx[0]),
             KeyIdMode::Source4 => KeyIdentifier::Source4(s4, idx[0]),
             KeyIdMode::Source8 => KeyIdentifier::Source8(s8, idx[0]),

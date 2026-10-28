@@ -14,23 +14,86 @@
 
 use rounddance_security::*;
 
-// 05-3474-23-451-01: DataKey mode, level 5, counter 0x12345678, seq 3.
-// control 0x05 | counter LE | seq.
+// 05-3474-23-451-01 + 05-3474-23-4514-01: DataKey mode, level 5, counter 0x12345678. The data key is implicit, so no trailing
+// octet follows: control 0x05 | counter LE, 5 octets total.
 #[test]
 fn vector_aux_data_key() {
     let header = AuxHeader {
         control: SecurityControl::new(5, KeyIdMode::DataKey, false).unwrap(),
         frame_counter: 0x1234_5678,
         ext_source: None,
-        key_id: KeyIdentifier::Seq(0x03),
+        key_id: KeyIdentifier::DataKey,
     };
-    assert_eq!(header.header_len(), Some(6));
+    assert_eq!(header.header_len(), Some(5));
     let mut out = [0u8; MAX_AUX_LEN];
     let n = header.encode_into(&mut out).unwrap();
-    assert_eq!(n, 6);
-    assert_eq!(&out[..n], &[0x05, 0x78, 0x56, 0x34, 0x12, 0x03]);
+    assert_eq!(n, 5);
+    assert_eq!(&out[..n], &[0x05, 0x78, 0x56, 0x34, 0x12]);
     let (back, used) = AuxHeader::decode(&out[..n]).unwrap();
     assert_eq!((back, used), (header, n));
+}
+
+// 05-3474-23-4514-01: the key sequence number octet is present
+// only under the network-key bits (§4.5.1.4 Figure 4-24: the aux is
+// control + counter + source 0/8 + sequence-number 0/1). Data-key
+// headers are 5 octets bare (13 with the extended-nonce source);
+// network-key headers carry the one sequence octet (6 / 14).
+// A trailing octet after a data-key header belongs to the payload.
+#[test]
+fn vector_aux_mode0_no_trailing_octet_05_3474_23_4514_01() {
+    let bare = AuxHeader {
+        control: SecurityControl::new(5, KeyIdMode::DataKey, false).unwrap(),
+        frame_counter: 0x0102_0304,
+        ext_source: None,
+        key_id: KeyIdentifier::DataKey,
+    };
+    assert_eq!(bare.header_len(), Some(5));
+    let mut out = [0u8; MAX_AUX_LEN];
+    let n = bare.encode_into(&mut out).unwrap();
+    assert_eq!(n, 5);
+    assert_eq!(&out[..n], &[0x05, 0x04, 0x03, 0x02, 0x01]);
+    let (back, used) = AuxHeader::decode(&out[..n]).unwrap();
+    assert_eq!((back, used), (bare, 5));
+
+    let ext = AuxHeader {
+        control: SecurityControl::new(5, KeyIdMode::DataKey, true).unwrap(),
+        frame_counter: 0x0102_0304,
+        ext_source: Some([0x77; 8]),
+        key_id: KeyIdentifier::DataKey,
+    };
+    assert_eq!(ext.header_len(), Some(13));
+    let m = ext.encode_into(&mut out).unwrap();
+    assert_eq!(m, 13);
+    assert_eq!(out[0], 0x25);
+    assert_eq!(&out[5..13], &[0x77; 8]);
+    let (eback, eused) = AuxHeader::decode(&out[..m]).unwrap();
+    assert_eq!((eback, eused), (ext, 13));
+
+    // Network-key contrast: the same control/counter shape with
+    // the mode-1 bits carries exactly one sequence octet.
+    let net = AuxHeader {
+        control: SecurityControl::new(5, KeyIdMode::Index, false).unwrap(),
+        frame_counter: 0x0102_0304,
+        ext_source: None,
+        key_id: KeyIdentifier::Index(0x09),
+    };
+    assert_eq!(net.header_len(), Some(6));
+    let k = net.encode_into(&mut out).unwrap();
+    assert_eq!(k, 6);
+    assert_eq!(&out[..k], &[0x0d, 0x04, 0x03, 0x02, 0x01, 0x09]);
+    let (nback, nused) = AuxHeader::decode(&out[..k]).unwrap();
+    assert_eq!((nback, nused), (net, 6));
+
+    // Four octets are not a bare data-key header.
+    assert_eq!(AuxHeader::decode(&out[..4]), Err(SecError::Truncated));
+    // Data-key control bits with a network-key identifier disagree.
+    let mixed = AuxHeader {
+        control: SecurityControl::new(5, KeyIdMode::DataKey, false).unwrap(),
+        frame_counter: 0,
+        ext_source: None,
+        key_id: KeyIdentifier::Index(0x09),
+    };
+    assert_eq!(mixed.header_len(), None);
 }
 
 // 05-3474-23-451-01: Index mode, level 1, counter 0, index 7.
@@ -107,7 +170,7 @@ fn vector_aux_truncation() {
         control: SecurityControl::new(0, KeyIdMode::DataKey, true).unwrap(),
         frame_counter: 0,
         ext_source: None,
-        key_id: KeyIdentifier::Seq(0),
+        key_id: KeyIdentifier::DataKey,
     };
     assert_eq!(bad.header_len(), None);
     let mut out = [0u8; MAX_AUX_LEN];
@@ -476,11 +539,13 @@ fn vector_aux_level0_all_control_shapes() {
         assert_eq!(rx.control().level, UNSECURED_LEVEL);
     }
     // Secured shape still routes the long way: control 0x05 (level 5,
-    // DataKey) + counter + seq.
+    // DataKey) + counter, 5 octets; the sixth octet is payload, not
+    // a sequence number.
     let secured = [0x05u8, 0x78, 0x56, 0x34, 0x12, 0x03];
     let (rx, used) = AuxReception::decode(&secured).unwrap();
     assert!(!rx.is_plaintext());
-    assert_eq!(used, 6);
+    assert_eq!(used, 5);
+    assert_eq!(secured[used], 0x03);
     assert_eq!(AuxReception::decode(&[]), Err(SecError::Truncated));
 }
 
@@ -670,7 +735,7 @@ fn vector_nwk_ember_zeroed_level_opens() {
         // NWK names the network key: one trailing octet, the key
         // sequence number, which resolves against the key set.
         let seq = match header.key_id {
-            KeyIdentifier::Seq(s) | KeyIdentifier::Index(s) => s,
+            KeyIdentifier::Index(s) => s,
             _ => panic!("NWK names a one-octet network key"),
         };
         assert_eq!(seq, 0);
@@ -813,14 +878,15 @@ fn vector_nwk_nonce_roundtrip_seal_open() {
         control: SecurityControl::new(5, KeyIdMode::DataKey, false).unwrap(),
         frame_counter: 1,
         ext_source: None,
-        key_id: KeyIdentifier::Seq(0),
+        key_id: KeyIdentifier::DataKey,
     };
     assert_eq!(NwkNonce::from_header(&nosrc), Err(SecError::Truncated));
 }
 
-// 05-3474-23-451-01 + 05-3474-23-451-02: APS seal-shape proof from
-// captured air (no behavior change — the codec already separates
-// the modes; this pins the wave-39 finding as a regression guard).
+// 05-3474-23-451-01 + 05-3474-23-451-02 + 05-3474-23-4514-01:
+// APS seal-shape proof from captured air. The base leg is proof
+// only (the codec already separated the modes); the F leg pins
+// the wave-43 mode-0 correction (5-octet data-key aux).
 //
 // Provenance: wave-39 joiner probes. The broken base seal
 // (`~/hwscratch/w39/sniff_b1.txt` probe 0) carries a plaintext
@@ -846,16 +912,18 @@ fn vector_aps_seal_shape_keyid_modes_05_3474_23_451_02() {
     assert_ne!(base.key_id.mode(), KeyIdMode::DataKey);
     assert_eq!(base.key_id, KeyIdentifier::Index(0x00));
 
-    // Fixed F aux: data-key family, counter 0. Only the mode and
-    // the counter are pinned here (the mode-0 trailing-octet
-    // boundary is a separate spec-review item, not this test).
+    // Fixed F aux: data-key family, counter 0, five octets — the
+    // sixth octet (0xa5) is the first payload octet, never a key
+    // sequence number (wave-43 mode-0 fix, 05-3474-23-4514-01).
     let fix_aux: &[u8] = &[0x06, 0x00, 0x00, 0x00, 0x00, 0xa5];
-    let (fix, _) = AuxHeader::decode(fix_aux).unwrap();
+    let (fix, fix_used) = AuxHeader::decode(fix_aux).unwrap();
+    assert_eq!(fix_used, 5);
     assert_eq!(fix.control.level, 6);
     assert_eq!(fix.control.key_id, KeyIdMode::DataKey);
     assert!(!fix.control.extended_nonce);
     assert_eq!(fix.frame_counter, 0);
-    assert_eq!(fix.key_id.mode(), KeyIdMode::DataKey);
+    assert_eq!(fix.key_id, KeyIdentifier::DataKey);
+    assert_eq!(fix_aux[fix_used], 0xa5);
 
     // The plaintext command octet ahead of the aux shifts every
     // downstream parse: decoding at the command octet (the base

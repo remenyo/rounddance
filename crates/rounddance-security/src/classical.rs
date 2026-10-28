@@ -456,9 +456,11 @@ impl<const N: usize> LinkKeyTable<N> {
 /// Requirement `05-3474-23-451-02`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyIdMode {
-    /// One-octet network-key sequence number follows.
+    /// No trailing octet: the data key is implicit (it equals the
+    /// preinstalled link key), so the auxiliary header ends at the
+    /// frame counter (plus the extended-nonce source when present).
     DataKey = 0,
-    /// One-octet key index follows (link-key slot reference).
+    /// One-octet network-key sequence number follows.
     Index = 1,
     /// Four-octet key source plus one-octet index follow.
     Source4 = 2,
@@ -478,12 +480,14 @@ impl KeyIdMode {
     }
 }
 
-/// Key identifier field following the frame counter.
+/// Key identifier field following the frame counter. Only the
+/// network-key shape carries a trailing octet (one sequence-number
+/// octet); the data-key shape carries none — the key is implicit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyIdentifier {
-    /// Network-key sequence number (`DataKey` mode).
-    Seq(u8),
-    /// Key index (`Index` mode).
+    /// Data key (`DataKey` mode): no trailing octets.
+    DataKey,
+    /// Network-key sequence number (`Index` mode).
     Index(u8),
     /// Four-octet source + index (`Source4` mode).
     Source4([u8; 4], u8),
@@ -496,7 +500,7 @@ impl KeyIdentifier {
     #[must_use]
     pub const fn mode(&self) -> KeyIdMode {
         match self {
-            Self::Seq(_) => KeyIdMode::DataKey,
+            Self::DataKey => KeyIdMode::DataKey,
             Self::Index(_) => KeyIdMode::Index,
             Self::Source4(_, _) => KeyIdMode::Source4,
             Self::Source8(_, _) => KeyIdMode::Source8,
@@ -507,7 +511,8 @@ impl KeyIdentifier {
     #[must_use]
     pub const fn encoded_len(&self) -> usize {
         match self {
-            Self::Seq(_) | Self::Index(_) => 1,
+            Self::DataKey => 0,
+            Self::Index(_) => 1,
             Self::Source4(_, _) => 5,
             Self::Source8(_, _) => 9,
         }
@@ -599,10 +604,12 @@ impl SecurityControl {
 }
 
 /// Auxiliary security header: control octet, 4-octet little-endian
-/// frame counter, optional 8-octet extended-nonce source, then the key
-/// identifier field selected by the mode bits.
+/// frame counter, optional 8-octet extended-nonce source, then the
+/// key identifier field selected by the mode bits — which is present
+/// only under the network-key bits (one sequence-number octet) and
+/// absent under the data-key bits.
 ///
-/// Requirement `05-3474-23-451-01`.
+/// Requirement `05-3474-23-451-01` + `05-3474-23-4514-01`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AuxHeader {
     /// Control octet (level, mode, extended-nonce flag).
@@ -648,7 +655,8 @@ impl AuxHeader {
             pos += 8;
         }
         match self.key_id {
-            KeyIdentifier::Seq(s) | KeyIdentifier::Index(s) => {
+            KeyIdentifier::DataKey => {}
+            KeyIdentifier::Index(s) => {
                 out[pos] = s;
                 pos += 1;
             }
@@ -701,14 +709,7 @@ impl AuxHeader {
             None
         };
         let key_id = match control.key_id {
-            KeyIdMode::DataKey => {
-                if buf.len() < pos + 1 {
-                    return Err(SecError::Truncated);
-                }
-                let id = KeyIdentifier::Seq(buf[pos]);
-                pos += 1;
-                id
-            }
+            KeyIdMode::DataKey => KeyIdentifier::DataKey,
             KeyIdMode::Index => {
                 if buf.len() < pos + 1 {
                     return Err(SecError::Truncated);

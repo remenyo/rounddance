@@ -221,10 +221,10 @@ fn secured_apdu(
     tx: &mut FrameCounter,
 ) -> Result<Vec<u8>, SecError> {
     let aux = AuxHeader {
-        control: SecurityControl::new(5, KeyIdMode::DataKey, false).expect("level 5 valid"),
+        control: SecurityControl::new(5, KeyIdMode::Index, false).expect("level 5 valid"),
         frame_counter: tx.take()?,
         ext_source: None,
-        key_id: KeyIdentifier::Seq(keys.active().seq),
+        key_id: KeyIdentifier::Index(keys.active().seq),
     };
     let hlen = aux.header_len().ok_or(SecError::BadKeyIdMode)?;
     let mut inner = vec![0u8; hlen + zcl.len()];
@@ -269,7 +269,7 @@ fn accept_apdu<'a>(
     }
     let (aux, used) = AuxHeader::decode(decoded.payload)?;
     let seq = match aux.key_id {
-        KeyIdentifier::Seq(s) => s,
+        KeyIdentifier::Index(s) => s,
         _ => return Err(SecError::BadKeyIdMode),
     };
     let _key = keys.select(seq).ok_or(SecError::NotFound)?;

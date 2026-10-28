@@ -745,10 +745,10 @@ fn build_secured_npdu(
     out: &mut [u8],
 ) -> Result<usize, AppError> {
     let aux = AuxHeader {
-        control: SecurityControl::new(5, KeyIdMode::DataKey, false).ok_or(AppError::BadFrame)?,
+        control: SecurityControl::new(5, KeyIdMode::Index, false).ok_or(AppError::BadFrame)?,
         frame_counter: tx_counter.take().map_err(|_| AppError::Replay)?,
         ext_source: None,
-        key_id: KeyIdentifier::Seq(0x01),
+        key_id: KeyIdentifier::Index(0x01),
     };
     let alen = aux.header_len().ok_or(AppError::BadFrame)?;
     let mut ctl = ApsFc::data(DeliveryMode::Unicast);

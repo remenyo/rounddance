@@ -86,25 +86,27 @@ fn vector_aps_30_data_shape_wire() {
 }
 
 /// Auxiliary header at the baseline level both profiles transmit:
-/// level 5, data-key identifier carrying the key sequence.
+/// level 5, network-key identifier carrying the key sequence number
+/// (mode-1 bits; the sequence octet is present only under those
+/// bits per 05-3474-23-4514-01).
 #[test]
 fn vector_aux_30_baseline_level_wire() {
     let header = rounddance_security::AuxHeader {
         control: rounddance_security::SecurityControl::new(
             5,
-            rounddance_security::KeyIdMode::DataKey,
+            rounddance_security::KeyIdMode::Index,
             false,
         )
         .unwrap(),
         frame_counter: 0x0000_0042,
         ext_source: None,
-        key_id: rounddance_security::KeyIdentifier::Seq(0x01),
+        key_id: rounddance_security::KeyIdentifier::Index(0x01),
     };
     let mut out = [0u8; 32];
     let n = header.encode_into(&mut out).unwrap();
-    // control 0x05 (level 5, mode data-key 0, no ext nonce), counter
-    // LE, one-octet key sequence.
-    assert_eq!(&out[..n], &[0x05, 0x42, 0x00, 0x00, 0x00, 0x01]);
+    // control 0x0d (level 5, mode network-key 1, no ext nonce),
+    // counter LE, one-octet key sequence.
+    assert_eq!(&out[..n], &[0x0d, 0x42, 0x00, 0x00, 0x00, 0x01]);
     assert_eq!(agree_security_level(5, 5, BASELINE_SEC_LEVEL), Ok(5));
 }
 
