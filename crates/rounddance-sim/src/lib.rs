@@ -26,6 +26,8 @@
 //! replay, scripted media/faults); requirements-seed: N-A (no sim
 //! clauses; harness verifies requirements, it is not one).
 
+#![forbid(unsafe_code)]
+
 use rounddance_mac_sap::{
     Channel, ExtAddr, HasCapabilities, MacAddress, MacCapabilities, MacDataSap, MacError,
     MacMgmtSap, PanId, RxIndication, ShortAddr, TxConfirm, TxHandle, TxRequest, TxStatus,
