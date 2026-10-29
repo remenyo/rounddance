@@ -220,7 +220,12 @@ impl SessionEngine {
         let pan = mac.and_then(|m| m.dst_pan.or(m.src_pan)).unwrap_or(0);
         let secured = nwk.map(|n| n.security).unwrap_or(false);
         if secured {
-            if self.keys.has_key() {
+            // A verified-open leg is decryptable from tree evidence
+            // even when this engine holds no key slot itself (keys
+            // may reach only the dissector, as in the keyed-glue
+            // path); otherwise a loaded slot still marks the frame
+            // decryptable-offline, exactly as before.
+            if tree.decrypted() || self.keys.has_key() {
                 self.secured_decryptable = self.secured_decryptable.saturating_add(1);
             } else {
                 self.secured_orphan = self.secured_orphan.saturating_add(1);

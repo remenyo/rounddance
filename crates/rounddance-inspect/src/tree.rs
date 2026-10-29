@@ -256,12 +256,168 @@ pub enum ZclDetail {
     },
 }
 
+/// MAC command payload summary: the named sub-dissector for MAC
+/// command frames. Only exact fixed shapes are named (association,
+/// disassociation, polls, orphan, beacon request, coordinator
+/// realignment); any other length or identifier leaves the chain at
+/// the `mac-command` stop with no layer here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MacCmdNode {
+    /// MAC command identifier (first MSDU octet).
+    pub command_id: u8,
+    /// Named payload shape.
+    pub kind: MacCmdKind,
+    /// Full MSDU length in octets (command identifier + payload).
+    pub payload_len: u16,
+}
+
+/// Named MAC command payload shapes (2006 fixed layouts; the 2015
+/// additions stay unmodeled by design).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MacCmdKind {
+    /// Association request: capability information octet.
+    AssocReq {
+        /// Capability flags.
+        capabilities: u8,
+    },
+    /// Association response: assigned short plus status.
+    AssocResp {
+        /// Assigned short address (`0xffff` = denied).
+        short_addr: u16,
+        /// Association status.
+        status: u8,
+    },
+    /// Disassociation notification: reason octet.
+    Disassoc {
+        /// Disassociation reason.
+        reason: u8,
+    },
+    /// Data request (poll): empty payload.
+    DataReq,
+    /// PAN identifier conflict: empty payload.
+    PanConflict,
+    /// Orphan notification: empty payload.
+    Orphan,
+    /// Beacon request: empty payload.
+    BeaconReq,
+    /// Coordinator realignment: the 7-octet payload naming the
+    /// network to rejoin.
+    CoordRealign {
+        /// PAN identifier.
+        pan: u16,
+        /// Coordinator short address.
+        coord: u16,
+        /// Logical channel.
+        channel: u8,
+        /// Device short address.
+        short_addr: u16,
+    },
+}
+
+/// NWK command payload summary: the named sub-dissector for NWK
+/// command frames, on unsecured as well as verified-open legs.
+/// Routing and leave shapes reuse the `rounddance-nwk` codecs;
+/// rejoin and timeout shapes are length-gated names (no repo codec
+/// covers them); anything else files as `Unknown` with its command
+/// identifier, never a guess.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NwkCmdNode {
+    /// NWK command identifier (first payload octet).
+    pub command_id: u8,
+    /// Named payload shape.
+    pub kind: NwkCmdKind,
+    /// Full NWK command payload length in octets.
+    pub payload_len: u16,
+}
+
+/// Named NWK command payload shapes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NwkCmdKind {
+    /// Route request: per-originator identifier + destination.
+    RouteRequest {
+        /// Route-request identifier.
+        rreq_id: u8,
+        /// Destination network address.
+        dst_addr: u16,
+    },
+    /// Route reply: request identifier + originator.
+    RouteReply {
+        /// Route-request identifier being answered.
+        rreq_id: u8,
+        /// Originator network address.
+        originator: u16,
+    },
+    /// Link status: entry count plus the first neighbor (the entry
+    /// list itself stays in the capture, never in the node).
+    LinkStatus {
+        /// Declared entry count.
+        entries: u8,
+        /// First listed neighbor (`0xffff` when the list is empty).
+        first_neighbor: u16,
+    },
+    /// Leave: options octet (rejoin/request/remove-children bits).
+    Leave {
+        /// Raw options octet; bit layout is the codec's.
+        options: u8,
+    },
+    /// Secured rejoin request: capability information octet.
+    RejoinRequest {
+        /// Capability flags.
+        capabilities: u8,
+    },
+    /// Secured rejoin response: re-admitted short plus status.
+    RejoinResponse {
+        /// Re-admitted short address.
+        short_addr: u16,
+        /// Rejoin status (`0x00` = accepted).
+        status: u8,
+    },
+    /// End-device timeout request: layout unmodeled, bytes preserved.
+    TimeoutRequest {
+        /// Second payload octet.
+        arg0: u8,
+        /// Third payload octet.
+        arg1: u8,
+    },
+    /// End-device timeout response: layout unmodeled, bytes preserved.
+    TimeoutResponse {
+        /// Second payload octet.
+        arg0: u8,
+        /// Third payload octet.
+        arg1: u8,
+    },
+    /// None of the named shapes: identifier filed, payload unparsed.
+    Unknown,
+}
+
+/// ZDO payload summary: the device-profile leg for APS payloads on
+/// profile `0x0000`. ZDO frames are never ZCL — routing them here
+/// keeps cluster `0x80xx` responses and `0x00xx` requests from
+/// misparsing as ZCL commands. Per-cluster bodies stay unmodeled by
+/// design (as with unmodeled ZCL clusters); the envelope —
+/// request/response direction, transaction sequence, response
+/// status — is always named.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ZdoNode {
+    /// ZDO cluster identifier (`0x8000` bit = response).
+    pub cluster_id: u16,
+    /// True when the response bit is set.
+    pub is_response: bool,
+    /// Transaction sequence number (first payload octet).
+    pub tsn: u8,
+    /// Response status octet (second payload octet of responses).
+    pub status: Option<u8>,
+    /// Full ZDO payload length in octets.
+    pub payload_len: u16,
+}
+
 /// Terminal note: the chain stopped here with bytes left over.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NoteNode {
-    /// Machine-readable reason (`"secured"`, `"truncated"`, `"unknown"`,
-    /// `"trailing"`, `"ack"`, `"beacon"`, `"mac-command"`,
-    /// `"decrypted"`).
+    /// Machine-readable reason (`"secured"` for an NWK/APS key-domain
+    /// miss, `"mac-secured"` for a MAC sealed outer, `"truncated"`,
+    /// `"unknown"`, `"trailing"`, `"ack"`, `"beacon"`,
+    /// `"mac-command"`, `"decrypted"`).
     pub reason: &'static str,
     /// Octets remaining at this layer.
     pub remaining: u16,
@@ -272,17 +428,26 @@ pub struct NoteNode {
 pub enum Layer {
     /// 802.15.4 MAC header.
     Mac(MacNode),
+    /// MAC command payload (fixed shapes only).
+    MacCmd(MacCmdNode),
     /// NWK header.
     Nwk(NwkNode),
+    /// NWK command payload (unsecured or verified-open legs).
+    NwkCmd(NwkCmdNode),
     /// APS header.
     Aps(ApsNode),
     /// ZCL header.
     Zcl(ZclNode),
+    /// ZDO envelope (profile `0x0000`, never ZCL).
+    Zdo(ZdoNode),
     /// Chain stop note.
     Note(NoteNode),
 }
 
-/// Maximum layers per tree: MAC + NWK + APS + ZCL + one stop note.
+/// Maximum layers per tree: MAC + NWK + APS + ZCL/ZDO + one stop
+/// note, or MAC + NWK + command leg + one stop note. Named command
+/// and profile legs take a layer slot that an unnamed stop used to
+/// fill alone, so depth grows by at most one per frame.
 pub const MAX_LAYERS: usize = 5;
 
 /// Bounded decode tree: the full dissector-chain result for one frame.
@@ -409,5 +574,54 @@ impl DecodeTree {
             }
         }
         None
+    }
+
+    /// First MAC command layer, if present.
+    #[must_use]
+    pub fn maccmd(&self) -> Option<MacCmdNode> {
+        for slot in self.layers() {
+            if let Some(Layer::MacCmd(m)) = slot {
+                return Some(*m);
+            }
+        }
+        None
+    }
+
+    /// First NWK command layer, if present.
+    #[must_use]
+    pub fn nwkcmd(&self) -> Option<NwkCmdNode> {
+        for slot in self.layers() {
+            if let Some(Layer::NwkCmd(n)) = slot {
+                return Some(*n);
+            }
+        }
+        None
+    }
+
+    /// First ZDO layer, if present.
+    #[must_use]
+    pub fn zdo(&self) -> Option<ZdoNode> {
+        for slot in self.layers() {
+            if let Some(Layer::Zdo(z)) = slot {
+                return Some(*z);
+            }
+        }
+        None
+    }
+
+    /// True once a verified-open leg was pushed: the tree carries the
+    /// `decrypted` stop note, so the session engine can count the
+    /// frame decryptable from tree evidence even when it holds no
+    /// key slot itself.
+    #[must_use]
+    pub fn decrypted(self) -> bool {
+        for slot in self.layers() {
+            if let Some(Layer::Note(n)) = slot {
+                if n.reason == "decrypted" {
+                    return true;
+                }
+            }
+        }
+        false
     }
 }

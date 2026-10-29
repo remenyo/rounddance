@@ -7,7 +7,7 @@
 //! the Zigbee stack emits are accepted. Anything else is a typed
 //! refusal, never a guess.
 
-use crate::tree::{Addr, MacNode, TreeError};
+use crate::tree::{Addr, MacCmdKind, MacCmdNode, MacNode, TreeError};
 
 /// Frame-control bits we interpret.
 const FC_TYPE_MASK: u16 = 0x0007;
@@ -189,4 +189,74 @@ impl From<MacError> for TreeError {
             MacError::UnsupportedAddressing { .. } => TreeError::MacMalformed,
         }
     }
+}
+
+/// MAC command identifiers named below (2006 fixed layouts).
+pub const CMD_ASSOC_REQ: u8 = 0x01;
+pub const CMD_ASSOC_RESP: u8 = 0x02;
+pub const CMD_DISASSOC: u8 = 0x03;
+pub const CMD_DATA_REQ: u8 = 0x04;
+pub const CMD_PAN_CONFLICT: u8 = 0x05;
+pub const CMD_ORPHAN: u8 = 0x06;
+pub const CMD_BEACON_REQ: u8 = 0x07;
+pub const CMD_COORD_REALIGN: u8 = 0x08;
+
+/// MAC command payload dissector failure.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MacCmdError {
+    /// No model for this command identifier (2015 additions and
+    /// reserved ids stay at the `mac-command` stop).
+    UnknownCommand(u8),
+    /// Named command with a payload length its fixed layout rejects.
+    Length {
+        /// Command identifier.
+        command_id: u8,
+        /// MSDU length seen (command identifier + payload).
+        len: usize,
+    },
+}
+
+/// Dissect one MAC command MSDU (command identifier octet first).
+/// Only exact fixed shapes are named; anything else is a typed
+/// refusal and the chain keeps the `mac-command` stop with no
+/// command layer.
+pub fn decode_command(cmd: u8, msdu: &[u8]) -> Result<MacCmdNode, MacCmdError> {
+    use MacCmdKind as K;
+    if msdu.is_empty() || msdu[0] != cmd {
+        return Err(MacCmdError::UnknownCommand(cmd));
+    }
+    let len = msdu.len();
+    let kind = match cmd {
+        CMD_ASSOC_REQ if len == 2 => K::AssocReq {
+            capabilities: msdu[1],
+        },
+        CMD_ASSOC_RESP if len == 4 => K::AssocResp {
+            short_addr: u16::from_le_bytes([msdu[1], msdu[2]]),
+            status: msdu[3],
+        },
+        CMD_DISASSOC if len == 2 => K::Disassoc { reason: msdu[1] },
+        CMD_DATA_REQ if len == 1 => K::DataReq,
+        CMD_PAN_CONFLICT if len == 1 => K::PanConflict,
+        CMD_ORPHAN if len == 1 => K::Orphan,
+        CMD_BEACON_REQ if len == 1 => K::BeaconReq,
+        CMD_COORD_REALIGN if len == 8 => K::CoordRealign {
+            pan: u16::from_le_bytes([msdu[1], msdu[2]]),
+            coord: u16::from_le_bytes([msdu[3], msdu[4]]),
+            channel: msdu[5],
+            short_addr: u16::from_le_bytes([msdu[6], msdu[7]]),
+        },
+        CMD_ASSOC_REQ | CMD_ASSOC_RESP | CMD_DISASSOC | CMD_DATA_REQ | CMD_PAN_CONFLICT
+        | CMD_ORPHAN | CMD_BEACON_REQ | CMD_COORD_REALIGN => {
+            return Err(MacCmdError::Length {
+                command_id: cmd,
+                len,
+            });
+        }
+        _ => return Err(MacCmdError::UnknownCommand(cmd)),
+    };
+    Ok(MacCmdNode {
+        command_id: cmd,
+        kind,
+        payload_len: len.min(u16::MAX as usize) as u16,
+    })
 }

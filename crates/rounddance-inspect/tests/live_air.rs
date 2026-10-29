@@ -383,12 +383,16 @@ fn nwk_decrypt_opens_with_slotted_key_and_stops_without() {
     assert_eq!(note_reasons(&bare_shut), vec!["secured"]);
 
     // Decrypted NWK command frames carry no APS header: the chain
-    // files `decrypted` then `trailing` (leave-shaped plaintext).
+    // files `decrypted`, names the leave leg, then `trailing` (the
+    // command layer adds one depth over the wave-49 shape).
     let cmd = build_secured_nwk_command(&[0x04, 0x60]);
     let opened = chain::dissect_with_keys(&cmd, eng.keys()).unwrap();
     assert!(opened.aps().is_none());
     assert_eq!(note_reasons(&opened), vec!["decrypted", "trailing"]);
-    assert_eq!(opened.len(), 4);
+    assert_eq!(opened.len(), 5);
+    let lc = opened.nwkcmd().expect("leave leg");
+    assert_eq!(lc.command_id, 0x04);
+    assert_eq!(lc.kind, tree::NwkCmdKind::Leave { options: 0x60 });
 }
 
 #[test]

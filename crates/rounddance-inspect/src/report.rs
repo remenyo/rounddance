@@ -4,7 +4,7 @@
 //! payload bytes. A secured frame is reported as `secured` with its
 //! remaining length, never decrypted.
 
-use crate::tree::{Addr, DecodeTree, Layer};
+use crate::tree::{Addr, DecodeTree, Layer, MacCmdKind, MacCmdNode, NwkCmdKind, NwkCmdNode};
 use std::fmt::Write as _;
 
 /// One-line human summary plus one indented line per layer.
@@ -95,6 +95,37 @@ pub fn to_text(tree: &DecodeTree) -> String {
                     detail_text(&z.detail),
                 );
             }
+            Layer::MacCmd(m) => {
+                let _ = writeln!(
+                    s,
+                    "  maccmd: id={:#04x} {} len={}B",
+                    m.command_id,
+                    maccmd_text(&m.kind),
+                    m.payload_len,
+                );
+            }
+            Layer::NwkCmd(n) => {
+                let _ = writeln!(
+                    s,
+                    "  nwkcmd: id={:#04x} {} len={}B",
+                    n.command_id,
+                    nwkcmd_text(&n.kind),
+                    n.payload_len,
+                );
+            }
+            Layer::Zdo(z) => {
+                let _ = writeln!(
+                    s,
+                    "  zdo: cluster={} profile=0x0000 {} tsn={} status={} len={}B",
+                    hex16(z.cluster_id),
+                    if z.is_response { "resp" } else { "req" },
+                    hex8(z.tsn),
+                    z.status
+                        .map(|v| format!("{v:#04x}"))
+                        .unwrap_or_else(|| String::from("-")),
+                    z.payload_len,
+                );
+            }
             Layer::Note(n) => {
                 let _ = writeln!(s, "  …: {} ({}B left)", n.reason, n.remaining);
             }
@@ -164,6 +195,24 @@ pub fn to_json(tree: &DecodeTree) -> String {
                     z.cluster_id,
                     z.profile_id,
                     detail_json(&z.detail),
+                ));
+            }
+            Layer::MacCmd(m) => {
+                s.push_str(&maccmd_json(m));
+            }
+            Layer::NwkCmd(n) => {
+                s.push_str(&nwkcmd_json(n));
+            }
+            Layer::Zdo(z) => {
+                s.push_str(&format!(
+                    "{{\"zdo\":{{\"cluster\":{},\"resp\":{},\"tsn\":{},\"status\":{},\"len\":{}}}}}",
+                    z.cluster_id,
+                    z.is_response,
+                    z.tsn,
+                    z.status
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| String::from("null")),
+                    z.payload_len,
                 ));
             }
             Layer::Note(n) => {
@@ -614,6 +663,139 @@ fn window_json(w: Option<crate::session::SeqWindow>) -> String {
         )
     })
     .unwrap_or_else(|| String::from("null"))
+}
+
+fn maccmd_text(k: &MacCmdKind) -> String {
+    match *k {
+        MacCmdKind::AssocReq { capabilities } => {
+            format!("assoc-req caps={capabilities:#04x}")
+        }
+        MacCmdKind::AssocResp { short_addr, status } => {
+            format!(
+                "assoc-resp short={} status={status:#04x}",
+                hex16(short_addr)
+            )
+        }
+        MacCmdKind::Disassoc { reason } => format!("disassoc reason={reason:#04x}"),
+        MacCmdKind::DataReq => String::from("data-req"),
+        MacCmdKind::PanConflict => String::from("pan-conflict"),
+        MacCmdKind::Orphan => String::from("orphan"),
+        MacCmdKind::BeaconReq => String::from("beacon-req"),
+        MacCmdKind::CoordRealign {
+            pan,
+            coord,
+            channel,
+            short_addr,
+        } => format!(
+            "realign pan={} coord={} ch={channel} short={}",
+            hex16(pan),
+            hex16(coord),
+            hex16(short_addr),
+        ),
+    }
+}
+
+fn nwkcmd_text(k: &NwkCmdKind) -> String {
+    match *k {
+        NwkCmdKind::RouteRequest { rreq_id, dst_addr } => {
+            format!("route-req id={rreq_id:#04x} dst={}", hex16(dst_addr))
+        }
+        NwkCmdKind::RouteReply {
+            rreq_id,
+            originator,
+        } => format!("route-rsp id={rreq_id:#04x} orig={}", hex16(originator)),
+        NwkCmdKind::LinkStatus {
+            entries,
+            first_neighbor,
+        } => format!(
+            "link-status entries={entries} first={}",
+            hex16(first_neighbor)
+        ),
+        NwkCmdKind::Leave { options } => format!("leave opts={options:#04x}"),
+        NwkCmdKind::RejoinRequest { capabilities } => {
+            format!("rejoin-req caps={capabilities:#04x}")
+        }
+        NwkCmdKind::RejoinResponse { short_addr, status } => format!(
+            "rejoin-rsp short={} status={status:#04x}",
+            hex16(short_addr)
+        ),
+        NwkCmdKind::TimeoutRequest { arg0, arg1 } => {
+            format!("timeout-req arg0={arg0:#04x} arg1={arg1:#04x}")
+        }
+        NwkCmdKind::TimeoutResponse { arg0, arg1 } => {
+            format!("timeout-rsp arg0={arg0:#04x} arg1={arg1:#04x}")
+        }
+        NwkCmdKind::Unknown => String::from("unknown"),
+    }
+}
+
+fn maccmd_json(m: &MacCmdNode) -> String {
+    let (kind, extra) = match m.kind {
+        MacCmdKind::AssocReq { capabilities } => ("assoc-req", format!(",\"caps\":{capabilities}")),
+        MacCmdKind::AssocResp { short_addr, status } => (
+            "assoc-resp",
+            format!(",\"short\":{short_addr},\"status\":{status}"),
+        ),
+        MacCmdKind::Disassoc { reason } => ("disassoc", format!(",\"reason\":{reason}")),
+        MacCmdKind::DataReq => ("data-req", String::new()),
+        MacCmdKind::PanConflict => ("pan-conflict", String::new()),
+        MacCmdKind::Orphan => ("orphan", String::new()),
+        MacCmdKind::BeaconReq => ("beacon-req", String::new()),
+        MacCmdKind::CoordRealign {
+            pan,
+            coord,
+            channel,
+            short_addr,
+        } => (
+            "realign",
+            format!(",\"pan\":{pan},\"coord\":{coord},\"ch\":{channel},\"short\":{short_addr}"),
+        ),
+    };
+    format!(
+        "{{\"maccmd\":{{\"cmd\":{},\"kind\":\"{kind}\"{extra}}}}}",
+        m.command_id
+    )
+}
+
+fn nwkcmd_json(n: &NwkCmdNode) -> String {
+    let (kind, extra) = match n.kind {
+        NwkCmdKind::RouteRequest { rreq_id, dst_addr } => {
+            ("route-req", format!(",\"id\":{rreq_id},\"dst\":{dst_addr}"))
+        }
+        NwkCmdKind::RouteReply {
+            rreq_id,
+            originator,
+        } => (
+            "route-rsp",
+            format!(",\"id\":{rreq_id},\"orig\":{originator}"),
+        ),
+        NwkCmdKind::LinkStatus {
+            entries,
+            first_neighbor,
+        } => (
+            "link-status",
+            format!(",\"entries\":{entries},\"first\":{first_neighbor}"),
+        ),
+        NwkCmdKind::Leave { options } => ("leave", format!(",\"opts\":{options}")),
+        NwkCmdKind::RejoinRequest { capabilities } => {
+            ("rejoin-req", format!(",\"caps\":{capabilities}"))
+        }
+        NwkCmdKind::RejoinResponse { short_addr, status } => (
+            "rejoin-rsp",
+            format!(",\"short\":{short_addr},\"status\":{status}"),
+        ),
+        NwkCmdKind::TimeoutRequest { arg0, arg1 } => {
+            ("timeout-req", format!(",\"arg0\":{arg0},\"arg1\":{arg1}"))
+        }
+        NwkCmdKind::TimeoutResponse { arg0, arg1 } => {
+            ("timeout-rsp", format!(",\"arg0\":{arg0},\"arg1\":{arg1}"))
+        }
+        NwkCmdKind::Unknown => ("unknown", String::new()),
+    };
+    format!(
+        "{{\"nwkcmd\":{{\"cmd\":{},\"kind\":\"{kind}\"{extra}}}}}",
+        n.command_id
+    )
 }
 
 fn detail_text(d: &crate::tree::ZclDetail) -> String {

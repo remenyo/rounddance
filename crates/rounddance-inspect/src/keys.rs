@@ -78,7 +78,8 @@ impl KeySlots {
     }
 
     /// Whether any NWK key is loaded (secured frames seen from here
-    /// on count as decryptable-offline).
+    /// on count as decryptable-offline; a verified-open tree leg
+    /// counts decryptable regardless — see [`crate::session`]).
     #[must_use]
     pub fn has_key(&self) -> bool {
         self.slots.iter().any(|s| s.is_some())

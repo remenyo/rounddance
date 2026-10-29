@@ -1248,3 +1248,48 @@ keyed opens; report `~/hwscratch/w49/SUMMARY.md` §1/§5.
 | RD-INSPECT-21 | implemented + verified | `decrypt::open_nwk` (network-base level-5 restore over the zeroed on-air octet, strict key-sequence slot match via `keys::key_by_seq`, extended-source nonce, 4-octet integrity verification, bounded allocation-free open; `None` on no slot, sequence miss, non-network-key shape, or any integrity failure) + `chain::dissect_with_keys` / `dissect_nwk_with_keys` (`decrypted` leg continues on the verified plaintext, all other secured frames keep the `secured` stop) | `inspect/tests/live_air.rs::nwk_decrypt_opens_with_slotted_key_and_stops_without` (synthetic seal→open round trip to APS+ZCL, no-key / wrong-sequence / wrong-key / mutated-octet / bare-NWK legs) + `::nwk_decrypt_gates_session_decryptability` (decryptable 1 vs orphan 1) + `::genuine_secured_air_never_opens_off_slot` (live f19) + `::captured_corpus_pins` (t1/t2 hashes + counts + procedure) |
 | RD-INSPECT-22 | implemented + verified | `tree::Radio` + `DecodeTree::set_radio` (positive RSSI files as unknown) + session per-device `last_rssi` / `last_lqi` (quirk readings never overwrite) + `report` text/JSON radio legs + `capture::Captured::rssi` validity-range documentation (positive = unknown); session schema stays v1, signal is live state, never snapshot state | `inspect/tests/live_air.rs::radio_metadata_threads_tree_to_session` (tree attach, device fold, quirk non-overwrite, report shapes, schema has no radio keys) + replays (TC −104/255 vs joiner −117/228 per-device discrimination) |
 | RD-INSPECT-23 | implemented + verified | `sniffer::parse_received` (shared `received:` line shape, FCS stripped) + `sniffer::ReplayListener` (`std`, saved-feed replay through the same parser) + `inspect-live` binary (`live` feature: termios serial driver with `unsafe` confined to the binary, live accounting with radio attach, `--replay` conformance mode) | `sniffer` unit tests (live shape, bogus-power passthrough, non-frame legs) + `inspect/tests/live_air.rs::replay_listener_feeds_chain_and_session` (saved feed → listener → chain → session) + replays (live1/t1/t2 byte-identical hex parity vs the w48 glue log; live == replay by shared parser) |
+
+## Wave-50 traceability — inspector leftover closure (lane 2)
+
+Wave-49 lane 2 closed G1/G2/G3 + INS-LIVE-01 (commit 703cb1f) but
+carried four items, observed against the wave-49 live captures
+(`~/hwscratch/w49/SUMMARY.md` §4.1): sub-NWK dissectors still open
+(MAC command payloads stop at `mac-command`, NWK command payloads
+at `trailing`), the len-76 garbage secured-stop quirk x2 (r1 f611 /
+r2 f293: MAC-sealed garbage filed under the NWK `secured` stop),
+INS-DEC-01 (decrypted ZDO payloads fed to the ZCL dissector), and
+INS-DEC-02 (session `secured_decryptable` stays 0 despite 47–95
+verified-open legs per run). Verified against the G4-closure claim
+first: RD-INSPECT-19's stop naming + command-id + attribution stands
+(proven by the untouched `mac_beacon_and_commands_decode_with_named_stops`
+at this HEAD), so only payload sub-dissection was truly open. This
+wave closes all four with regression goldens from the w48/w49
+captures (hashes/metadata only, key bytes local-only outside the
+repo with the documented offline procedure). No lab use, no corpus
+writes; wording in code/tests is paraphrase only (D1). 5 repo-minted
+IDs (`RD-INSPECT-24..28`), MINTED-pending-confirm.
+
+Captured-air vectors: the MAC orphan (r2 f74) + coordinator
+realignment (r2 f76) and the garbage outer (r1 f611) pinned in
+`inspect/tests/decode_depth.rs` are verbatim wave-49 live frames
+(`~/hwscratch/w49/r2.frames.log` 1186 frames, `r1k.frames.log` 692
+frames); the w49 pcaps pin as metadata only — `r1.pcap` sha256
+`dcaa59cf347fa660798c228c979360693d68d27057c21d56aa4ae8c4dac059`
+(692 frames), `r2.pcap` sha256
+`40e88819c6140315d856fc3e56f0fd11b5beec598d346b4dac0009e98d78749d480`
+(1186 frames), `r1b.pcap` sha256
+`dab5242cf79143dc0eccf53911b65fb8c7004fd4904fc7eddf0bc97ec3`
+(605 frames) — no key bytes, no plaintext. Offline reproduction
+procedure: rebuild the `~/hwscratch/w49/inspect-glue` probe against
+this HEAD and
+`./target/debug/inspect-live --replay ~/hwscratch/w49/sniff_<t>.txt --channel 25 --tag <t> --out ~/hwscratch/w50`
+plus the `--netkey-hex ~/hwscratch/w49/.netkey-hex` (lab `0600` key
+file, never in the repo) keyed legs; report `~/hwscratch/w50/SUMMARY.md`.
+
+| Requirement ID | State | Implementing code | Verifying test |
+|----------------|-------|-------------------|----------------|
+| RD-INSPECT-24 | implemented + verified | `nwkcmd::decode` (routing + leave shapes reuse the `rounddance-nwk` codecs with TLV-tail accounting; rejoin-req/rsp + timeout-req/rsp are length-gated names over the live (id,len) census — `(06,2) (07,4) (0b,3) (0c,3)`; anything else files `NwkCmdKind::Unknown` with its identifier; empty refuses) + `chain::finish_after_nwk` (command leg rides beside the `trailing` stop, remainder = TLV tail or 0) + `report` text/JSON `nwkcmd` legs | `inspect/tests/decode_depth.rs::nwk_command_legs_name_every_live_shape` (every live (id,len) pair as unsecured chains, codec-built link-status empty + one-entry, unmodeled-id `Unknown`, empty-payload `trailing`) + `::live_air::nwk_decrypt_opens_with_slotted_key_and_stops_without` leave leg now 5 layers (contract evolution: +NwkCmd beside `decrypted`+`trailing`) + replays (keyed r1/r2/r1b: 34/58/27 `nwkcmd` legs incl. the unsecured probes; every stop taxonomy unchanged) |
+| RD-INSPECT-25 | implemented + verified | `mac::decode_command` (exact-length fixed shapes only: assoc-req/resp, disassoc, data-req, PAN-conflict, orphan, beacon-req, 8-octet coordinator realignment; wrong length or 2015+ id refuses) + `chain` MAC-command arm (named layer beside the `mac-command` stop) + `report` text/JSON `maccmd` legs + `inspect-live` depth key | `inspect/tests/decode_depth.rs::mac_command_legs_name_every_live_shape` (verbatim w48 beacon-req/assoc-req/data-req/assoc-resp + verbatim w49 r2 orphan/realign + report shapes + dangling-length no-leg) + replays (r1/r2/r1b: 304/545/268 `maccmd` legs, stop taxonomy unchanged) |
+| RD-INSPECT-26 | implemented + verified | `zdo::decode` (response bit + tsn + response-status envelope; empty refuses) + `chain::finish_aps_zcl` (profile `0x0000` routes to ZDO, never ZCL) + `report` text/JSON `zdo` legs | `inspect/tests/decode_depth.rs::repro_zdo_payload_never_reaches_zcl` (failing-first: tsn-as-frame-control misparse) + `::zdo_envelope_names_requests_and_responses` (annce req, 1-octet response, empty-body `unknown`, HA still ZCL, APS-broadcast-to-ZDO refusal pinned) + replays (keyed r1/r2/r1b: 14/22/14 `zdo` legs; the 4/run ZCL misparses gone) |
+| RD-INSPECT-27 | implemented + verified | `session::note_tree` (verified-open tree legs count `secured_decryptable` even with no engine key slot; sealed-without-slot still `secured_orphan`, loaded-slot semantics unchanged) + `tree::DecodeTree::decrypted` | `inspect/tests/decode_depth.rs::repro_verified_open_tree_counts_decryptable_without_engine_key` (failing-first: dissector-only keys) + `::engine::engine_key_slots_gate_decryptability` + `::live_air::nwk_decrypt_gates_session_decryptability` (both unchanged, back-compat) + replays (keyed r1/r2/r1b sessions: 54/95/47 decryptable, 0 orphan) |
+| RD-INSPECT-28 | implemented + verified | `chain` MAC-sealed arm stops `mac-secured` (was `secured`); session secured counters already key on NWK security only, so the garbage outer never touches them | `inspect/tests/decode_depth.rs::repro_garbage_mac_secured_stop_is_ambiguous` (failing-first: verbatim r1 f611) + `::mac_secured_stop_stays_out_of_session_secured_counts` (counters + report shapes) + replays (quirk frames file `mac-secured`, transport outers keep `secured`) |

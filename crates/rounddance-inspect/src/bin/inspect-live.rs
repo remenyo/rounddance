@@ -217,9 +217,12 @@ fn depth_key(t: &rounddance_inspect::tree::DecodeTree) -> (String, String) {
     for slot in t.layers().iter().flatten() {
         match slot {
             Layer::Mac(_) => names.push("mac"),
+            Layer::MacCmd(_) => names.push("maccmd"),
             Layer::Nwk(_) => names.push("nwk"),
+            Layer::NwkCmd(_) => names.push("nwkcmd"),
             Layer::Aps(_) => names.push("aps"),
             Layer::Zcl(_) => names.push("zcl"),
+            Layer::Zdo(_) => names.push("zdo"),
             Layer::Note(n) => {
                 names.push("note");
                 stop = n.reason.to_string();
