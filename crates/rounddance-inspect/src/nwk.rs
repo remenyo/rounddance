@@ -1,12 +1,24 @@
 //! NWK dissector: reused `rounddance-nwk` codec → [`NwkNode`](crate::tree::NwkNode).
+//!
+//! Only the stack protocol version decodes: any other version
+//! nibble refuses before a single header field is trusted, so
+//! non-NWK bytes that happen to parse as a header (Touchlink
+//! transaction bytes decode as a version-5 "header" on the
+//! wave-50 captures) can never hallucinate an NWK/APS/ZCL tree.
+//! Green-Power (version 3) has no inspector leg and files the
+//! same refusal.
 
 use crate::tree::NwkNode;
 
-/// NWK dissector failure (codec refusal, passed through).
+/// NWK dissector failure (codec refusal, passed through, plus the
+/// inspector's own version gate).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NwkError {
     /// Codec refusal; discriminant preserved for the report.
     Codec(u8),
+    /// Protocol version other than the stack's (`0x02`): refused
+    /// before any header field is trusted; carries the version seen.
+    BadVersion(u8),
 }
 
 /// Map the codec error to a stable small discriminant for reports.
@@ -36,6 +48,14 @@ fn frame_type_bits(t: rounddance_nwk::frame::FrameType) -> u8 {
 pub fn decode(buf: &[u8]) -> Result<(NwkNode, usize, &[u8]), NwkError> {
     match rounddance_nwk::frame::decode(buf) {
         Ok(d) => {
+            // Version gate: only the stack version continues. The
+            // codec accepts the Green-Power value so GP-adjacent
+            // frames stay describable elsewhere; the inspector has
+            // no GP leg, so it refuses here instead of trusting
+            // header fields from an alien version.
+            if d.header.control.protocol_version != rounddance_nwk::frame::NWKC_PROTOCOL_VERSION {
+                return Err(NwkError::BadVersion(d.header.control.protocol_version));
+            }
             let header_len = buf.len() - d.payload.len();
             // The command id is the first payload octet only on
             // unsecured command frames; on secured frames the payload

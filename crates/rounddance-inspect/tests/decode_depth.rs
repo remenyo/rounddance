@@ -461,6 +461,188 @@ fn zdo_envelope_names_requests_and_responses() {
 // RD-INSPECT-28: `mac-secured` stop (garbage quirk follow-through).
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Wave-51 Touchlink gaps (G1/G2/G3): every inter-PAN shape below is a
+// verbatim wave-50 captured frame (`~/hwscratch/w50/c20.pcap`, ch20
+// run — the channel whose scan-response transaction bytes parsed as
+// a version-5 "NWK" header with full APS/ZCL legs pre-fix).
+// Provenance: scan-req f24, scan-rsp f25, start order f129,
+// start-rsp f130, join order f131, join-rsp f132. The orders carry
+// captured-air wrapped-key ciphertext only (openable solely with
+// the lab keys, never embedded); no key bytes anywhere.
+// ---------------------------------------------------------------------------
+
+/// c20 f24: scan request, tid 0x3eaa2114 (base + ch20).
+const TL_SCAN_REQ: &str = "018800ffffffffffff687f1421aa3e000583";
+/// c20 f25: scan response — the pre-fix hallucination shape.
+const TL_SCAN_RSP: &str =
+    "018800ffffffffffffa4971421aa3e010505831080b12f7688000000000000000000000000ffff0000";
+/// c20 f129: network-start order (wrapped-key ciphertext inside).
+const TL_START_REQ: &str = "018829ffffffffffff687f0920aa3e1001020304050607080f8322636873a7bb2a189a53708c607bd00f2b1a0100010008000200ff7f0b000c00aaaaaaaaaaaaaaaa0000";
+/// c20 f130: network-start response.
+const TL_START_RSP: &str = "018829ffffffffffffa4970920aa3e11000102030405060708000f2b1a";
+/// c20 f131: network-join order (wrapped-key ciphertext inside).
+const TL_JOIN_REQ: &str = "01882bffffffffffff687f0b20aa3e1201020304050607080f626bbe70430702d7b59e95c6524ef953030f2b1a0200010008000200ff7f0b000c00";
+/// c20 f132: network-join response.
+const TL_JOIN_RSP: &str = "01882bffffffffffffa4970b20aa3e1300";
+/// c20 f9: NWK broadcast data — shares the broadcast destination
+/// but rides a joined PAN, so it must still reach NWK.
+const NWK_BCAST_DATA: &str =
+    "4188646437ffff00000912fcff000001d56d4911feff138d3428489000006d4911feff138d340085d855c81933";
+
+/// G1: an inter-PAN MAC outer never enters the NWK dissector.
+/// Pre-fix the scan response below dissected as a full
+/// `mac+nwk+aps+zcl` tree with an invalid NWK version (5); the
+/// scan request stopped `mac+unknown`. Both now file MAC +
+/// Touchlink beside the `interpan` stop, with no NWK/APS/ZCL leg.
+#[test]
+fn repro_inter_pan_never_enters_nwk() {
+    for raw in [TL_SCAN_REQ, TL_SCAN_RSP] {
+        let tree = chain::dissect(&hex(raw)).unwrap();
+        let m = tree.mac().expect("mac node");
+        assert_eq!(m.frame_type, 1);
+        assert!(!m.security_enabled);
+        assert!(tree.touchlink().is_some(), "touchlink leg on {raw}");
+        assert!(tree.nwk().is_none(), "no NWK leg on {raw}");
+        assert!(tree.aps().is_none(), "no APS leg on {raw}");
+        assert!(tree.zcl().is_none(), "no ZCL leg on {raw}");
+        assert_eq!(note_reasons(&tree), vec!["interpan"]);
+        assert_eq!(tree.len(), 3);
+    }
+    // Gate boundary: a broadcast-destination data frame on a joined
+    // PAN (destination broadcast, PAN real) still routes to NWK —
+    // the gate keys on all three PAN/address fields, not the
+    // destination alone.
+    let bcast = chain::dissect(&hex(NWK_BCAST_DATA)).unwrap();
+    assert!(bcast.touchlink().is_none());
+    assert!(bcast.nwk().is_some());
+}
+
+/// G2: the Touchlink envelope names transaction, command, and the
+/// body shape for all six live commands; session attribution still
+/// flows from the MAC source with zero secured accounting.
+#[test]
+fn touchlink_envelope_names_all_six_live_shapes() {
+    let scan_req = chain::dissect(&hex(TL_SCAN_REQ)).unwrap();
+    let t = scan_req.touchlink().expect("scan-req leg");
+    assert_eq!(t.tid, 0x3eaa2114);
+    assert_eq!(t.command_id, 0x00);
+    assert_eq!(
+        t.kind,
+        tree::TouchlinkKind::ScanReq {
+            zigbee_info: 0x05,
+            touchlink_info: 0x83,
+        }
+    );
+    assert_eq!(t.payload_len, 7);
+
+    let scan_rsp = chain::dissect(&hex(TL_SCAN_RSP)).unwrap();
+    let t = scan_rsp.touchlink().expect("scan-rsp leg");
+    assert_eq!(t.tid, 0x3eaa2114);
+    assert_eq!(t.command_id, 0x01);
+    assert_eq!(t.kind, tree::TouchlinkKind::ScanRsp { key_mask: 0x8010 });
+    assert_eq!(t.payload_len, 30);
+
+    let start_req = chain::dissect(&hex(TL_START_REQ)).unwrap();
+    let t = start_req.touchlink().expect("start-req leg");
+    assert_eq!(t.tid, 0x3eaa2009);
+    assert_eq!(t.command_id, 0x10);
+    assert_eq!(t.kind, tree::TouchlinkKind::StartReq { key_index: 0x0f });
+    assert_eq!(t.payload_len, 57);
+
+    let start_rsp = chain::dissect(&hex(TL_START_RSP)).unwrap();
+    let t = start_rsp.touchlink().expect("start-rsp leg");
+    assert_eq!(t.tid, 0x3eaa2009);
+    assert_eq!(t.command_id, 0x11);
+    assert_eq!(t.kind, tree::TouchlinkKind::StartRsp { status: 0x00 });
+    assert_eq!(t.payload_len, 18);
+
+    let join_req = chain::dissect(&hex(TL_JOIN_REQ)).unwrap();
+    let t = join_req.touchlink().expect("join-req leg");
+    assert_eq!(t.tid, 0x3eaa200b);
+    assert_eq!(t.command_id, 0x12);
+    assert_eq!(t.kind, tree::TouchlinkKind::JoinReq { key_index: 0x0f });
+    assert_eq!(t.payload_len, 48);
+
+    let join_rsp = chain::dissect(&hex(TL_JOIN_RSP)).unwrap();
+    let t = join_rsp.touchlink().expect("join-rsp leg");
+    assert_eq!(t.tid, 0x3eaa200b);
+    assert_eq!(t.command_id, 0x13);
+    assert_eq!(t.kind, tree::TouchlinkKind::JoinRsp { status: 0x00 });
+    assert_eq!(t.payload_len, 6);
+
+    // Reports name the leg in both renderings; the order bodies
+    // render as lengths only (wrapped keys never rendered).
+    let text = report::to_text(&scan_rsp);
+    assert!(text.contains("touchlink:"));
+    assert!(text.contains("scan-rsp"));
+    assert!(text.contains("key_mask=0x8010"));
+    let json = report::to_json(&start_req);
+    assert!(json.contains("\"touchlink\":{\"tid\":"));
+    assert!(json.contains("\"kind\":\"start-req\""));
+    assert!(json.contains("\"key_index\":15"));
+
+    // Session attribution: MAC source row under the broadcast PAN,
+    // no secured accounting (inter-PAN is never NWK-secured).
+    let mut eng = session::SessionEngine::new();
+    eng.note_tree(&scan_req);
+    let dev = eng.device(0x7f68).expect("initiator row");
+    assert_eq!(dev.frames, 1);
+    assert_eq!(dev.secured, 0);
+    let net = eng.network(0xffff).expect("broadcast PAN row");
+    assert_eq!(net.frames, 1);
+    assert_eq!(net.secured, 0);
+    assert_eq!(eng.secured_decryptable, 0);
+    assert_eq!(eng.secured_orphan, 0);
+
+    // Edges: a sub-transaction MSDU keeps the stop with no leg; a
+    // named command at a wrong length refuses the same way; an
+    // unmodeled command files `Unknown` with its identifier.
+    let mut short_msdu = hex(TL_SCAN_REQ);
+    short_msdu.truncate(11 + 4);
+    let short = chain::dissect(&short_msdu).unwrap();
+    assert!(short.touchlink().is_none());
+    assert_eq!(note_reasons(&short), vec!["interpan"]);
+    let mut wrong_len = hex(TL_SCAN_REQ);
+    wrong_len.push(0x00);
+    let wrong = chain::dissect(&wrong_len).unwrap();
+    assert!(wrong.touchlink().is_none());
+    assert_eq!(note_reasons(&wrong), vec!["interpan"]);
+    let mut unknown_cmd = hex(TL_SCAN_REQ);
+    unknown_cmd[11 + 4] = 0x02;
+    let unknown = chain::dissect(&unknown_cmd).unwrap();
+    let t = unknown.touchlink().expect("unknown-cmd leg");
+    assert_eq!(t.command_id, 0x02);
+    assert_eq!(t.kind, tree::TouchlinkKind::Unknown);
+    assert_eq!(note_reasons(&unknown), vec!["interpan"]);
+}
+
+/// G3: the NWK version guard refuses alien versions before any
+/// header field is trusted. Pre-fix the crafted frame below filed
+/// an NWK leg with version 5 (the ch20 hallucination's first
+/// header byte); now the chain stops `mac+unknown` with no NWK
+/// leg. The Green-Power value refuses the same way (no GP leg is
+/// modeled); the stack version still decodes.
+#[test]
+fn repro_nwk_version_guard_refuses_ver5() {
+    // MAC data on a joined PAN (never the inter-PAN gate) + NWK
+    // data header with version 5, then a 2-octet payload.
+    let ver5 = hex("4188016137ffff34121400341256781e090000");
+    let tree = chain::dissect(&ver5).unwrap();
+    assert!(tree.nwk().is_none(), "no NWK leg under version 5");
+    assert_eq!(note_reasons(&tree), vec!["unknown"]);
+    // Version 3 (Green-Power value): same refusal, no leg.
+    let ver3 = hex("4188016137ffff34120c00341256781e090000");
+    let tree3 = chain::dissect(&ver3).unwrap();
+    assert!(tree3.nwk().is_none());
+    assert_eq!(note_reasons(&tree3), vec!["unknown"]);
+    // Control: version 2 on the same bytes decodes normally.
+    let ver2 = hex("4188016137ffff34120800341256781e090000");
+    let ok = chain::dissect(&ver2).unwrap();
+    let n = ok.nwk().expect("version-2 NWK leg");
+    assert_eq!(n.protocol_version, 2);
+}
+
 #[test]
 fn mac_secured_stop_stays_out_of_session_secured_counts() {
     let tree = chain::dissect(&hex(QUIRK_R1_F611)).unwrap();

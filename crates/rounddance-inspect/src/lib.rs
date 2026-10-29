@@ -13,8 +13,11 @@
 //! secured NWK frame or an unknown cluster payload stops the chain with
 //! a terminal node — the bytes are still shown, never silently dropped.
 //! Fixed-shape MAC command payloads ([`mac`]), NWK command payloads
-//! ([`nwkcmd`]), and the ZDO envelope on profile `0x0000` ([`zdo`])
-//! earn named layers of their own.
+//! ([`nwkcmd`]), the Touchlink envelope on broadcast-PAN outers
+//! ([`touchlink`]), and the ZDO envelope on profile `0x0000` ([`zdo`])
+//! earn named layers of their own. Broadcast-PAN data outers never
+//! enter the NWK dissector, and only the stack NWK protocol version
+//! decodes.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_code)]
@@ -28,6 +31,7 @@ pub mod mac;
 pub mod nwk;
 pub mod nwkcmd;
 pub mod session;
+pub mod touchlink;
 pub mod tree;
 pub mod zcl;
 pub mod zdo;

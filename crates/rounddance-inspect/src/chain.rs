@@ -10,10 +10,12 @@
 //! Named sub-dissector legs ride alongside the stop notes: fixed-shape
 //! MAC command payloads ([`mac`](crate::mac)), NWK command payloads
 //! on unsecured as well as verified-open legs ([`nwkcmd`](crate::nwkcmd)),
-//! and the ZDO envelope on profile `0x0000` ([`zdo`](crate::zdo))
-//! instead of a ZCL misparse. The terminal stop taxonomy never moves
-//! for a named leg: the note still files the remainder (zero when the
-//! leg consumes the payload).
+//! the Touchlink envelope on broadcast-PAN outers
+//! ([`touchlink`](crate::touchlink)), and the ZDO envelope on profile
+//! `0x0000` ([`zdo`](crate::zdo)) instead of a ZCL misparse. The
+//! terminal stop taxonomy never moves for a named leg: the note
+//! still files the remainder (zero when the leg consumes the
+//! payload).
 //!
 //! Secured NWK frames open through
 //! [`decrypt`](crate::decrypt) when the caller supplies loaded lab
@@ -25,7 +27,7 @@
 
 use crate::decrypt::{self, MAX_SECURED_PAYLOAD};
 use crate::keys::KeySlots;
-use crate::tree::{DecodeTree, Layer, NoteNode, TreeError};
+use crate::tree::{Addr, DecodeTree, Layer, NoteNode, TreeError};
 
 fn stop(tree: &mut DecodeTree, reason: &'static str, remaining: usize) {
     tree.push(Layer::Note(NoteNode {
@@ -93,6 +95,32 @@ pub fn dissect_with_keys(frame: &[u8], keys: &KeySlots) -> Result<DecodeTree, Tr
         }
     }
 
+    // Inter-PAN (Touchlink) data frames never enter the NWK
+    // dissector: a broadcast-PAN / broadcast-destination outer with
+    // a broadcast source PAN carries a Touchlink envelope
+    // (little-endian transaction + command + fixed body), never an
+    // NWK header. Routing one to NWK hallucinates headers out of
+    // transaction-ID bytes — a version-5 "NWK" header with APS/ZCL
+    // legs on the wave-50 captures. The Touchlink leg rides beside
+    // the `interpan` stop; a payload too short to name (or a named
+    // command at a wrong length) keeps the stop with no leg.
+    if !mac.node.security_enabled
+        && mac.node.dst_pan == Some(0xffff)
+        && mac.node.dst == Addr::Short(0xffff)
+        && mac.node.src_pan == Some(0xffff)
+    {
+        match crate::touchlink::decode(rest) {
+            Ok((node, consumed)) => {
+                tree.push(Layer::Touchlink(node));
+                stop(&mut tree, "interpan", rest.len().saturating_sub(consumed));
+            }
+            Err(_) => {
+                stop(&mut tree, "interpan", rest.len());
+            }
+        }
+        return Ok(tree);
+    }
+
     match crate::nwk::decode(rest) {
         Ok((nwk, header_len, payload)) => {
             let header = rest.get(..header_len).unwrap_or(&[]);
@@ -117,7 +145,8 @@ pub fn dissect_with_keys(frame: &[u8], keys: &KeySlots) -> Result<DecodeTree, Tr
             rest = payload;
         }
         Err(_) => {
-            // Not a Zigbee NWK payload (e.g. an Inter-PAN shape):
+            // Not a Zigbee NWK payload (inter-PAN shapes route to
+            // the Touchlink leg above and never reach this arm):
             // record the stop and keep the MAC node.
             stop(&mut tree, "unknown", rest.len());
             return Ok(tree);

@@ -4,7 +4,10 @@
 //! payload bytes. A secured frame is reported as `secured` with its
 //! remaining length, never decrypted.
 
-use crate::tree::{Addr, DecodeTree, Layer, MacCmdKind, MacCmdNode, NwkCmdKind, NwkCmdNode};
+use crate::tree::{
+    Addr, DecodeTree, Layer, MacCmdKind, MacCmdNode, NwkCmdKind, NwkCmdNode, TouchlinkKind,
+    TouchlinkNode,
+};
 use std::fmt::Write as _;
 
 /// One-line human summary plus one indented line per layer.
@@ -126,6 +129,16 @@ pub fn to_text(tree: &DecodeTree) -> String {
                     z.payload_len,
                 );
             }
+            Layer::Touchlink(t) => {
+                let _ = writeln!(
+                    s,
+                    "  touchlink: tid={} cmd={} {} len={}B",
+                    hex32(t.tid),
+                    hex8(t.command_id),
+                    touchlink_text(&t.kind),
+                    t.payload_len,
+                );
+            }
             Layer::Note(n) => {
                 let _ = writeln!(s, "  …: {} ({}B left)", n.reason, n.remaining);
             }
@@ -214,6 +227,9 @@ pub fn to_json(tree: &DecodeTree) -> String {
                         .unwrap_or_else(|| String::from("null")),
                     z.payload_len,
                 ));
+            }
+            Layer::Touchlink(t) => {
+                s.push_str(&touchlink_json(t));
             }
             Layer::Note(n) => {
                 s.push_str(&format!(
@@ -729,6 +745,51 @@ fn nwkcmd_text(k: &NwkCmdKind) -> String {
     }
 }
 
+fn touchlink_text(k: &TouchlinkKind) -> String {
+    match *k {
+        TouchlinkKind::ScanReq {
+            zigbee_info,
+            touchlink_info,
+        } => format!("scan-req zb={zigbee_info:#04x} tl={touchlink_info:#04x}"),
+        TouchlinkKind::ScanRsp { key_mask } => {
+            format!("scan-rsp key_mask={key_mask:#06x}")
+        }
+        TouchlinkKind::StartReq { key_index } => {
+            format!("start-req key_index={key_index:#04x}")
+        }
+        TouchlinkKind::StartRsp { status } => format!("start-rsp status={status:#04x}"),
+        TouchlinkKind::JoinReq { key_index } => {
+            format!("join-req key_index={key_index:#04x}")
+        }
+        TouchlinkKind::JoinRsp { status } => format!("join-rsp status={status:#04x}"),
+        TouchlinkKind::Unknown => String::from("unknown"),
+    }
+}
+
+fn touchlink_json(t: &TouchlinkNode) -> String {
+    let (kind, extra) = match t.kind {
+        TouchlinkKind::ScanReq {
+            zigbee_info,
+            touchlink_info,
+        } => (
+            "scan-req",
+            format!(",\"zb\":{zigbee_info},\"tl\":{touchlink_info}"),
+        ),
+        TouchlinkKind::ScanRsp { key_mask } => ("scan-rsp", format!(",\"key_mask\":{key_mask}")),
+        TouchlinkKind::StartReq { key_index } => {
+            ("start-req", format!(",\"key_index\":{key_index}"))
+        }
+        TouchlinkKind::StartRsp { status } => ("start-rsp", format!(",\"status\":{status}")),
+        TouchlinkKind::JoinReq { key_index } => ("join-req", format!(",\"key_index\":{key_index}")),
+        TouchlinkKind::JoinRsp { status } => ("join-rsp", format!(",\"status\":{status}")),
+        TouchlinkKind::Unknown => ("unknown", String::new()),
+    };
+    format!(
+        "{{\"touchlink\":{{\"tid\":{},\"cmd\":{},\"kind\":\"{kind}\",\"len\":{}{extra}}}}}",
+        t.tid, t.command_id, t.payload_len,
+    )
+}
+
 fn maccmd_json(m: &MacCmdNode) -> String {
     let (kind, extra) = match m.kind {
         MacCmdKind::AssocReq { capabilities } => ("assoc-req", format!(",\"caps\":{capabilities}")),
@@ -893,6 +954,10 @@ fn hex8(v: u8) -> String {
 
 fn hex16(v: u16) -> String {
     format!("{v:#06x}")
+}
+
+fn hex32(v: u32) -> String {
+    format!("{v:#010x}")
 }
 
 fn opt16(v: Option<u16>) -> String {

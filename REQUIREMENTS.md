@@ -1293,3 +1293,54 @@ file, never in the repo) keyed legs; report `~/hwscratch/w50/SUMMARY.md`.
 | RD-INSPECT-26 | implemented + verified | `zdo::decode` (response bit + tsn + response-status envelope; empty refuses) + `chain::finish_aps_zcl` (profile `0x0000` routes to ZDO, never ZCL) + `report` text/JSON `zdo` legs | `inspect/tests/decode_depth.rs::repro_zdo_payload_never_reaches_zcl` (failing-first: tsn-as-frame-control misparse) + `::zdo_envelope_names_requests_and_responses` (annce req, 1-octet response, empty-body `unknown`, HA still ZCL, APS-broadcast-to-ZDO refusal pinned) + replays (keyed r1/r2/r1b: 14/22/14 `zdo` legs; the 4/run ZCL misparses gone) |
 | RD-INSPECT-27 | implemented + verified | `session::note_tree` (verified-open tree legs count `secured_decryptable` even with no engine key slot; sealed-without-slot still `secured_orphan`, loaded-slot semantics unchanged) + `tree::DecodeTree::decrypted` | `inspect/tests/decode_depth.rs::repro_verified_open_tree_counts_decryptable_without_engine_key` (failing-first: dissector-only keys) + `::engine::engine_key_slots_gate_decryptability` + `::live_air::nwk_decrypt_gates_session_decryptability` (both unchanged, back-compat) + replays (keyed r1/r2/r1b sessions: 54/95/47 decryptable, 0 orphan) |
 | RD-INSPECT-28 | implemented + verified | `chain` MAC-sealed arm stops `mac-secured` (was `secured`); session secured counters already key on NWK security only, so the garbage outer never touches them | `inspect/tests/decode_depth.rs::repro_garbage_mac_secured_stop_is_ambiguous` (failing-first: verbatim r1 f611) + `::mac_secured_stop_stays_out_of_session_secured_counts` (counters + report shapes) + replays (quirk frames file `mac-secured`, transport outers keep `secured`) |
+
+## Wave-51 traceability — Touchlink decode closure (lane 2)
+
+Wave-50 lane 1 filed 3 Touchlink inspector gaps against the live
+captures (`~/hwscratch/w50/SUMMARY.md` §7, inspector at 703cb1f):
+inter-PAN-shaped MAC frames misparsed as NWK/APS/ZCL with
+TID-dependent outcomes (worst case a fully hallucinated
+`mac+nwk+aps+zcl` tree with an invalid NWK version 5), no Touchlink
+dissector even where the chain stopped clean, and no NWK version
+guard. All three are genuinely open (proven by failing-first repros
+below, not by re-reading the lane-1 logs) and are closed here with
+regression goldens from the w50 captures (hashes/metadata only, key
+bytes local-only outside the repo with the documented offline
+procedure). No lab use, no corpus writes; wording in code/tests is
+paraphrase only (D1). 3 repo-minted IDs (`RD-INSPECT-29..31`),
+MINTED-pending-confirm.
+
+None of the three gaps turned out already-fixed or not-a-bug: the
+HEAD chain still routes inter-PAN bytes into `nwk::decode` (G1
+repro fails), names no Touchlink leg (G2 repro fails), and trusts
+any 4-bit version nibble (G3 repro fails). The version guard also
+covers the Green-Power value (3): the inspector models no GP leg,
+so it refuses exactly like any other non-stack version.
+
+Captured-air vectors: the six verbatim wave-50 ch20 frames pinned
+in `inspect/tests/decode_depth.rs` (scan-req f24, scan-rsp f25,
+start order f129, start-rsp f130, join order f131, join-rsp f132)
+carry captured-air wrapped-key ciphertext only (openable solely
+with the lab keys, never embedded) — the same class as the
+committed Ember U1/B1 vectors; no key bytes anywhere. The w50
+pcaps pin as metadata only — `c11.pcap` sha256
+`ee895f3e5dc7918cbc942d01698f753489735d44d3c7eda8e8aa0335bfafdbe7`
+(165 frames), `c20.pcap` sha256
+`f42586efb93799332910f41ceaaa3670e2289239aa229a373a28fa651a0d4ac7`
+(218 frames), `c25.pcap` sha256
+`82023d5e56eff1dd06dbabb9831cbf2a0c3e51ced139d8e1066b0d64dcb4d4f1`
+(209 frames), `probe.pcap` sha256
+`372e2306c5c538d15520a09ce18ab63c3557fa3144a43bea5d582f538f43ddf6`
+(599 frames) — no key bytes, no plaintext. Offline reproduction
+procedure: `python3 analyze51.py` in `~/hwscratch/w51/` (gate
+census: 480/480 gated MSDUs carry a Touchlink command at the exact
+live lengths, zero false positives/negatives) plus
+`inspect-live --replay ~/hwscratch/w50/sniff_<t>.txt` rebuilt at
+this HEAD (`~/hwscratch/w51/replay_<t>.log`); report
+`~/hwscratch/w51/SUMMARY.md`.
+
+| Requirement ID | State | Implementing code | Verifying test |
+|----------------|-------|-------------------|----------------|
+| RD-INSPECT-29 | implemented + verified | `chain` inter-PAN gate (unsecured data outer + destination PAN/destination/source PAN all broadcast → Touchlink leg, never `nwk::decode`; NWK-broadcast data on a joined PAN still routes to NWK) + `interpan` terminal stop (parsed or refused alike) | `inspect/tests/decode_depth.rs::repro_inter_pan_never_enters_nwk` (failing-first: verbatim ch20 scan-rsp hallucinated `mac+nwk+aps+zcl` pre-fix; post-fix both scan shapes file MAC + Touchlink + `interpan`, no NWK/APS/ZCL leg, gate-boundary broadcast still NWK) + replays (c11/c20/c25/probe: 122/122/122/114 `interpan` stops, 480 total, 0 hallucinations, 0 dissect errors) |
+| RD-INSPECT-30 | implemented + verified | `touchlink::decode` (LE transaction + command + exact-length live bodies — scan-req/rsp, start-req/rsp, join-req/rsp; unmodeled commands file `Unknown` with identifier; sub-transaction or wrong-length named shapes refuse; wrapped keys stay sealed) + `tree::{TouchlinkNode, TouchlinkKind}` + `report` text/JSON `touchlink` legs + `inspect-live` depth key + session attribution unchanged (MAC source row, broadcast-PAN network, zero secured accounting) | `inspect/tests/decode_depth.rs::touchlink_envelope_names_all_six_live_shapes` (failing-first: no leg pre-fix; tid/cmd/kind/length asserts on all six verbatim frames + report shapes + session rows + short/wrong-length/unknown-cmd edges) |
+| RD-INSPECT-31 | implemented + verified | `nwk::decode` version gate (`NwkError::BadVersion`: only the stack version 2 continues; Green-Power 3 refuses like any other alien version since no GP leg is modeled) — shared by `dissect` and `dissect_nwk` | `inspect/tests/decode_depth.rs::repro_nwk_version_guard_refuses_ver5` (failing-first: ver-5 header filed an NWK leg pre-fix; ver 5 + ver 3 both stop `mac+unknown` with no NWK leg, ver-2 control still decodes) + `::live_air::captured_corpus_pins_touchlink_w50` (4 pcap hashes + frame counts + per-command census incl. the probe §5.1 start-rsp miss) |

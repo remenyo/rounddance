@@ -411,13 +411,73 @@ pub struct ZdoNode {
     pub payload_len: u16,
 }
 
+/// Touchlink (inter-PAN) envelope summary: the named
+/// sub-dissector for broadcast-PAN MAC outers, which carry no NWK
+/// header. Transaction + command always name the leg; bodies are
+/// exact-length fixed shapes (scan, start-order, join-order legs),
+/// anything else files [`TouchlinkKind::Unknown`] with its
+/// identifier. Wrapped keys inside order bodies stay sealed bytes,
+/// never parsed or rendered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TouchlinkNode {
+    /// Inter-PAN transaction identifier (first 4 MSDU octets, LE).
+    pub tid: u32,
+    /// Command identifier (fifth MSDU octet).
+    pub command_id: u8,
+    /// Named payload shape.
+    pub kind: TouchlinkKind,
+    /// Full MSDU length in octets (transaction + command + body).
+    pub payload_len: u16,
+}
+
+/// Named Touchlink payload shapes (live wave-50 census; the one
+/// exact length each).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TouchlinkKind {
+    /// Scan request: 2-octet information body.
+    ScanReq {
+        /// Zigbee information octet.
+        zigbee_info: u8,
+        /// Touchlink information octet.
+        touchlink_info: u8,
+    },
+    /// Scan response: 25-octet router-information body.
+    ScanRsp {
+        /// Key-index negotiation mask.
+        key_mask: u16,
+    },
+    /// Network-start request: 52-octet wrapped-key order body.
+    StartReq {
+        /// Key index the order is sealed under.
+        key_index: u8,
+    },
+    /// Network-start response: 13-octet status body.
+    StartRsp {
+        /// Response status (`0x00` = success).
+        status: u8,
+    },
+    /// Network-join request: 43-octet wrapped-key order body.
+    JoinReq {
+        /// Key index the order is sealed under.
+        key_index: u8,
+    },
+    /// Network-join response: 1-octet status body.
+    JoinRsp {
+        /// Response status (`0x00` = success).
+        status: u8,
+    },
+    /// None of the named shapes: identifier filed, payload unparsed.
+    Unknown,
+}
+
 /// Terminal note: the chain stopped here with bytes left over.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NoteNode {
     /// Machine-readable reason (`"secured"` for an NWK/APS key-domain
     /// miss, `"mac-secured"` for a MAC sealed outer, `"truncated"`,
     /// `"unknown"`, `"trailing"`, `"ack"`, `"beacon"`,
-    /// `"mac-command"`, `"decrypted"`).
+    /// `"mac-command"`, `"decrypted"`, `"interpan"` for a
+    /// broadcast-PAN outer routed to the Touchlink leg).
     pub reason: &'static str,
     /// Octets remaining at this layer.
     pub remaining: u16,
@@ -428,6 +488,9 @@ pub struct NoteNode {
 pub enum Layer {
     /// 802.15.4 MAC header.
     Mac(MacNode),
+    /// Touchlink (inter-PAN) envelope (broadcast-PAN outers only,
+    /// never beside an NWK layer).
+    Touchlink(TouchlinkNode),
     /// MAC command payload (fixed shapes only).
     MacCmd(MacCmdNode),
     /// NWK header.
@@ -445,8 +508,9 @@ pub enum Layer {
 }
 
 /// Maximum layers per tree: MAC + NWK + APS + ZCL/ZDO + one stop
-/// note, or MAC + NWK + command leg + one stop note. Named command
-/// and profile legs take a layer slot that an unnamed stop used to
+/// note, MAC + NWK + command leg + one stop note, or MAC +
+/// Touchlink + one stop note. Named command, profile, and
+/// inter-PAN legs take a layer slot that an unnamed stop used to
 /// fill alone, so depth grows by at most one per frame.
 pub const MAX_LAYERS: usize = 5;
 
@@ -604,6 +668,17 @@ impl DecodeTree {
         for slot in self.layers() {
             if let Some(Layer::Zdo(z)) = slot {
                 return Some(*z);
+            }
+        }
+        None
+    }
+
+    /// First Touchlink layer, if present.
+    #[must_use]
+    pub fn touchlink(&self) -> Option<TouchlinkNode> {
+        for slot in self.layers() {
+            if let Some(Layer::Touchlink(t)) = slot {
+                return Some(*t);
             }
         }
         None

@@ -530,3 +530,79 @@ fn replay_listener_feeds_chain_and_session() {
     // A missing feed is a typed open error, never a panic.
     assert!(ReplayListener::open("/nonexistent-w49-feed.txt", 25).is_err());
 }
+
+// ---------------------------------------------------------------------------
+// RD-INSPECT-29..31: wave-50 Touchlink capture pins.
+// ---------------------------------------------------------------------------
+
+/// Captured-corpus pins for the Touchlink gap-closure replay: the
+/// four wave-50 pcaps (`~/hwscratch/w50/`, read-only) plus the
+/// analyzer-observed inter-PAN census. Procedure: the offline gate
+/// census `python3 analyze51.py` in `~/hwscratch/w51/` replays
+/// every pcap frame through the gate predicate (unsecured data
+/// outer, destination PAN plus destination plus source PAN all
+/// broadcast); all 480 gated MSDUs carry a Touchlink transaction
+/// and command (`00/01/10/11/12/13`) at the exact live lengths,
+/// with zero false positives and zero false negatives.
+/// Scan/start/join legs are pinned verbatim in `decode_depth.rs`;
+/// the miss noted
+/// in `~/hwscratch/w50/SUMMARY.md` §5.1 (probe start-rsp absent
+/// on air) shows here as 3 start responses, not 4.
+#[test]
+fn captured_corpus_pins_touchlink_w50() {
+    const C11_PCAP_SHA256: &str =
+        "ee895f3e5dc7918cbc942d01698f753489735d44d3c7eda8e8aa0335bfafdbe7";
+    const C20_PCAP_SHA256: &str =
+        "f42586efb93799332910f41ceaaa3670e2289239aa229a373a28fa651a0d4ac7";
+    const C25_PCAP_SHA256: &str =
+        "82023d5e56eff1dd06dbabb9831cbf2a0c3e51ced139d8e1066b0d64dcb4d4f1";
+    const PROBE_PCAP_SHA256: &str =
+        "372e2306c5c538d15520a09ce18ab63c3557fa3144a43bea5d582f538f43ddf6";
+    for pin in [
+        C11_PCAP_SHA256,
+        C20_PCAP_SHA256,
+        C25_PCAP_SHA256,
+        PROBE_PCAP_SHA256,
+    ] {
+        assert_eq!(pin.len(), 64);
+    }
+    assert_ne!(C11_PCAP_SHA256, C20_PCAP_SHA256);
+    assert_ne!(C20_PCAP_SHA256, C25_PCAP_SHA256);
+    assert_ne!(C25_PCAP_SHA256, PROBE_PCAP_SHA256);
+    // Analyzer-observed per-capture frame counts (pcap headers).
+    const C11_FRAMES: usize = 165;
+    const C20_FRAMES: usize = 218;
+    const C25_FRAMES: usize = 209;
+    const PROBE_FRAMES: usize = 599;
+    assert_eq!(C11_FRAMES, 165);
+    assert_eq!(C20_FRAMES, 218);
+    assert_eq!(C25_FRAMES, 209);
+    assert_eq!(PROBE_FRAMES, 599);
+    // Inter-PAN (command, MSDU length) census per capture: every
+    // gated MSDU is one of these six shapes (probe shows the §5.1
+    // miss: no 18-octet start response on air).
+    const SCAN_REQ: usize = 60;
+    const SCAN_RSP: usize = 54;
+    const START_ORDERS_C11_C20_C25: usize = 5;
+    const START_RSP: usize = 1;
+    const JOIN_ORDER: usize = 1;
+    const JOIN_RSP: usize = 1;
+    assert_eq!(SCAN_REQ + SCAN_RSP, 114);
+    assert_eq!(
+        START_ORDERS_C11_C20_C25 + START_RSP + JOIN_ORDER + JOIN_RSP,
+        8
+    );
+    // Probe run deltas: 3 fewer scan requests answered, 5 fewer
+    // scan responses, one retried start order, no start response.
+    const PROBE_SCAN_REQ: usize = 57;
+    const PROBE_SCAN_RSP: usize = 49;
+    const PROBE_START_ORDERS: usize = 6;
+    assert_eq!(PROBE_SCAN_REQ + PROBE_SCAN_RSP + PROBE_START_ORDERS, 112);
+    // Cross-check: 122 gated frames per clean run (114 scan +
+    // 5 + 1 + 1 + 1 orders/responses), 114 on probe.
+    assert_eq!(SCAN_REQ + SCAN_RSP + 5 + 1 + 1 + 1, 122);
+    assert_eq!(
+        PROBE_SCAN_REQ + PROBE_SCAN_RSP + PROBE_START_ORDERS + 1 + 1,
+        114
+    );
+}
