@@ -548,6 +548,17 @@ fn replay_listener_feeds_chain_and_session() {
 /// the miss noted
 /// in `~/hwscratch/w50/SUMMARY.md` §5.1 (probe start-rsp absent
 /// on air) shows here as 3 start responses, not 4.
+/// Wave-59 lane 1 re-pinned `C25_PCAP_SHA256` (below): the wave-51
+/// pin differed from the on-disk file in 3 hex chars while every
+/// other pin, the frame count (209), and the full replay census
+/// matched. Forensics (`~/hwscratch/w59/lane1/`) show the file is
+/// the deterministic `sniff2pcap.py` render of the wave-50 live
+/// sniff record (byte-identical re-render from `sniff_c25.txt`,
+/// unmodified since the wave-50 session, corroborated by the
+/// wave-51 replay census over the same bytes) — a pin-side
+/// transcription error, not capture corruption. Census re-verified
+/// at re-pin: 209 frames, 0 errors, 122 interpan, session rows
+/// 0x7f68 joining x25 / 0x97a4 joined x7.
 #[test]
 fn captured_corpus_pins_touchlink_w50() {
     const C11_PCAP_SHA256: &str =
@@ -555,7 +566,7 @@ fn captured_corpus_pins_touchlink_w50() {
     const C20_PCAP_SHA256: &str =
         "f42586efb93799332910f41ceaaa3670e2289239aa229a373a28fa651a0d4ac7";
     const C25_PCAP_SHA256: &str =
-        "82023d5e56eff1dd06dbabb9831cbf2a0c3e51ced139d8e1066b0d64dcb4d4f1";
+        "82023d5e56eff1dd06db84b9831cbf2a0c3e51ced139d8e1066b0b64dcb4d4f1";
     const PROBE_PCAP_SHA256: &str =
         "372e2306c5c538d15520a09ce18ab63c3557fa3144a43bea5d582f538f43ddf6";
     for pin in [

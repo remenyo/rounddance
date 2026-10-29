@@ -348,9 +348,15 @@ fn timeline_report_names_stage_and_anomalies() {
 /// `94ce9adcf9fed0f3`) and folds each tree into one `SessionEngine`.
 /// All three replays dissect with zero errors; timeline/session
 /// counts below are the observed engine state after each replay.
-/// FINDING: the on-disk `w50/c25.pcap` no longer matches its
-/// wave-50 pin (3 hex chars differ); the replay ran over the
-/// on-disk bytes (209 frames, same count as pinned).
+/// Wave-59 lane 1 resolved the `w50/c25.pcap` drift noted at
+/// wave-58 (on-disk file differed from the wave-50 pin in 3 hex
+/// chars): forensics in `~/hwscratch/w59/lane1/` show the file is
+/// the deterministic `sniff2pcap.py` render of the wave-50 live
+/// record (byte-identical re-render, unmodified since the wave-50
+/// session) and replays to the full pinned census — a pin-side
+/// transcription error, re-pinned in `live_air.rs` with
+/// justification. The replay ran over the on-disk bytes (209
+/// frames, same count as pinned).
 #[test]
 fn captured_corpus_pins_timeline_w58() {
     // w50 Touchlink set: 165 + 218 + 209 + 599 = 1191 frames.

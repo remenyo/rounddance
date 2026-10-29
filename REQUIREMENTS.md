@@ -1356,8 +1356,14 @@ pcaps pin as metadata only — `c11.pcap` sha256
 (165 frames), `c20.pcap` sha256
 `f42586efb93799332910f41ceaaa3670e2289239aa229a373a28fa651a0d4ac7`
 (218 frames), `c25.pcap` sha256
-`82023d5e56eff1dd06dbabb9831cbf2a0c3e51ced139d8e1066b0d64dcb4d4f1`
-(209 frames), `probe.pcap` sha256
+`82023d5e56eff1dd06db84b9831cbf2a0c3e51ced139d8e1066b0b64dcb4d4f1`
+(209 frames; wave-59 lane 1 re-pin — the wave-51 pin string
+differed from the on-disk file in 3 hex chars while frame count
+and full replay census matched; forensics in
+`~/hwscratch/w59/lane1/` show the file is the deterministic
+`sniff2pcap.py` render of the wave-50 live record, unmodified
+since the wave-50 session — a pin-side transcription error, not
+capture corruption; census re-verified at re-pin), `probe.pcap` sha256
 `372e2306c5c538d15520a09ce18ab63c3557fa3144a43bea5d582f538f43ddf6`
 (599 frames) — no key bytes, no plaintext. Offline reproduction
 procedure: `python3 analyze51.py` in `~/hwscratch/w51/` (gate
@@ -1510,7 +1516,8 @@ data legs into stage timelines with gap/anomaly flags, plus a
 decision-for-decision against the dissector with a pcap-out writer.
 Reproduce-then-fix per behavior (both HEAD-API repros failed, then
 passed). 2 repo-minted IDs (`RD-INSPECT-37..38`),
-MINTED-pending-confirm. Paraphrase only (D1).
+CONFIRMED (corpus sweep-39: 2/2 CONFIRM as cited, recorded in the
+private-corpus mining log sweep-39 section). Paraphrase only (D1).
 
 Captured-air vectors: no new verbatim octets — the legs reuse the
 committed goldens. Replay census is metadata only: the w50 set
@@ -1526,11 +1533,19 @@ anomalies). Offline reproduction procedure: the temporary
 `replay58` example (run, recorded, removed — `~/hwscratch/w58/`
 `SUMMARY.md` §2; keyed mode loads the lab 0600 key file locally and
 recovers the 1-octet on-air key sequence, never printing key
-bytes). FINDING: on-disk `w50/c25.pcap` no longer matches its
-wave-50 pin (3 hex chars differ; count unchanged at 209) — corpus
-left untouched, old pin as-is.
+bytes). Wave-59 lane 1 resolved the `w50/c25.pcap` drift noted at
+wave-58 (on-disk file differed from the wave-50 pin in 3 hex
+chars, count unchanged at 209): forensics in
+`~/hwscratch/w59/lane1/` show the file was written once by the
+wave-50 session's `sniff2pcap.py` conversion, re-renders
+byte-identically from `sniff_c25.txt`, and replays to the full
+pinned census (209 frames, 0 errors, 122 interpan, session rows
+0x7f68 joining ×25 / 0x97a4 joined ×7, corroborated by the
+wave-51 replay over the same bytes) — a pin-side transcription
+error, not capture corruption. Re-pinned above with documented
+justification; corpus untouched throughout.
 
 | Requirement ID | State | Implementing code | Verifying test |
 |----------------|-------|-------------------|----------------|
-| RD-INSPECT-37 | implemented + verified | `session::{SessionTimeline, TimelineStage, TimelineEvent, classify_tree}` + `SessionEngine` timeline table (16 rows, 8-event ring log; accepts/transports key on the joiner destination short, broadcast destinations fall back to source; `DATA_BEFORE_JOIN` / `REJOIN_WITHOUT_LEAVE` / `DATA_AFTER_LEAVE` / `GAP_OBSERVED` flags; short-keyed by design, IEEE rejoin-across-shorts stays two rows with the tie in reports) + `report::{timelines_to_text, timelines_to_json}` (standalone shapes, v1 snapshot byte-identical) | `inspect/tests/timeline.rs::repro_join_accept_data_has_no_session_timeline` (failing-first) + `::timeline_links_nwk_join_transport_announce_data` (MAC + NWK join legs, coordinator legs key on joiner, no coordinator row) + `::timeline_flags_data_before_join` + `::timeline_flags_rejoin_without_leave_and_data_after_leave` + `::timeline_denied_join_never_advances` + `::timeline_marks_sequence_gaps` + `::timeline_report_names_stage_and_anomalies` (v1 snapshot has no timeline key) + `::timeline_ignores_non_session_frames` + `::captured_corpus_pins_timeline_w58` (w50/w51/t1t2 census + c25-drift finding, metadata only) |
-| RD-INSPECT-38 | implemented + verified | `sender::LoopbackSender` (core, no-alloc, 8×256B: `Sender` record + `Listener` FIFO replay with `TooLong`/`Full`+drops/`SmallBuffer` typed errors) + pcap-out via `pcap::write_pcap` (linktype 195; artifact `~/hwscratch/w58/sender_roundtrip.pcap`) | `inspect/tests/sender.rs::repro_no_loopback_sender` (failing-first: crafted→sent→received→dissected tree equals the direct tree) + `::roundtrip_names_every_leg_class` (ZCL data, ZDO annce, NWK leave, APS transport-key, MAC beacon-req/assoc-req, Touchlink scan-req — every leg decision-for-decision) + `::loopback_fifo_order_and_bounds` + `::pcap_out_roundtrip_is_wireshark_readable` (write→read byte-identical, every packet re-dissects to the crafted decision) |
+| RD-INSPECT-37 | implemented + verified, CONFIRMED (sweep-39) | `session::{SessionTimeline, TimelineStage, TimelineEvent, classify_tree}` + `SessionEngine` timeline table (16 rows, 8-event ring log; accepts/transports key on the joiner destination short, broadcast destinations fall back to source; `DATA_BEFORE_JOIN` / `REJOIN_WITHOUT_LEAVE` / `DATA_AFTER_LEAVE` / `GAP_OBSERVED` flags; short-keyed by design, IEEE rejoin-across-shorts stays two rows with the tie in reports) + `report::{timelines_to_text, timelines_to_json}` (standalone shapes, v1 snapshot byte-identical) | `inspect/tests/timeline.rs::repro_join_accept_data_has_no_session_timeline` (failing-first) + `::timeline_links_nwk_join_transport_announce_data` (MAC + NWK join legs, coordinator legs key on joiner, no coordinator row) + `::timeline_flags_data_before_join` + `::timeline_flags_rejoin_without_leave_and_data_after_leave` + `::timeline_denied_join_never_advances` + `::timeline_marks_sequence_gaps` + `::timeline_report_names_stage_and_anomalies` (v1 snapshot has no timeline key) + `::timeline_ignores_non_session_frames` + `::captured_corpus_pins_timeline_w58` (w50/w51/t1t2 census + c25-drift finding, metadata only) |
+| RD-INSPECT-38 | implemented + verified, CONFIRMED (sweep-39) | `sender::LoopbackSender` (core, no-alloc, 8×256B: `Sender` record + `Listener` FIFO replay with `TooLong`/`Full`+drops/`SmallBuffer` typed errors) + pcap-out via `pcap::write_pcap` (linktype 195; artifact `~/hwscratch/w58/sender_roundtrip.pcap`) | `inspect/tests/sender.rs::repro_no_loopback_sender` (failing-first: crafted→sent→received→dissected tree equals the direct tree) + `::roundtrip_names_every_leg_class` (ZCL data, ZDO annce, NWK leave, APS transport-key, MAC beacon-req/assoc-req, Touchlink scan-req — every leg decision-for-decision) + `::loopback_fifo_order_and_bounds` + `::pcap_out_roundtrip_is_wireshark_readable` (write→read byte-identical, every packet re-dissects to the crafted decision) |
