@@ -1807,3 +1807,26 @@ only (D1).
 | Requirement ID | State | Implementing code | Verifying test |
 |----------------|-------|-------------------|----------------|
 | RD-COMPAT-11 | implemented + verified, CONFIRMED (sweep-52) | `ash::{encode_data, encode_ack, encode_nak, encode_rst, encode_rstack, encode_error, decode, decode_control, pack_data_header, next_num}`: DATA header codec (frm/ack/reTx), 5 control-frame shapes with body-length contracts, FLAG/LEN/stuffing/CRC framing over a bounded stack temp (all-or-nothing, panic-free by construction), 3-bit wrap + overflow refusal; wave-71 `ash::{AshTxWindow, AshRxState, RetxDecision, RxOutcome, ASH_TX_WINDOW}`: sender window (fresh-number allocate, cumulative ACK retire, `try_allocate -> None` window-full backpressure, NAK-triggered `RetxDecision` run with `re_tx` re-encode, stale/duplicate ACK retires 0, `BadNumber` on out-of-range), receiver cursor (in-order accept, duplicate re-ACK, gap → NAK with held ack number, wrap, reset) — counters only, every named frame still through the all-or-nothing `encode_data`/`decode` path | `compat/tests/ash_vectors.rs` 16 tests: wave-70 12 (4 byte-pinned full-frame vectors (DATA / ACK+NAK+RST / RSTACK+ERROR / reTx+stuffing), control-octet shape + refusal matrix, number wrap + `BadNumber`, CRC/truncation/oversize/short-output refusals, control body-length policing, max-stuffed-payload round-trip + all-or-nothing, EZSP-frame-body layering leg) + wave-71 4 (allocate/ACK/backpressure incl. reopen + duplicate/stale legs, NAK-retransmit run round-tripped with `re_tx` through the codec, receiver accept/duplicate/gap/wrap/reset legs, off-wire ACK driving the sender window) |
+
+## Wave-72 traceability — TI streaming MT decoder (lane 2)
+
+Offline only (no serial, no lab hardware): the TI path gains the
+streaming counterpart to the wave-61 one-shot MT codec — one codec
+step on top of the wave-61 skeleton, mirroring the wave-70 ASH
+approach (codec-only, no adapter or state-machine change).
+`rounddance-compat::ti::MtDecoder` is a byte pump over the same
+SOF-led, LEN-delimited, XOR-fold-FCS wire: pre-SOF noise skipped
+silently (resync by scan, same discipline as the RCP UART
+decoder), oversize `LEN` and FCS mismatch surface as typed
+`MtOutcome::Dropped` runs with saturating `dropped` /
+`consecutive_bad` meters, and one corrupt run re-arms at the next
+`SOF` so the stream never wedges. A `SOF`-valued octet inside a
+frame body is data, never a delimiter — length alone delimits,
+same contract as `ti::decode`. `no_std`, `forbid(unsafe_code)`,
+bounded stack state, panic-free. One repo-minted ID
+(`RD-COMPAT-12`), MINTED-pending-confirm at mint. No lab use, no
+corpus writes; wording in code/tests is paraphrase only (D1).
+
+| Requirement ID | State | Implementing code | Verifying test |
+|----------------|-------|-------------------|----------------|
+| RD-COMPAT-12 | implemented + verified | `ti::{MtDecoder, MtOutcome, MtDropReason}`: streaming byte pump (`push_byte -> Option<MtOutcome>`, at most one outcome per byte) over the wave-61 wire shape — silent pre-SOF skip, `BadLen` on `LEN > MAX_MT_PAYLOAD`, `BadFcs` on XOR-fold mismatch, re-arm at next `SOF`, saturating `dropped` / `consecutive_bad` meters cleared on a good frame | `compat/tests/ti_vectors.rs` 5 new tests (19 total): hand-computed byte pin (`FE 03 24 01 AA 10 FE 62`, FCS oracle: independent python3 XOR-fold, SOF-valued data octet pinned as data) + split-feed reassembly at 5 chunkings vs one-shot `decode` + noise-skip / `BadLen`-drop / re-arm with meter reset + `BadFcs`-drop / re-arm + back-to-back in-order frames |

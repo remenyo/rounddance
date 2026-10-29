@@ -8,14 +8,151 @@
 //! CONFIRMED via corpus sweep-41 (0 corrections / 0 REJECT).
 
 use rounddance_compat::ti::{
-    decode, encode, TiAdapter, CMD_DATA_SEND_C0, CMD_DATA_SEND_C1, EVT_DATA_RECEIVE_C0,
-    EVT_DATA_RECEIVE_C1, MAX_MT_PAYLOAD, MT_TYPE_AREQ, MT_TYPE_MASK, MT_TYPE_SREQ, SOF,
-    STATUS_DELIVERED, STATUS_NO_ACK,
+    decode, encode, MtDecoder, MtDropReason, MtOutcome, TiAdapter, CMD_DATA_SEND_C0,
+    CMD_DATA_SEND_C1, EVT_DATA_RECEIVE_C0, EVT_DATA_RECEIVE_C1, MAX_MT_PAYLOAD, MT_TYPE_AREQ,
+    MT_TYPE_MASK, MT_TYPE_SREQ, SOF, STATUS_DELIVERED, STATUS_NO_ACK,
 };
 use rounddance_mac_sap::{
     AddrMode, FramePayload, MacAddress, MacDataSap, MacMgmtSap, TxHandle, TxOptions, TxRequest,
     TxStatus,
 };
+
+/// Feed every byte, collecting the non-silent outcomes.
+fn pump(dec: &mut MtDecoder, bytes: &[u8]) -> Vec<MtOutcome> {
+    let mut out = Vec::new();
+    for b in bytes {
+        if let Some(o) = dec.push_byte(*b) {
+            out.push(o);
+        }
+    }
+    out
+}
+
+/// Streaming byte pin: SOF | LEN=3 | 0x24 | 0x01 | AA 10 FE | FCS.
+/// The data carries a SOF-valued octet (length, not flags, delimits)
+/// and the FCS is hand-computed through the independent XOR-fold
+/// oracle (`03 ^ 24 ^ 01 ^ AA ^ 10 ^ FE` = 0x62).
+#[test]
+fn mt_decoder_byte_pinned_vector() {
+    let wire = [SOF, 0x03, 0x24, 0x01, 0xAA, 0x10, 0xFE, 0x62];
+    assert_eq!(
+        rounddance_compat::ti::fcs(0x03, 0x24, 0x01, &[0xAA, 0x10, 0xFE]),
+        0x62
+    );
+    let mut dec = MtDecoder::new();
+    for b in &wire[..wire.len() - 1] {
+        assert_eq!(dec.push_byte(*b), None);
+    }
+    let Some(MtOutcome::Frame(frame)) = dec.push_byte(wire[wire.len() - 1]) else {
+        panic!("pinned wire must decode");
+    };
+    assert_eq!((frame.cmd0, frame.cmd1), (0x24, 0x01));
+    assert_eq!(frame.payload_bytes(), &[0xAA, 0x10, 0xFE]);
+    assert_eq!(dec.dropped(), 0);
+}
+
+/// Split feeds reassemble to the same frame the one-shot `decode`
+/// returns, however the bytes are chunked.
+#[test]
+fn mt_decoder_split_feed_reassembles() {
+    let mut raw = [0u8; 160];
+    let data = [0x08u8, 0x00, 0x00, 0x01, 0x00, 0x1E, 0x7A];
+    let n = encode(CMD_DATA_SEND_C0, CMD_DATA_SEND_C1, &data, &mut raw).unwrap();
+    let (want, used) = decode(&raw[..n]).unwrap();
+    assert_eq!(used, n);
+    for split in [1usize, 2, 4, 5, 7] {
+        let mut dec = MtDecoder::new();
+        let mut frames = Vec::new();
+        for chunk in raw[..n].chunks(split) {
+            for o in pump(&mut dec, chunk) {
+                frames.push(o);
+            }
+        }
+        assert_eq!(frames.len(), 1, "split {split}");
+        let MtOutcome::Frame(got) = frames[0] else {
+            panic!("split {split} must yield a frame");
+        };
+        assert_eq!(got, want, "split {split}");
+    }
+}
+
+/// Line noise ahead of SOF is skipped silently; a bad LEN drops one
+/// run and re-arms, so the next good frame still decodes and the
+/// desync meter resets.
+#[test]
+fn mt_decoder_resyncs_over_noise_and_bad_len() {
+    let mut raw = [0u8; 16];
+    let n = encode(CMD_DATA_SEND_C0, CMD_DATA_SEND_C1, &[0xAA], &mut raw).unwrap();
+    let mut dec = MtDecoder::new();
+    // Noise with no SOF: silent.
+    assert!(pump(&mut dec, &[0x00, 0x55, 0x13]).is_empty());
+    // SOF naming 0xFF data octets: one BadLen drop, then re-armed.
+    assert_eq!(
+        pump(&mut dec, &[SOF, 0xFF]),
+        [MtOutcome::Dropped(MtDropReason::BadLen(0xFF))]
+    );
+    assert_eq!(dec.dropped(), 1);
+    assert_eq!(dec.consecutive_bad(), 1);
+    // The good frame still decodes; the meter resets.
+    let outcomes = pump(&mut dec, &raw[..n]);
+    assert_eq!(outcomes.len(), 1);
+    let MtOutcome::Frame(frame) = outcomes[0] else {
+        panic!("good frame must decode after a drop");
+    };
+    assert_eq!(frame.payload_bytes(), &[0xAA]);
+    assert_eq!(dec.consecutive_bad(), 0);
+    assert_eq!(dec.dropped(), 1);
+}
+
+/// A flipped body octet fails the FCS: one `BadFcs` drop, counters
+/// tick, and the stream re-arms for the next frame.
+#[test]
+fn mt_decoder_bad_fcs_drops_and_rearms() {
+    let mut raw = [0u8; 16];
+    let n = encode(CMD_DATA_SEND_C0, CMD_DATA_SEND_C1, &[0xAA, 0x10], &mut raw).unwrap();
+    let mut bad = [0u8; 16];
+    bad[..n].copy_from_slice(&raw[..n]);
+    bad[4] ^= 0x01;
+    let mut dec = MtDecoder::new();
+    assert_eq!(
+        pump(&mut dec, &bad[..n]),
+        [MtOutcome::Dropped(MtDropReason::BadFcs)]
+    );
+    assert_eq!((dec.dropped(), dec.consecutive_bad()), (1, 1));
+    let outcomes = pump(&mut dec, &raw[..n]);
+    assert_eq!(outcomes.len(), 1);
+    assert!(matches!(outcomes[0], MtOutcome::Frame(_)));
+    assert_eq!((dec.dropped(), dec.consecutive_bad()), (1, 0));
+}
+
+/// Two frames back-to-back decode in order with no drops.
+#[test]
+fn mt_decoder_back_to_back_frames() {
+    let mut first = [0u8; 16];
+    let mut second = [0u8; 16];
+    let n1 = encode(CMD_DATA_SEND_C0, CMD_DATA_SEND_C1, &[], &mut first).unwrap();
+    let n2 = encode(
+        CMD_DATA_SEND_C0,
+        CMD_DATA_SEND_C1,
+        &[0x01, 0x02],
+        &mut second,
+    )
+    .unwrap();
+    let mut wire = [0u8; 32];
+    wire[..n1].copy_from_slice(&first[..n1]);
+    wire[n1..n1 + n2].copy_from_slice(&second[..n2]);
+    let mut dec = MtDecoder::new();
+    let outcomes = pump(&mut dec, &wire[..n1 + n2]);
+    assert_eq!(outcomes.len(), 2);
+    let [MtOutcome::Frame(a), MtOutcome::Frame(b)] = outcomes[..] else {
+        panic!("both frames must decode in order");
+    };
+    assert_eq!(
+        (a.payload_bytes(), b.payload_bytes()),
+        (&[][..], &[0x01, 0x02][..])
+    );
+    assert_eq!(dec.dropped(), 0);
+}
 
 fn req(dst: MacAddress, bytes: &[u8], ack: bool) -> TxRequest {
     TxRequest {

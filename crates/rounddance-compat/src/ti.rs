@@ -31,7 +31,8 @@
 //!
 //! Requirement traceability (repo-minted, MINTED-pending-confirm):
 //! `RD-COMPAT-08` (codec), `RD-COMPAT-09` (SAP mapping),
-//! `RD-COMPAT-10` (join-flow parity with the existing MAC codec).
+//! `RD-COMPAT-10` (join-flow parity with the existing MAC codec),
+//! `RD-COMPAT-12` (streaming [`MtDecoder`]).
 
 use rounddance_mac_sap::{
     AddrMode, Channel, ExtAddr, FramePayload, MacAddress, MacCapabilities, MacDataSap, MacError,
@@ -226,6 +227,160 @@ pub fn decode(buf: &[u8]) -> Result<(MtFrame, usize), MtError> {
     };
     frame.data[..len].copy_from_slice(data);
     Ok((frame, total))
+}
+
+/// Why a byte run was dropped instead of decoded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MtDropReason {
+    /// `LEN` names more than [`MAX_MT_PAYLOAD`] data octets.
+    BadLen(u8),
+    /// Trailing FCS mismatch.
+    BadFcs,
+}
+
+/// One decoder step result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MtOutcome {
+    /// A complete, FCS-clean frame.
+    Frame(MtFrame),
+    /// A malformed run was skipped; the parser re-armed at [`SOF`].
+    Dropped(MtDropReason),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MtState {
+    Sync,
+    Len,
+    Cmd0,
+    Cmd1,
+    Data,
+    Fcs,
+}
+
+/// Streaming MT frame parser: feed wire bytes, collect outcomes.
+///
+/// Bytes before the first [`SOF`] are skipped silently (line noise,
+/// a peer mid-frame on attach). A bad `LEN` or FCS surfaces as
+/// [`MtOutcome::Dropped`] and re-arms the parser, so one corrupt run
+/// can never wedge the stream. A [`SOF`] octet inside a frame body
+/// is data, not a delimiter — only length delimits, same contract as
+/// [`decode`]. It never panics and holds no allocator state.
+#[derive(Clone, Debug)]
+pub struct MtDecoder {
+    state: MtState,
+    len: u8,
+    cmd0: u8,
+    cmd1: u8,
+    data: [u8; MAX_MT_PAYLOAD],
+    pos: usize,
+    dropped: u32,
+    consecutive_bad: u32,
+}
+
+impl MtDecoder {
+    /// Parser waiting at [`SOF`], counters zero.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            state: MtState::Sync,
+            len: 0,
+            cmd0: 0,
+            cmd1: 0,
+            data: [0; MAX_MT_PAYLOAD],
+            pos: 0,
+            dropped: 0,
+            consecutive_bad: 0,
+        }
+    }
+
+    /// Total dropped runs so far (diagnostic).
+    #[must_use]
+    pub const fn dropped(&self) -> u32 {
+        self.dropped
+    }
+
+    /// Dropped runs since the last good frame (desync meter).
+    #[must_use]
+    pub const fn consecutive_bad(&self) -> u32 {
+        self.consecutive_bad
+    }
+
+    fn drop(&mut self, reason: MtDropReason) -> MtOutcome {
+        self.state = MtState::Sync;
+        self.pos = 0;
+        self.dropped = self.dropped.saturating_add(1);
+        self.consecutive_bad = self.consecutive_bad.saturating_add(1);
+        MtOutcome::Dropped(reason)
+    }
+
+    /// Feed one byte; at most one outcome per call (`None` while the
+    /// frame is still arriving or noise is being skipped).
+    pub fn push_byte(&mut self, byte: u8) -> Option<MtOutcome> {
+        match self.state {
+            MtState::Sync => {
+                if byte == SOF {
+                    self.state = MtState::Len;
+                }
+                None
+            }
+            MtState::Len => {
+                if byte as usize > MAX_MT_PAYLOAD {
+                    Some(self.drop(MtDropReason::BadLen(byte)))
+                } else {
+                    self.len = byte;
+                    self.state = MtState::Cmd0;
+                    None
+                }
+            }
+            MtState::Cmd0 => {
+                self.cmd0 = byte;
+                self.state = MtState::Cmd1;
+                None
+            }
+            MtState::Cmd1 => {
+                self.cmd1 = byte;
+                self.pos = 0;
+                self.state = if self.len == 0 {
+                    MtState::Fcs
+                } else {
+                    MtState::Data
+                };
+                None
+            }
+            MtState::Data => {
+                // `pos < len <= MAX_MT_PAYLOAD` by construction.
+                self.data[self.pos] = byte;
+                self.pos += 1;
+                if self.pos >= self.len as usize {
+                    self.state = MtState::Fcs;
+                }
+                None
+            }
+            MtState::Fcs => {
+                let body = &self.data[..self.len as usize];
+                if fcs(self.len, self.cmd0, self.cmd1, body) != byte {
+                    return Some(self.drop(MtDropReason::BadFcs));
+                }
+                let mut frame = MtFrame {
+                    cmd0: self.cmd0,
+                    cmd1: self.cmd1,
+                    data_len: self.len,
+                    data: [0u8; MAX_MT_PAYLOAD],
+                };
+                frame.data[..self.len as usize].copy_from_slice(body);
+                self.state = MtState::Sync;
+                self.pos = 0;
+                self.consecutive_bad = 0;
+                Some(MtOutcome::Frame(frame))
+            }
+        }
+    }
+}
+
+impl Default for MtDecoder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Mock NCP transport: records every encoded host-to-NCP frame and
