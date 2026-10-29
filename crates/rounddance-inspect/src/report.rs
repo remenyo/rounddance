@@ -1018,6 +1018,10 @@ fn nwkcmd_text(k: &NwkCmdKind) -> String {
             hex16(first_neighbor)
         ),
         NwkCmdKind::Leave { options } => format!("leave opts={options:#04x}"),
+        NwkCmdKind::RouteRecord {
+            relays,
+            first_relay,
+        } => format!("route-rec relays={relays} first={}", hex16(first_relay)),
         NwkCmdKind::NetworkStatus { status, dst_addr } => {
             format!("net-status status={status:#04x} dst={}", hex16(dst_addr))
         }
@@ -1171,6 +1175,13 @@ fn nwkcmd_json(n: &NwkCmdNode) -> String {
             format!(",\"entries\":{entries},\"first\":{first_neighbor}"),
         ),
         NwkCmdKind::Leave { options } => ("leave", format!(",\"opts\":{options}")),
+        NwkCmdKind::RouteRecord {
+            relays,
+            first_relay,
+        } => (
+            "route-rec",
+            format!(",\"relays\":{relays},\"first\":{first_relay}"),
+        ),
         NwkCmdKind::NetworkStatus { status, dst_addr } => (
             "net-status",
             format!(",\"status\":{status},\"dst\":{dst_addr}"),

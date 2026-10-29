@@ -3,11 +3,12 @@
 //!
 //! Routing and leave shapes reuse the `rounddance-nwk` codecs (the
 //! same parsers the stack decodes with). Network-status,
-//! rejoin-request / rejoin-response, and timeout-request /
-//! timeout-response have no repo codec, so they are length-gated
-//! names over the live shapes (status + destination; capability
-//! octet; short + status; two preserved octets). Any other
-//! identifier — or a named shape at an unexpected length — files as
+//! route-record, rejoin-request / rejoin-response, and
+//! timeout-request / timeout-response have no repo codec, so they
+//! are length-gated names over the live shapes (status +
+//! destination; count-consistent relay list; capability octet;
+//! short + status; two preserved octets). Any other identifier — or
+//! a named shape at an unexpected length — files as
 //! [`NwkCmdKind::Unknown`] with its identifier, never a guess. Only
 //! an empty payload refuses outright.
 
@@ -72,6 +73,21 @@ pub fn decode(buf: &[u8]) -> Result<(NwkCmdNode, usize), NwkCmdError> {
             ),
             Err(_) => (NwkCmdKind::Unknown, 0),
         },
+        // Route record: identifier + relay count + relay list (one
+        // LE short per relay). The declared count must exactly cover
+        // the trailing octets; a count/length mismatch is not a
+        // route record, never a guess.
+        0x05 if len >= 2 && usize::from(buf[1]) * 2 == len - 2 => (
+            NwkCmdKind::RouteRecord {
+                relays: buf[1],
+                first_relay: if buf[1] > 0 {
+                    u16::from_le_bytes([buf[2], buf[3]])
+                } else {
+                    0xffff
+                },
+            },
+            len,
+        ),
         // Network status: identifier + status code + destination
         // (the fixed route-error shape; status meaning is the
         // stack's, never validated here).

@@ -317,9 +317,9 @@ pub enum MacCmdKind {
 /// NWK command payload summary: the named sub-dissector for NWK
 /// command frames, on unsecured as well as verified-open legs.
 /// Routing and leave shapes reuse the `rounddance-nwk` codecs;
-/// network-status, rejoin, and timeout shapes are length-gated names
-/// (no repo codec covers them); anything else files as `Unknown`
-/// with its command identifier, never a guess.
+/// network-status, route-record, rejoin, and timeout shapes are
+/// length-gated names (no repo codec covers them); anything else
+/// files as `Unknown` with its command identifier, never a guess.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NwkCmdNode {
     /// NWK command identifier (first payload octet).
@@ -346,6 +346,15 @@ pub enum NwkCmdKind {
         rreq_id: u8,
         /// Originator network address.
         originator: u16,
+    },
+    /// Route record: relay count plus the first relay hop (the hop
+    /// list itself stays in the capture, never in the node — the
+    /// link-status entry-list precedent).
+    RouteRecord {
+        /// Declared relay count.
+        relays: u8,
+        /// First listed relay (`0xffff` when the list is empty).
+        first_relay: u16,
     },
     /// Link status: entry count plus the first neighbor (the entry
     /// list itself stays in the capture, never in the node).

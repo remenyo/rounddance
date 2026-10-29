@@ -388,6 +388,66 @@ fn nwk_network_status_leg_names_fixed_shape() {
 }
 
 // ---------------------------------------------------------------------------
+// Wave-73 lane 2: NWK route record (0x05) named. Relay count + LE relay
+// list; the declared count must exactly cover the trailing octets
+// (no repo codec covers it), so a count/length mismatch stays
+// `Unknown` — the wave-70 network-status length-gate discipline.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn nwk_route_record_leg_names_relay_list() {
+    use tree::NwkCmdKind as K;
+    // Two relays: 0x6910 then 0x1234.
+    let pt = [0x05u8, 0x02, 0x10, 0x69, 0x34, 0x12];
+    let tree = chain::dissect(&wrap_nwk_command(&pt, 0x0000, 0x56cb)).unwrap();
+    let c = tree.nwkcmd().expect("route-record leg");
+    assert_eq!(c.command_id, 0x05);
+    assert_eq!(
+        c.kind,
+        K::RouteRecord {
+            relays: 2,
+            first_relay: 0x6910
+        }
+    );
+    assert_eq!(c.payload_len, 6);
+    // Stop taxonomy never moves for a named leg.
+    assert_eq!(note_reasons(&tree), vec!["trailing"]);
+    assert!(tree.aps().is_none());
+    let text = report::to_text(&tree);
+    assert!(text.contains("nwkcmd:"), "named leg renders: {text}");
+    assert!(text.contains("route-rec"), "leg kind renders: {text}");
+    let json = report::to_json(&tree);
+    assert!(json.contains("\"nwkcmd\""), "json leg renders");
+    assert!(
+        json.contains("\"kind\":\"route-rec\""),
+        "json kind renders: {json}"
+    );
+    // Route chatter never opens a session timeline.
+    assert!(session::classify_tree(&tree).is_none());
+    // Empty relay list names the leg with no first hop.
+    let empty = chain::dissect(&wrap_nwk_command(&[0x05u8, 0x00], 0x0000, 0x56cb)).unwrap();
+    assert_eq!(
+        empty.nwkcmd().expect("empty route-record leg").kind,
+        K::RouteRecord {
+            relays: 0,
+            first_relay: 0xffff
+        }
+    );
+    assert_eq!(note_reasons(&empty), vec!["trailing"]);
+    // Count/length mismatches stay `Unknown` under the same stop.
+    for bad in [
+        &[0x05u8][..],
+        &[0x05u8, 0x02, 0x10, 0x69][..],
+        &[0x05u8, 0x01, 0x10, 0x69, 0x34, 0x12][..],
+        &[0x05u8, 0x03, 0x10, 0x69, 0x34, 0x12][..],
+    ] {
+        let t = chain::dissect(&wrap_nwk_command(bad, 0x0000, 0x56cb)).unwrap();
+        assert_eq!(t.nwkcmd().expect("unknown leg").kind, K::Unknown);
+        assert_eq!(note_reasons(&t), vec!["trailing"]);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // RD-INSPECT-25: MAC command payloads named (gap-4b).
 // ---------------------------------------------------------------------------
 
