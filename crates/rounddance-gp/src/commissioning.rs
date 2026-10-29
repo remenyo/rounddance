@@ -338,6 +338,7 @@ impl CommissioningSession {
                 }
                 self.state = CommissioningState::Commissioned;
                 self.pending = None;
+                self.deadline_ms = 0;
                 Ok(Some(TranslationSeed {
                     app: self.app,
                     gpd: self.gpd,
@@ -363,6 +364,7 @@ impl CommissioningSession {
                 if now_ms >= self.deadline_ms {
                     self.state = CommissioningState::Idle;
                     self.pending = None;
+                    self.deadline_ms = 0;
                     return Err(GpError::ReplyTimeout);
                 }
                 Ok(())
@@ -388,9 +390,11 @@ impl CommissioningSession {
         }
     }
 
-    /// Reset to idle.
+    /// Reset to idle, dropping any staged reply, the reply window,
+    /// and the parked exchange identity: outside the reply window no
+    /// reply is owed and no window runs.
     pub const fn reset(&mut self) {
-        self.state = CommissioningState::Idle;
+        *self = Self::new();
     }
 }
 

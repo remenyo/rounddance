@@ -1743,7 +1743,8 @@ with `SecurityFailed` and the advanced counter hands off again
 (DEDUP-DROP). Reproduce-then-fix per behavior (new timeline test
 run first; a mutated decision pin was refused, then restored —
 the pin is load-bearing). 1 repo-minted ID (`RD-SIM-03`),
-MINTED-pending-confirm. Also carried from wave-66: `RD-SIM-01..02`
+MINTED at mint; CONFIRMED via corpus sweep-48 (0 corrections /
+0 REJECT). Also carried from wave-66: `RD-SIM-01..02`
 flipped MINTED-pending-confirm → CONFIRMED via corpus sweep-47 (0
 corrections / 0 REJECT), rows and preamble updated in place. No lab
 use, no corpus writes; sealed legs re-seal under a synthetic
@@ -1752,4 +1753,31 @@ code/tests is paraphrase only (D1).
 
 | Requirement ID | State | Implementing code | Verifying test |
 |----------------|-------|-------------------|----------------|
-| RD-SIM-03 | implemented + verified | `sim/tests/gp_bidir.rs` (single-GPD bidirectional timeline through the unified sink intake over `ScriptedRadio`: secured rx-after-tx ask → `AdmitCommissioning`; staged PANID reply served at 22 ms inside the 20–25 ms window with reply-PAN decode check; secured Success → `Commissioned` with sink-table pairing; secured data → `Handoff` (`PairedEndpoints`, `0x0104`/`0xFFFF`/`0x00`); replayed counter → `Drop(SecurityFailed)`; advanced counter → `Handoff`) | `sim/tests/gp_bidir.rs::gp_bidir_intake_timeline_pairs_hands_off_and_dedups` (6-decision log pin, decision-for-decision against the air model; mutation-refused) + `::gp_bidir_replay_is_deterministic` (same seed+script → identical trace + log) + `::gp_bidir_mismatch_and_timeout_edges` (foreign secured Success → `TransactionMismatch`; lapsed window → `ReplyTimeout`, back to `Idle`) |
+| RD-SIM-03 | implemented + verified, CONFIRMED (sweep-48) | `sim/tests/gp_bidir.rs` (single-GPD bidirectional timeline through the unified sink intake over `ScriptedRadio`: secured rx-after-tx ask → `AdmitCommissioning`; staged PANID reply served at 22 ms inside the 20–25 ms window with reply-PAN decode check; secured Success → `Commissioned` with sink-table pairing; secured data → `Handoff` (`PairedEndpoints`, `0x0104`/`0xFFFF`/`0x00`); replayed counter → `Drop(SecurityFailed)`; advanced counter → `Handoff`) | `sim/tests/gp_bidir.rs::gp_bidir_intake_timeline_pairs_hands_off_and_dedups` (6-decision log pin, decision-for-decision against the air model; mutation-refused) + `::gp_bidir_replay_is_deterministic` (same seed+script → identical trace + log) + `::gp_bidir_mismatch_and_timeout_edges` (foreign secured Success → `TransactionMismatch`; lapsed window → `ReplyTimeout`, back to `Idle`) |
+
+## Wave-68 traceability — B6 STAGE close (lane 1)
+
+The GP air-model gap list is nearly exhausted (GAP-5 closed w52,
+sink w64, warmup/M1-M3 w66, dGpSend/GAP-3 w67). The remaining
+model-internal item was the B6 STAGE anomaly in the GP
+commissioning model: `CommissioningSession::reset` returned the
+session to `Idle` while leaving the staged reply parked, so
+`reply_staged()` still reported a reply owed to an exchange that no
+longer exists. Every other transition out of the reply window
+(`begin`, `note_success`, `tick`-timeout) drops the staged reply;
+`reset` was the odd one out. Reproduce-then-fix per behavior (new
+stage-transition test failed first on the leaked staged flag, then
+passed after the fix). The fix restores the idle invariant at the
+root cause in `rounddance-gp`: `reset` re-initializes the whole
+session, and the `note_success` / `tick`-timeout arms clear the
+reply-window deadline alongside the staged reply, so no stage state
+leaks across any transition out of the reply window. 1 repo-minted
+ID (`RD-GP-07`), MINTED-pending-confirm. Also carried from wave-67:
+`RD-SIM-03` flipped MINTED-pending-confirm → CONFIRMED via corpus
+sweep-48 (0 corrections / 0 REJECT), row and preamble updated in
+place. No lab use, no corpus writes; wording in code/tests is
+paraphrase only (D1).
+
+| Requirement ID | State | Implementing code | Verifying test |
+|----------------|-------|-------------------|----------------|
+| RD-GP-07 | implemented + verified | `commissioning::CommissioningSession::reset` (reset restores the full idle invariant: staged reply dropped, reply-window deadline cleared, parked exchange identity cleared) + `note_success` / `tick`-timeout arms (reply-window deadline cleared alongside the staged reply) | `gp/tests/session_stages.rs::repro_reset_clears_staged_reply_and_window` (failing-first: parked exchange with staged reply → `reset` → `Idle` with no reply owed, no window running; a fresh park with nothing staged reports pending rather than stale bytes) + `::timeout_clears_staged_reply_and_window` (lapsed window → `Idle` with no reply owed) |
