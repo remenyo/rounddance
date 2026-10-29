@@ -1824,9 +1824,11 @@ decoder), oversize `LEN` and FCS mismatch surface as typed
 frame body is data, never a delimiter — length alone delimits,
 same contract as `ti::decode`. `no_std`, `forbid(unsafe_code)`,
 bounded stack state, panic-free. One repo-minted ID
-(`RD-COMPAT-12`), MINTED-pending-confirm at mint. No lab use, no
+(`RD-COMPAT-12`), MINTED at mint; CONFIRMED via corpus
+sweep-54 (0 corrections / 0 REJECT), row updated in place.
+No lab use, no
 corpus writes; wording in code/tests is paraphrase only (D1).
 
 | Requirement ID | State | Implementing code | Verifying test |
 |----------------|-------|-------------------|----------------|
-| RD-COMPAT-12 | implemented + verified | `ti::{MtDecoder, MtOutcome, MtDropReason}`: streaming byte pump (`push_byte -> Option<MtOutcome>`, at most one outcome per byte) over the wave-61 wire shape — silent pre-SOF skip, `BadLen` on `LEN > MAX_MT_PAYLOAD`, `BadFcs` on XOR-fold mismatch, re-arm at next `SOF`, saturating `dropped` / `consecutive_bad` meters cleared on a good frame | `compat/tests/ti_vectors.rs` 5 new tests (19 total): hand-computed byte pin (`FE 03 24 01 AA 10 FE 62`, FCS oracle: independent python3 XOR-fold, SOF-valued data octet pinned as data) + split-feed reassembly at 5 chunkings vs one-shot `decode` + noise-skip / `BadLen`-drop / re-arm with meter reset + `BadFcs`-drop / re-arm + back-to-back in-order frames |
+| RD-COMPAT-12 | implemented + verified, CONFIRMED (sweep-54) | `ti::{MtDecoder, MtOutcome, MtDropReason}`: streaming byte pump (`push_byte -> Option<MtOutcome>`, at most one outcome per byte) over the wave-61 wire shape — silent pre-SOF skip, `BadLen` on `LEN > MAX_MT_PAYLOAD`, `BadFcs` on XOR-fold mismatch, re-arm at next `SOF`, saturating `dropped` / `consecutive_bad` meters cleared on a good frame | `compat/tests/ti_vectors.rs` 5 new tests (19 total): hand-computed byte pin (`FE 03 24 01 AA 10 FE 62`, FCS oracle: independent python3 XOR-fold, SOF-valued data octet pinned as data) + split-feed reassembly at 5 chunkings vs one-shot `decode` + noise-skip / `BadLen`-drop / re-arm with meter reset + `BadFcs`-drop / re-arm + back-to-back in-order frames |
