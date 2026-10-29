@@ -225,6 +225,9 @@ fn depth_key(t: &rounddance_inspect::tree::DecodeTree) -> (String, String) {
             Layer::Zdo(_) => names.push("zdo"),
             Layer::Touchlink(_) => names.push("touchlink"),
             Layer::Gp(_) => names.push("gp"),
+            Layer::Hci(_) => names.push("hci"),
+            Layer::Att(_) => names.push("att"),
+            Layer::Direct(_) => names.push("direct"),
             Layer::Note(n) => {
                 names.push("note");
                 stop = n.reason.to_string();

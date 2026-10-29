@@ -547,6 +547,141 @@ pub enum GpKind {
     EncryptedSealed,
 }
 
+/// HCI packet summary: the BLE-leg outer for one btsnoop record.
+/// HCI commands and events file no ATT layer; ACL packets carrying
+/// L2CAP CID `0x0004` continue to the ATT leg.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HciNode {
+    /// Record direction and packet type.
+    pub kind: HciKind,
+    /// ACL connection handle (12-bit), `None` on commands/events.
+    pub conn_handle: Option<u16>,
+    /// HCI command opcode (little-endian on air), commands only.
+    pub opcode: Option<u16>,
+    /// HCI event code, events only.
+    pub event: Option<u8>,
+    /// LE Meta subevent (event `0x3e` with a parameter octet),
+    /// `None` otherwise.
+    pub subevent: Option<u8>,
+    /// HCI parameter / ACL L2CAP payload length in octets.
+    pub payload_len: u16,
+}
+
+/// HCI record shapes (btsnoop flags discriminate them).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HciKind {
+    /// Host-to-controller command (flags 2).
+    Command,
+    /// Controller-to-host event (flags 3).
+    Event,
+    /// Host-to-controller ACL data (flags 4).
+    AclTx,
+    /// Controller-to-host ACL data (flags 5).
+    AclRx,
+}
+
+/// ATT PDU summary: the BLE-leg inner for one L2CAP CID-`0x0004`
+/// payload. Handles are always decoded; values stay length-named
+/// (Direct TLV envelopes earn a [`DirectNode`] leg, everything else
+/// stays opaque bytes — key-carrying values are never rendered).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AttNode {
+    /// ATT opcode (first PDU octet).
+    pub opcode: u8,
+    /// Named opcode class (`Unknown` files the octet, never a guess).
+    pub kind: AttKind,
+    /// Primary attribute handle (request / response / notify /
+    /// error handle), `None` on MTU exchanges which carry none.
+    pub handle: Option<u16>,
+    /// Discovery-request handle-range end, `None` otherwise.
+    pub handle_end: Option<u16>,
+    /// MTU value (exchange request/response only).
+    pub mtu: Option<u16>,
+    /// Requested 16-bit UUID (discovery by 16-bit type), `None`
+    /// when the request carries a 128-bit UUID or no UUID.
+    pub uuid16: Option<u16>,
+    /// True when a discovery request carries a 128-bit UUID.
+    pub uuid128: bool,
+    /// Error response: the failed request's opcode.
+    pub req_opcode: Option<u8>,
+    /// Error response: the error code (e.g. `0x80` is the Direct
+    /// insufficient-authorization application error, filed here as
+    /// a code, never interpreted as a TLV).
+    pub error: Option<u8>,
+    /// ATT value / list bytes after the fixed header.
+    pub payload_len: u16,
+}
+
+/// Named ATT opcode classes (observed live set plus the symmetric
+/// request/response pairs the exchange needs).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AttKind {
+    /// Error Response (`0x01`).
+    Error,
+    /// Exchange MTU Request / Response (`0x02` / `0x03`).
+    Mtu,
+    /// Find Information Request / Response (`0x04` / `0x05`).
+    FindInfo,
+    /// Read By Type Request / Response (`0x08` / `0x09`).
+    ReadByType,
+    /// Read Request / Response (`0x0a` / `0x0b`).
+    Read,
+    /// Read By Group Type Request / Response (`0x10` / `0x11`).
+    ReadByGroup,
+    /// Write Request (`0x12`).
+    Write,
+    /// Write Response (`0x13`, empty).
+    WriteResult,
+    /// Handle Value Notification (`0x1b`).
+    Notify,
+    /// Handle Value Indication / Confirmation (`0x1d` / `0x1e`).
+    Indicate,
+    /// None of the named opcodes: octet filed, payload unparsed.
+    Unknown,
+}
+
+/// Direct (Zigbee Direct over BLE) summary: UUID attribution for
+/// discovery responses plus the TLV envelope for Direct
+/// write/notify values. Bodies are never carried (commissioning
+/// values may seal key material) — only tags, counts, and the
+/// status domain/code.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DirectNode {
+    /// Which Direct shape this leg names.
+    pub kind: DirectKind,
+    /// Discovery: service bitmap (bit 0 = Security service, bit 1
+    /// = Commissioning service); `0` on non-discovery legs.
+    pub services: u8,
+    /// Discovery: Security Authenticate chars seen (bit `i` =
+    /// `SECURITY_CHARS[i]`); `0` otherwise.
+    pub sec_chars: u8,
+    /// Discovery: Commissioning chars seen (bit `i` =
+    /// `COMMISSIONING_CHARS[i]`); `0` otherwise.
+    pub comm_chars: u8,
+    /// Discovery entries scanned, or envelope TLV count
+    /// (saturates at 255); status legs carry `1`.
+    pub entries: u8,
+    /// Envelope: first TLV tag (`0xff` when not an envelope).
+    pub first_tag: u8,
+    /// Status: TLV domain octet (`0xff` when not a status leg).
+    pub domain: u8,
+    /// Status: TLV code octet (`0xff` when not a status leg).
+    pub code: u8,
+    /// ATT value length in octets.
+    pub payload_len: u16,
+}
+
+/// Named Direct shapes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DirectKind {
+    /// Discovery response carrying ≥1 Direct UUID.
+    Discovery,
+    /// Status-Code TLV notification (tag `0x0e`, 2-octet body).
+    Status,
+    /// Write value shaped as ≥2 complete defined-tag TLVs.
+    Envelope,
+}
+
 /// Terminal note: the chain stopped here with bytes left over.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NoteNode {
@@ -554,7 +689,9 @@ pub struct NoteNode {
     /// key-domain miss, `"mac-secured"` for a MAC sealed outer,
     /// `"truncated"`, `"unknown"`, `"trailing"`, `"ack"`,
     /// `"beacon"`, `"mac-command"`, `"decrypted"`, `"interpan"` for
-    /// a broadcast-PAN outer routed to the Touchlink leg).
+    /// a broadcast-PAN outer routed to the Touchlink leg,
+    /// `"ble-unknown"` for an HCI record whose ATT payload names
+    /// no leg).
     pub reason: &'static str,
     /// Octets remaining at this layer.
     pub remaining: u16,
@@ -582,6 +719,12 @@ pub enum Layer {
     Zdo(ZdoNode),
     /// Green-Power device frame (stub NWK, never beside NWK/APS).
     Gp(GpNode),
+    /// HCI packet (BLE leg outer, never beside 15.4 layers).
+    Hci(HciNode),
+    /// ATT PDU (BLE leg inner, beside Hci only).
+    Att(AttNode),
+    /// Direct UUID/TLV envelope (BLE leg, beside Hci+Att only).
+    Direct(DirectNode),
     /// Chain stop note.
     Note(NoteNode),
 }
@@ -611,6 +754,11 @@ pub enum TreeError {
     MacTruncated,
     /// MAC header malformed (bad address modes / lengths).
     MacMalformed,
+    /// HCI record truncated (short command / event / ACL header).
+    BleTruncated,
+    /// HCI record malformed (unknown btsnoop flags, L2CAP length
+    /// mismatch, wrong parameter length).
+    BleMalformed,
 }
 
 impl Default for DecodeTree {
@@ -770,6 +918,39 @@ impl DecodeTree {
         for slot in self.layers() {
             if let Some(Layer::Gp(g)) = slot {
                 return Some(*g);
+            }
+        }
+        None
+    }
+
+    /// First HCI layer, if present.
+    #[must_use]
+    pub fn hci(&self) -> Option<HciNode> {
+        for slot in self.layers() {
+            if let Some(Layer::Hci(h)) = slot {
+                return Some(*h);
+            }
+        }
+        None
+    }
+
+    /// First ATT layer, if present.
+    #[must_use]
+    pub fn att(&self) -> Option<AttNode> {
+        for slot in self.layers() {
+            if let Some(Layer::Att(a)) = slot {
+                return Some(*a);
+            }
+        }
+        None
+    }
+
+    /// First Direct layer, if present.
+    #[must_use]
+    pub fn direct(&self) -> Option<DirectNode> {
+        for slot in self.layers() {
+            if let Some(Layer::Direct(d)) = slot {
+                return Some(*d);
             }
         }
         None

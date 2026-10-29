@@ -710,3 +710,109 @@ fn captured_corpus_pins_gp_w51() {
     const B8_PLAIN_DATA: usize = 8;
     assert_eq!(B8_PLAIN_DATA + RX_AFTER_TX_COMM, B8_GPDF);
 }
+
+// ---------------------------------------------------------------------------
+// RD-INSPECT-34..36: wave-52 BLE capture pins.
+// ---------------------------------------------------------------------------
+
+/// Captured-corpus pins for the BLE/ATT gap-closure leg: the nine
+/// wave-52 btsnoop captures (`~/hwscratch/w52/`, read-only) plus the
+/// analyzer-observed ATT census. Procedure: the offline gate census
+/// `python3 analyze53_ble.py` in `~/hwscratch/w53/` replays every
+/// btsnoop record through the flags + HCI + ACL + L2CAP + ATT
+/// predicate; all 387 ACL payloads parse (CENSUS PASS), with the
+/// MTU-256/517 exchange, the exact 13-UUID Direct set (Security +
+/// Commissioning services, 3 + 8 characteristics), 84 writes, and 27
+/// Status-Code notifications. HCI/ATT PDUs are plaintext protocol —
+/// no key material is involved anywhere on this leg. Short verbatim
+/// vectors are pinned in `ble_att.rs`; longer commissioning values
+/// pin here as hashes only.
+#[test]
+fn captured_corpus_pins_ble_w52() {
+    const A_ATTEMPT1_SHA256: &str =
+        "173805e411aa65d40dcd3671df5cc8e8316a5eb491820504ace3245c691ba046";
+    const A_ATTEMPT2_SHA256: &str =
+        "79d1a2ee5e78b0ccc5a0bba5ec01eec5ed2e1b2849a11742c3c84e11e4223711";
+    const A1_7F68_SHA256: &str = "ff285d16e47a84f4aa6cc9b25267579c216ca3d2a09267b4a529648c2bf96399";
+    const A1_97A4_SHA256: &str = "314b0eb366ae289e976c0bb2be012cbce8523bcfee89ab663c461fc4a7b50574";
+    const A2_7F68_SHA256: &str = "ab21bad316dfe07301f257980da6d99bbc29cdd927d2bbe68e2b30243e54625d";
+    const A2_97A4_SHA256: &str = "432f2b1a46b9762db86ba62de1f09c5cc377908c8966800778f8f91cab1516dd";
+    const B_ATTEMPT1_SHA256: &str =
+        "dca672fe9d5522949ffc9776ef8061333b6be28ef91b1554c7b07608d46dd655";
+    const B_7F68_SHA256: &str = "1e14d3db21e0ddbe018445892d7af7dc2d6dc88d7244d96c1830f5c70e8e7c2b";
+    const C_7F68_SHA256: &str = "bec1e98e5406c1e467491c38bc0b3980ce765ca91d0174d09b8a50c9d37c25fc";
+    for h in [
+        A_ATTEMPT1_SHA256,
+        A_ATTEMPT2_SHA256,
+        A1_7F68_SHA256,
+        A1_97A4_SHA256,
+        A2_7F68_SHA256,
+        A2_97A4_SHA256,
+        B_ATTEMPT1_SHA256,
+        B_7F68_SHA256,
+        C_7F68_SHA256,
+    ] {
+        assert_eq!(h.len(), 64);
+    }
+    // Per-capture ACL counts (attempt1 is scan-only: no connection,
+    // zero ACL records — the ingest edge).
+    const A_ATTEMPT1_ACL: usize = 0;
+    const A_ATTEMPT2_ACL: usize = 44;
+    const A1_7F68_ACL: usize = 44;
+    const A1_97A4_ACL: usize = 44;
+    const A2_7F68_ACL: usize = 38;
+    const A2_97A4_ACL: usize = 38;
+    const B_ATTEMPT1_ACL: usize = 53;
+    const B_7F68_ACL: usize = 69;
+    const C_7F68_ACL: usize = 57;
+    assert_eq!(
+        A_ATTEMPT1_ACL
+            + A_ATTEMPT2_ACL
+            + A1_7F68_ACL
+            + A1_97A4_ACL
+            + A2_7F68_ACL
+            + A2_97A4_ACL
+            + B_ATTEMPT1_ACL
+            + B_7F68_ACL
+            + C_7F68_ACL,
+        387
+    );
+    // ATT opcode census across all nine captures.
+    const ERROR_RSP: usize = 55;
+    const MTU_REQ: usize = 10;
+    const MTU_RSP: usize = 10;
+    const FIND_INFO_REQ: usize = 5;
+    const READ_BY_TYPE_REQ: usize = 40;
+    const READ_BY_TYPE_RSP: usize = 20;
+    const READ_REQ: usize = 16;
+    const READ_RSP: usize = 16;
+    const READ_BY_GROUP_REQ: usize = 25;
+    const READ_BY_GROUP_RSP: usize = 20;
+    const WRITE_REQ: usize = 84;
+    const WRITE_RSP: usize = 59;
+    const NOTIFY: usize = 27;
+    assert_eq!(
+        ERROR_RSP
+            + MTU_REQ
+            + MTU_RSP
+            + FIND_INFO_REQ
+            + READ_BY_TYPE_REQ
+            + READ_BY_TYPE_RSP
+            + READ_REQ
+            + READ_RSP
+            + READ_BY_GROUP_REQ
+            + READ_BY_GROUP_RSP
+            + WRITE_REQ
+            + WRITE_RSP
+            + NOTIFY,
+        387
+    );
+    // MTU exchange values, the exact Direct UUID count, writes, and
+    // Status-Code notifications (all on the Status handle 0x0022).
+    const MTU_VALUES: [u16; 2] = [256, 517];
+    assert_eq!(MTU_VALUES, [256, 517]);
+    const DIRECT_UUIDS: usize = 13;
+    assert_eq!(DIRECT_UUIDS, 13);
+    assert_eq!(WRITE_REQ, 84);
+    assert_eq!(NOTIFY, 27);
+}

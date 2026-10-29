@@ -25,6 +25,7 @@
 #![forbid(unsafe_code)]
 
 pub mod aps;
+pub mod ble;
 pub mod capture;
 pub mod chain;
 pub mod decrypt;
@@ -39,6 +40,8 @@ pub mod tree;
 pub mod zcl;
 pub mod zdo;
 
+#[cfg(feature = "std")]
+pub mod btsnoop;
 #[cfg(feature = "std")]
 pub mod pcap;
 #[cfg(feature = "std")]

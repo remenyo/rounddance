@@ -285,6 +285,64 @@ fn finish_aps_zcl(mut tree: DecodeTree, rest: &[u8]) -> Result<DecodeTree, TreeE
     Ok(tree)
 }
 
+/// Dissect one BLE HCI record (one btsnoop record: flags plus the raw
+/// HCI packet without the H4 type octet).
+///
+/// Commands and events file an HCI layer only. ACL packets carrying
+/// L2CAP CID `0x0004` continue to the ATT leg (MTU exchange, handle
+/// decode on reads/writes/notifies); discovery responses carrying
+/// Direct UUIDs and Direct TLV write/notify values earn a Direct
+/// leg beside it. An ACL packet the ATT codec refuses (non-ATT CID,
+/// truncation, fixed-shape mismatch) keeps the HCI leg with a
+/// `ble-unknown` stop — the bytes are still shown, never silently
+/// dropped. Only an HCI-level refusal fails the whole record, since
+/// without the HCI header nothing is addressable. BLE trees carry
+/// no 15.4 layers, so the session engine counts them under PAN 0
+/// with no device row and zero secured accounting.
+pub fn dissect_ble(flags: u32, record: &[u8]) -> Result<DecodeTree, TreeError> {
+    if record.is_empty() {
+        return Err(TreeError::Empty);
+    }
+    let mut tree = DecodeTree::new();
+    let (hci, att) = crate::ble::decode_hci(flags, record).map_err(|e| match e {
+        crate::ble::BleError::Empty => TreeError::Empty,
+        crate::ble::BleError::Truncated => TreeError::BleTruncated,
+        crate::ble::BleError::Malformed => TreeError::BleMalformed,
+    })?;
+    tree.push(Layer::Hci(hci));
+    let pdu = match att {
+        Some(p) => p,
+        // Commands/events file the HCI leg only; an ACL packet on
+        // a non-ATT channel keeps the HCI leg with a stop.
+        None => {
+            if matches!(
+                hci.kind,
+                crate::tree::HciKind::AclTx | crate::tree::HciKind::AclRx
+            ) {
+                stop(&mut tree, "ble-unknown", record.len());
+            }
+            return Ok(tree);
+        }
+    };
+    match crate::ble::decode_att(pdu) {
+        Ok(node) => {
+            tree.push(Layer::Att(node));
+            // Direct legs ride beside the ATT layer: discovery
+            // bitmaps, status notifications, and TLV envelopes.
+            // Anything the Direct codec refuses keeps the ATT leg
+            // with no Direct layer.
+            if let Ok(direct) = crate::ble::decode_direct(&node, pdu) {
+                tree.push(Layer::Direct(direct));
+            }
+            Ok(tree)
+        }
+        Err(_) => {
+            stop(&mut tree, "ble-unknown", pdu.len());
+            Ok(tree)
+        }
+    }
+}
+
 /// Dissect a bare NWK payload (no 802.15.4 MAC header, e.g. a captured
 /// NWK PDU from an existing lab log) with no lab keys: secured
 /// frames stop after NWK.

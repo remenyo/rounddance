@@ -5,10 +5,43 @@
 //! remaining length, never decrypted.
 
 use crate::tree::{
-    Addr, DecodeTree, GpKind, GpNode, Layer, MacCmdKind, MacCmdNode, NwkCmdKind, NwkCmdNode,
-    TouchlinkKind, TouchlinkNode,
+    Addr, AttKind, DecodeTree, DirectKind, GpKind, GpNode, HciKind, Layer, MacCmdKind, MacCmdNode,
+    NwkCmdKind, NwkCmdNode, TouchlinkKind, TouchlinkNode,
 };
 use std::fmt::Write as _;
+
+fn hci_text(k: HciKind) -> &'static str {
+    match k {
+        HciKind::Command => "cmd",
+        HciKind::Event => "evt",
+        HciKind::AclTx => "acl-tx",
+        HciKind::AclRx => "acl-rx",
+    }
+}
+
+fn att_text(k: AttKind) -> &'static str {
+    match k {
+        AttKind::Error => "error",
+        AttKind::Mtu => "mtu",
+        AttKind::FindInfo => "find-info",
+        AttKind::ReadByType => "read-by-type",
+        AttKind::Read => "read",
+        AttKind::ReadByGroup => "read-by-group",
+        AttKind::Write => "write",
+        AttKind::WriteResult => "write-rsp",
+        AttKind::Notify => "notify",
+        AttKind::Indicate => "indicate",
+        AttKind::Unknown => "unknown",
+    }
+}
+
+fn direct_text(k: DirectKind) -> &'static str {
+    match k {
+        DirectKind::Discovery => "discovery",
+        DirectKind::Status => "status",
+        DirectKind::Envelope => "envelope",
+    }
+}
 
 /// One-line human summary plus one indented line per layer.
 pub fn to_text(tree: &DecodeTree) -> String {
@@ -158,6 +191,71 @@ pub fn to_text(tree: &DecodeTree) -> String {
                     if g.rx_after_tx { " rx-after-tx" } else { "" },
                 );
             }
+            Layer::Hci(h) => {
+                let _ = writeln!(
+                    s,
+                    "  hci: {} handle={} op={} evt={} sub={} len={}B",
+                    hci_text(h.kind),
+                    h.conn_handle
+                        .map(|v| format!("{v:#06x}"))
+                        .unwrap_or_else(|| String::from("-")),
+                    h.opcode
+                        .map(|v| format!("{v:#06x}"))
+                        .unwrap_or_else(|| String::from("-")),
+                    h.event
+                        .map(|v| format!("{v:#04x}"))
+                        .unwrap_or_else(|| String::from("-")),
+                    h.subevent
+                        .map(|v| format!("{v:#04x}"))
+                        .unwrap_or_else(|| String::from("-")),
+                    h.payload_len,
+                );
+            }
+            Layer::Att(a) => {
+                let _ = writeln!(
+                    s,
+                    "  att: op={:#04x} {} handle={} mtu={} err={} len={}B",
+                    a.opcode,
+                    att_text(a.kind),
+                    a.handle
+                        .map(|v| format!("{v:#06x}"))
+                        .unwrap_or_else(|| String::from("-")),
+                    a.mtu
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| String::from("-")),
+                    a.error
+                        .map(|v| format!("{v:#04x}"))
+                        .unwrap_or_else(|| String::from("-")),
+                    a.payload_len,
+                );
+            }
+            Layer::Direct(d) => {
+                let _ = writeln!(
+                    s,
+                    "  direct: {} svc={:#04x} sec={:#04x} comm={:#04x} entries={} first={} domain={} code={} len={}B",
+                    direct_text(d.kind),
+                    d.services,
+                    d.sec_chars,
+                    d.comm_chars,
+                    d.entries,
+                    if d.first_tag == 0xff {
+                        String::from("-")
+                    } else {
+                        format!("{:#04x}", d.first_tag)
+                    },
+                    if d.domain == 0xff {
+                        String::from("-")
+                    } else {
+                        format!("{:#04x}", d.domain)
+                    },
+                    if d.code == 0xff {
+                        String::from("-")
+                    } else {
+                        format!("{:#04x}", d.code)
+                    },
+                    d.payload_len,
+                );
+            }
             Layer::Note(n) => {
                 let _ = writeln!(s, "  …: {} ({}B left)", n.reason, n.remaining);
             }
@@ -252,6 +350,58 @@ pub fn to_json(tree: &DecodeTree) -> String {
             }
             Layer::Gp(g) => {
                 s.push_str(&gp_json(g));
+            }
+            Layer::Hci(h) => {
+                s.push_str(&format!(
+                    "{{\"hci\":{{\"kind\":\"{}\",\"handle\":{},\"opcode\":{},\"event\":{},\"subevent\":{},\"len\":{}}}}}",
+                    hci_text(h.kind),
+                    opt_json_u16(h.conn_handle),
+                    opt_json_u16(h.opcode),
+                    opt_json_u8(h.event),
+                    opt_json_u8(h.subevent),
+                    h.payload_len,
+                ));
+            }
+            Layer::Att(a) => {
+                s.push_str(&format!(
+                    "{{\"att\":{{\"op\":{},\"kind\":\"{}\",\"handle\":{},\"end\":{},\"mtu\":{},\"uuid16\":{},\"uuid128\":{},\"req\":{},\"err\":{},\"len\":{}}}}}",
+                    a.opcode,
+                    att_text(a.kind),
+                    opt_json_u16(a.handle),
+                    opt_json_u16(a.handle_end),
+                    opt_json_u16(a.mtu),
+                    opt_json_u16(a.uuid16),
+                    a.uuid128,
+                    opt_json_u8(a.req_opcode),
+                    opt_json_u8(a.error),
+                    a.payload_len,
+                ));
+            }
+            Layer::Direct(d) => {
+                s.push_str(&format!(
+                    "{{\"direct\":{{\"kind\":\"{}\",\"svc\":{},\"sec\":{},\"comm\":{},\"entries\":{},\"first\":{},\"domain\":{},\"code\":{},\"len\":{}}}}}",
+                    direct_text(d.kind),
+                    d.services,
+                    d.sec_chars,
+                    d.comm_chars,
+                    d.entries,
+                    if d.first_tag == 0xff {
+                        String::from("null")
+                    } else {
+                        d.first_tag.to_string()
+                    },
+                    if d.domain == 0xff {
+                        String::from("null")
+                    } else {
+                        d.domain.to_string()
+                    },
+                    if d.code == 0xff {
+                        String::from("null")
+                    } else {
+                        d.code.to_string()
+                    },
+                    d.payload_len,
+                ));
             }
             Layer::Note(n) => {
                 s.push_str(&format!(

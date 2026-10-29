@@ -1405,3 +1405,64 @@ reproduction procedure: `python3 analyze52_gp.py` in `~/hwscratch/w52/`
 |----------------|-------|-------------------|----------------|
 | RD-INSPECT-32 | implemented + verified | `gp::decode` / `decode_opened` (reused `rounddance-gp` codec → `tree::{GpNode, GpKind}`: data vs maintenance, auto-commissioning, source-identifier / IEEE-plus-endpoint / LPED addressing, level / key-bit / rx-after-tx / direction-proxy, frame counter, command envelope — data `0x20`, commissioning `0xE0` long + compact, decommissioning `0xE1`, success `0xE2`, channel-request `0xE3`, commissioning-reply `0xF0`, channel-config `0xF3`, maintenance / LPED-opaque / `EncryptedSealed`; bodies unmodeled) + `chain` GP arm (stack-NWK refusal routes to the GP leg before the historical `unknown`; unsecured legs ride beside `trailing`, protected-but-unverified beside `secured`; stop taxonomy unchanged) + `report` text/JSON `gp` legs + `inspect-live` depth key + RD-INSPECT-31 contract evolution (the version-3 probe bytes file MAC + GP + `trailing`) | `inspect/tests/decode_depth.rs::repro_gpdf_data_stops_unknown_without_leg` + `::repro_gpdf_secured_stops_secured_not_unknown` (failing-first: HEAD-API repros, `unknown` pre-fix) + `::gp_data_leg_names_frame_control_and_addressing` + `::gp_commissioning_leg_names_long_and_compact` + `::gp_bidirectional_request_leg_names_rx_after_tx` (verbatim w51 shapes incl. report legs + session rows) + `::live_air::captured_corpus_pins_gp_w51` (10 pcap hashes + 5218 frames + 519 GPDFs + per-shape census incl. GAP-5 L 84/84, K 84, H2 28) + offline `analyze52_gp.py` CENSUS PASS |
 | RD-INSPECT-33 | implemented + verified | `keys::{GpKeySlot, set_gp_key, gp_key_by_bit, has_gp_key}` (strict wire key-bit match, live-only state — snapshot restore restarts empty, schema stays v1) + `decrypt::open_gp` (CCM* integrity check for the counter-plus-MIC level, decrypt-then-check for the encrypted level, GP nonce + header AAD; `None` on no slot, class miss, proxy-outgoing, LPED/maintenance, or any integrity failure — never decrypts without a slotted key) + `chain` verified-open leg (`decrypted` stop + full command envelope, sealed legs keep `secured`) + `session::note_tree` per-domain gating (NWK slots never cover GP legs, GP slots never cover NWK legs; verified-open tree evidence still counts) | `inspect/tests/decode_depth.rs::gp_secured_mic_only_names_command_beside_secured_stop` (verbatim w51 protected shapes: cleartext command beside `secured`, orphan accounting) + `::gp_encrypted_seals_command_without_key` (sealed shape, no command) + `::gp_decrypt_opens_with_slotted_key_and_stops_without` (synthetic test-only-key seal→open, no-key / wrong-bit / wrong-key / mutated-octet legs, per-domain orphan) + `::gp_encrypted_decrypt_reveals_command_with_slotted_key` + spec worked-example conformance checked locally only (spec printed key, counter-plus-MIC tag + encrypted decrypt — never committed) |
+
+## Wave-53 traceability — BLE/ATT decode leg (lane 2)
+
+Wave-52 lane 1 filed the gap "rounddance-inspect has no BLE/ATT leg
+(btmon used)" with HCI/btsnoop captures archived as
+`~/hwscratch/w52/hci_*.btsnoop` + `btmon_*.txt` (read-only). This
+wave adds the BLE/ATT decode leg to `rounddance-inspect` (HCI
+event/ACL framing with btsnoop ingest, ATT opcodes including the
+MTU exchange plus write/notify handle decode, Direct service/char
+attribution by UUID, Direct PDU envelope naming; decode-only, no
+crypto) with regression goldens from the w52 captures
+(hashes/metadata in the repo; HCI/ATT PDUs are plaintext protocol —
+no key material involved anywhere on this leg). No lab use, no
+corpus writes; wording in code/tests is paraphrase only (D1). 3
+repo-minted IDs (`RD-INSPECT-34..36`), MINTED-pending-confirm.
+
+Captured-air vectors: the verbatim w52 HCI/ATT octets pinned in
+`inspect/tests/ble_att.rs` (HCI LE-Set-Random-Address command +
+Command-Complete event, ACL MTU request 517 / response 256, error
+response for the 0x001c write with code `0x80`, the two Direct
+service entries, all 11 Direct characteristic entries, the 27-octet
+JoinNetwork TLV write, the Status-Code notify) carry plaintext
+protocol only — the same class as the committed Ember vectors; no
+key bytes anywhere. Longer commissioning write values (runC
+19/20/21/128/129/200-octet writes to 0x001a) pin as hashes only.
+The 9 btsnoop files pin as metadata only:
+`hci_runA-7f68-attempt1.btsnoop` sha256
+`173805e411aa65d40dcd3671df5cc8e8316a5eb491820504ace3245c691ba046`
+(2058 records, 0 ACL — scan-only, no connection),
+`hci_runA-7f68-attempt2.btsnoop` sha256
+`79d1a2ee5e78b0ccc5a0bba5ec01eec5ed2e1b2849a11742c3c84e11e4223711`
+(44 ACL), `hci_runA1-7f68.btsnoop` sha256
+`ff285d16e47a84f4aa6cc9b25267579c216ca3d2a09267b4a529648c2bf96399`
+(44 ACL), `hci_runA1-97a4.btsnoop` sha256
+`314b0eb366ae289e976c0bb2be012cbce8523bcfee89ab663c461fc4a7b50574`
+(44 ACL), `hci_runA2-7f68.btsnoop` sha256
+`ab21bad316dfe07301f257980da6d99bbc29cdd927d2bbe68e2b30243e54625d`
+(38 ACL), `hci_runA2-97a4.btsnoop` sha256
+`432f2b1a46b9762db86ba62de1f09c5cc377908c8966800778f8f91cab1516dd`
+(38 ACL), `hci_runB-7f68-attempt1.btsnoop` sha256
+`dca672fe9d5522949ffc9776ef8061333b6be28ef91b1554c7b07608d46dd655`
+(53 ACL), `hci_runB-7f68.btsnoop` sha256
+`1e14d3db21e0ddbe018445892d7af7dc2d6dc88d7244d96c1830f5c70e8e7c2b`
+(69 ACL), `hci_runC-7f68.btsnoop` sha256
+`bec1e98e5406c1e467491c38bc0b3980ce765ca91d0174d09b8a50c9d37c25fc`
+(57 ACL) — 387 ACL payloads total; opcode census error-rsp 55 /
+mtu-req 10 / mtu-rsp 10 / find-info-req 5 / read-by-type-req 40 /
+read-by-type-rsp 20 / read-req 16 / read-rsp 16 /
+read-by-group-req 25 / read-by-group-rsp 20 / write-req 84 /
+write-rsp 59 / notify 27; MTU values {256, 517}; the exact 13-UUID
+Direct set; 27 notifies all on the Status handle 0x0022 as 4-octet
+Status-Code TLVs. Offline reproduction procedure:
+`python3 analyze53_ble.py` in `~/hwscratch/w53/` (CENSUS PASS:
+387/387 ACL payloads parse as HCI+ACL+L2CAP+ATT); report
+`~/hwscratch/w53/SUMMARY.md`.
+
+| Requirement ID | State | Implementing code | Verifying test |
+|----------------|-------|-------------------|----------------|
+| RD-INSPECT-34 | implemented + verified | `ble::decode_hci` (btsnoop flags 2/3/4/5 → command/event/ACL-TX/ACL-RX; opcode/event/subevent/conn-handle/length naming; strict length checks) + `ble::decode_att` (named opcode classes incl. MTU req/rsp values, error req/handle/code, discovery ranges + 16/128-bit UUID flags, read/write/notify handles with length-named values; unknown opcodes file the octet) + `chain::dissect_ble` (HCI leg, ATT leg, `ble-unknown` stop on refusal; commands/events file HCI only) + `tree::{HciNode, HciKind, AttNode, AttKind}` + `TreeError::{BleTruncated, BleMalformed}` + `report` text/JSON `hci`/`att` legs + `inspect-live` depth key | `inspect/tests/ble_att.rs::repro_hci_records_have_no_ble_leg` (failing-first: no BLE entry pre-fix) + `::hci_acl_mtu_exchange_names_mtu_values` (verbatim 517/256 + report shapes) + `::att_error_response_names_request_and_code` (verbatim 0x80 leg) + `::hci_framing_failures_are_typed` (empty/short/bad-flags/non-ATT-CID/unknown-opcode legs) + `::ble_truncation_prefixes_are_typed_and_panic_free` (every prefix of all 9 verbatim vectors) |
+| RD-INSPECT-35 | implemented + verified | `ble::decode_direct` reusing the `rounddance-direct` GATT tables (new `rounddance-inspect` dependency; no parallel constant table) → `tree::{DirectNode, DirectKind}`: discovery bitmaps (services + 3 security + 8 commissioning chars over reversed LE wire UUIDs; ≥1 Direct UUID required) + Status-Code TLV notifications (exact 4-octet shape, defined domain gate) + write envelopes (≥2 complete defined-tag TLVs, exact consumption; single-TLV CCC writes refused; bodies never carried or rendered) + `report` text/JSON `direct` legs; session attribution unchanged (BLE trees count under PAN 0, no device row, zero secured accounting) | `inspect/tests/ble_att.rs::repro_discovery_without_direct_attribution` (failing-first) + `::direct_discovery_names_all_eleven_characteristics` (verbatim 11-char vector + generic-services no-leg) + `::direct_status_notify_names_domain_and_code` (verbatim GENERAL + FORM notifies, non-status no-leg, report shapes) + `::direct_write_envelope_names_tlvs_without_bodies` (verbatim 27-octet/6-TLV envelope, no body bytes in reports, CCC no-leg) + `::direct_envelope_refusals_stay_undecided` (reserved tag, bad domain, short status) + `::ble_hci_layer_reuses_direct_uuid_tables` + `::ble_trees_fold_without_device_attribution` |
+| RD-INSPECT-36 | implemented + verified | `btsnoop::read_all` (`std`: magic + record walk, monitor-control flags skipped, HCI records with opaque clock; typed BadMagic/Truncated) + `inspect/tests/live_air.rs::captured_corpus_pins_ble_w52` (9 sha256 + per-capture ACL counts + opcode census + MTU values + UUID/write/notify counts as metadata only) | `inspect/tests/ble_att.rs::btsnoop_ingest_reads_hci_records_and_skips_control` (hand-built container: note skip, cmd/evt/ACL ingest, bad-magic/truncation legs, every record dissects) + `::live_air::captured_corpus_pins_ble_w52` + offline `analyze53_ble.py` CENSUS PASS |
