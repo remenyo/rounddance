@@ -703,6 +703,24 @@ them; downgrade policy is never-silent (refusal is typed, see
 | RD-COMPAT-03 | implemented + verified | `negotiate::highest_common_key_index`: bounded highest-common key-transport index | `compat/tests/vectors.rs::vector_highest_common_key_index` |
 | RD-COMPAT-04 | implemented + verified | forward-compat corners: touchlink sub-device versions carried verbatim, higher ClusterRevisions tolerated | `compat/tests/vectors.rs::vector_forward_compat_corners` |
 
+## Wave-60 traceability — Ember/EZSP adapter skeleton (`rounddance-compat::ember`)
+
+Offline only (mock transport, no serial, no lab): the Ember side of
+the consolidated-goal extension starts as a skeleton so the MG21/MG24
+EmberZNet lab counterparts stay untouched. Command identifiers are an
+adapter-local skeleton namespace (`CMD_DATA_SEND`, `EVT_TX_CONFIRM`,
+`EVT_DATA_RECEIVE`), not the NCP command set — pinning real NCP
+values waits for the transport decision. Corpus IDs below are reused
+from the RCP framing discipline; `RD-COMPAT-*` rows are repo-minted,
+MINTED-pending-confirm. Wording in code/tests is paraphrase only,
+never spec text (D1).
+
+| Requirement ID | State | Implementing code | Verifying test |
+|----------------|-------|-------------------|----------------|
+| RD-COMPAT-05 | implemented + verified | `ember::{encode, decode, next_seq, crc16}`: FLAG-delimited frames, LEN discipline, FLAG/ESC stuffing, 3-bit sequencing, CRC-16/CCITT; `MockEzspTransport` record/replay double | `compat/tests/ember_vectors.rs::ezsp_known_vector_byte_pinned`, `ezsp_escapes_flag_and_escape_bytes`, `ezsp_crc_mismatch_refused`, `ezsp_truncated_refused`, `ezsp_seq_wraps_at_eight`, `ezsp_oversize_refused`, `ezsp_callback_flag_surfaced` |
+| RD-COMPAT-06 | implemented + verified | `ember::EmberAdapter`: `MacDataSap` + `MacMgmtSap` + `HasCapabilities` over the mock transport (short-only mapping, 4-slot backpressure, cancel-as-`Cancelled`, NCP confirm/receive callback mapping, typed `rx_dropped` accounting) | `compat/tests/ember_vectors.rs::ember_data_request_encodes_ezsp_frame`, `ember_confirm_mapping_delivered`, `ember_confirm_mapping_no_ack`, `ember_indication_mapping`, `ember_backpressure_and_cancel` |
+| RD-COMPAT-07 | implemented + verified | join-transaction frame flow takes identical SAP decisions on the Ember path and the existing short-short MAC codec (`EspAdapter` + `MockDriver`): request handles, confirm statuses, indication source/LQI/MSDU, error mapping, queue-full backpressure | `compat/tests/ember_vectors.rs::ember_join_flow_parity_with_esp_codec`, `ember_error_mapping_parity_with_esp_codec` |
+
 ## Wave-25 traceability — C6-standalone full-stack app (`rounddance-hal-esp::app`)
 
 The app layer composes repo crates only (roles, commission, NWK,

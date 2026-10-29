@@ -6,8 +6,10 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+rounddance-mac-sap = { path = "../rounddance-mac-sap" }
 
 [dev-dependencies]
+rounddance-hal-esp = { path = "../rounddance-hal-esp" }
 rounddance-aps = { path = "../rounddance-aps" }
 rounddance-commission = { path = "../rounddance-commission" }
 rounddance-gp = { path = "../rounddance-gp" }
