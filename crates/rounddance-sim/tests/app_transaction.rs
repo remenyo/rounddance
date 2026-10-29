@@ -9,10 +9,15 @@
 //! `05-3474-23-24427-01` (Match_Desc), `05-3474-23-24322-01/02` +
 //! `05-3474-23-24432-01` (Bind), `05-3474-23-24332-01/02` (Mgmt_Lqi),
 //! `07-5123-08-2413-02` (ZCL TSN match), `07-5123-08-2512-03`
-//! (Default Response), `05-3474-23-22845-01/02` (secured APS data),
-//! `SCOPE.md` §8 (decision determinism).
+//! (Default Response), `05-3474-23-22843-03/04` (secured APS data;
+//! re-mint of wave-47 `22845-01/02`), `05-3474-23-22844-02` (APS ack
+//! leg + captured-air t1/t2 vectors), `SCOPE.md` §8 (decision
+//! determinism).
 
-use rounddance_aps::{DataDest, DataHeader, DeliveryMode, FrameControl, SecureDataLink};
+use rounddance_aps::{
+    ack_for, parse_ack, ApsStatus, DataDest, DataHeader, DeliveryMode, FrameControl, RetrySession,
+    RetryVerdict, SecureDataLink,
+};
 use rounddance_mac_sap::{
     Channel, FramePayload, MacAddress, MacDataSap as _, MacMgmtSap as _, TxOptions, TxRequest,
     TxStatus,
@@ -542,8 +547,8 @@ fn zcl_read_toggle_defaultrsp_two_node() {
     assert!(pending.is_empty());
 }
 
-// 05-3474-23-22845-01/02: secured APS data end to end — A allocates a
-// counter-managed secured header, the frame rides a secured NWK
+// 05-3474-23-22843-03/04: secured APS data end to end — A allocates
+// a counter-managed secured header, the frame rides a secured NWK
 // envelope, B validates both layers, and the captured replay is
 // refused without delivering twice.
 #[test]
@@ -648,6 +653,83 @@ fn secured_aps_data_two_node() {
     nwk_rx.check(IEEE_A, rx2.frame_counter).unwrap();
     let dec2 = rounddance_aps::decode_data(&got2.payload[used2..]).unwrap();
     assert!(aps_rx.accept(&dec2.header, NODE_A).is_ok());
+}
+
+// 05-3474-23-22844-02 decision test over the medium, wave-47 t2 then
+// t1 shape: A sends an ack-requested secured Toggle; B's data ack
+// clears A's wait (acked -> success, TC 9/9 SUCCESS); a second send
+// with B silent exhausts the retry cap to NO_ACK (no-ack -> retries
+// -> failed, the t1 DELIVERY_FAILED) even though B received and owed
+// the ack both times.
+#[test]
+fn aps_ack_leg_acked_vs_unacked_two_node() {
+    let mut aps_a = SecureDataLink::new();
+    let mut aps_b = SecureDataLink::new();
+    let mut toggle = [0u8; 8];
+    let tn = onoff::client::toggle(0x72, &mut toggle).unwrap();
+    let send_toggle = |link: &mut SecureDataLink| {
+        let (hdr, expect) = link.send_header(
+            DataDest::Unicast {
+                dst_endpoint: APP_EP,
+            },
+            onoff::CLUSTER_ID,
+            HA_PROFILE,
+            APP_EP,
+            true,
+        );
+        let mut apdu = vec![0u8; hdr.header_len() + tn];
+        let n = hdr.encode_into(&toggle[..tn], &mut apdu).unwrap();
+        apdu.truncate(n);
+        (apdu, expect.expect("unicast send expects an ack"))
+    };
+
+    // --- t2 shape: acked -> success. ---
+    let (apdu, expect) = send_toggle(&mut aps_a);
+    let air = trip(0xC201, NODE_A, NODE_B, &npdu(NODE_A, NODE_B, &apdu));
+    let got = nwk_decode(&air).unwrap();
+    let dec = rounddance_aps::decode_data(got.payload).unwrap();
+    let owed = aps_b.accept(&dec.header, NODE_A).unwrap();
+    assert!(owed.is_some());
+    let ack_hdr = ack_for(&dec.header, HA_PROFILE).expect("request bit set: ack owed");
+    assert_eq!(owed.unwrap().counter, ack_hdr.counter);
+    let mut ack_wire = [0u8; 16];
+    let an = ack_hdr.encode_into(&mut ack_wire).unwrap();
+    let ack_air = trip(
+        0xC202,
+        NODE_B,
+        NODE_A,
+        &npdu(NODE_B, NODE_A, &ack_wire[..an]),
+    );
+    let back = nwk_decode(&ack_air).unwrap();
+    let info = parse_ack(back.payload)
+        .unwrap()
+        .expect("data ack correlates");
+    let mut session = RetrySession::new(expect, 0, 16);
+    assert_eq!(session.poll_transmit(), RetryVerdict::Transmit);
+    assert_eq!(session.on_ack(info), RetryVerdict::Acked);
+    assert!(aps_a.note_ack(info.cluster_id, info.counter, info.src_endpoint));
+    assert_eq!(aps_a.pending_ack(), None);
+
+    // --- t1 shape: no ack -> retries -> Failed(NO_ACK). ---
+    // B receives (and owes an ack) but stays silent on air.
+    let (apdu2, expect2) = send_toggle(&mut aps_a);
+    let air2 = trip(0xC203, NODE_A, NODE_B, &npdu(NODE_A, NODE_B, &apdu2));
+    let got2 = nwk_decode(&air2).unwrap();
+    let dec2 = rounddance_aps::decode_data(got2.payload).unwrap();
+    assert!(aps_b.accept(&dec2.header, NODE_A).unwrap().is_some());
+    assert!(ack_for(&dec2.header, HA_PROFILE).is_some());
+    let mut silent = RetrySession::new(expect2, 0, 16);
+    assert_eq!(silent.poll_transmit(), RetryVerdict::Transmit);
+    let mut verdict = RetryVerdict::Waiting;
+    let mut now = 16u64;
+    while verdict == RetryVerdict::Waiting || verdict == RetryVerdict::Transmit {
+        verdict = silent.on_tick(now);
+        now += 16;
+    }
+    assert_eq!(verdict, RetryVerdict::Failed(ApsStatus::NoAck));
+    assert_eq!(silent.attempts(), rounddance_aps::MAX_FRAME_RETRIES);
+    // The unacked expectation is still outstanding on A.
+    assert!(aps_a.pending_ack().is_some());
 }
 
 // SCOPE.md §8: the same seed + request bytes always yield identical

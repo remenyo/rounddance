@@ -1159,7 +1159,9 @@ captured-air application vectors to hash in — the sim decision tests
 pin the wire shapes instead (synthetic vectors, deterministic replay),
 and the divergence note stands for wave-48: mirror the HW lane's
 transaction set once it exists. Key bytes stay local-only outside the
-repo. 7 repo-minted IDs, MINTED-pending-confirm. Paraphrase only (D1).
+repo. 7 repo-minted IDs, MINTED-pending-confirm (of which `22845-01/02`
+sweep-28 REJECTed and wave-48 re-minted as `22843-03/04`, see wave-48
+section). Paraphrase only (D1).
 
 | Requirement ID | State | Implementing code | Verifying test |
 |----------------|-------|-------------------|----------------|
@@ -1168,5 +1170,47 @@ repo. 7 repo-minted IDs, MINTED-pending-confirm. Paraphrase only (D1).
 | 05-3474-23-24401-01 | implemented + verified | `zdo::transaction::{PendingTable, transaction_expected}` (open refuses response-less/duplicate/full; close correlates only on response-cluster + echoed TSN against an open entry, else `None`) | `zdo/tests/transaction.rs::match_desc_correlates_by_tsn_and_cluster` + `::bind_and_unbind_stay_distinct` + `::announce_never_opens_and_table_bounds_hold` + Match_Desc/Bind pair round trips + `rounddance-sim/tests/app_transaction.rs::zdo_match_bind_lqi_two_node` (three transactions over the medium, stray-duplicate uncorrelated) |
 | 07-5123-08-2413-02 | implemented + verified | `zcl::transaction::{TsnAlloc, PendingTable, reply_direction_ok}` (wrapping allocator; pending keyed on sequence + cluster; reports carry no open entry so they stay uncorrelated) | `zcl/tests/transaction.rs::tsn_allocator_sequences_and_wraps` + `::pending_table_matches_tsn_and_cluster` + `::reply_direction_gate` + `rounddance-sim/tests/app_transaction.rs::zcl_read_toggle_defaultrsp_two_node` (Read TSN correlated, Toggle applied silent) |
 | 07-5123-08-2512-03 | implemented + verified | `zcl::transaction::build_default_response` (reply header echoes TSN with flipped direction + disable bit set; body echoes command + status; triage `07-5123-08-2512-01/02` reused) | `zcl/tests/transaction.rs::default_response_builder_triage` (success answered/disabled-silent, error-always-answered, broadcast-silent, never-answers-DefaultRsp) + sim unknown-command leg (UNSUP_COMMAND round trip with TSN echo) |
-| 05-3474-23-22845-01 | implemented + verified | `aps::SecureDataLink::send_header` + `note_ack` (security flag set, counter taken + advanced, unicast-only ack expectation, off-unicast ack-request forced clear) | `aps/tests/secure.rs::secured_send_advances_counter_and_expects_ack` + `::secured_counter_wraps` + `rounddance-sim/tests/app_transaction.rs::secured_aps_data_two_node` (counter-managed secured send over the medium, ack clears) |
-| 05-3474-23-22845-02 | implemented + verified | `aps::SecureDataLink::accept` (unsecured → `Unsecured`, non-data → `IllegalRequest`, replayed source + counter → `NoAck`, else ack expectation owed back) | `aps/tests/secure.rs::secured_receive_checks_flag_dup_and_ack` + sim secured leg (both-layer accept, captured replay refused at NWK guard then APS guard, next fresh frame advances) |
+| 05-3474-23-22845-01 | RE-MINTED as `05-3474-23-22843-03` (wave-48; sweep-28 REJECT: duplicates anchored batch-18 fragmentation entry) | `aps::SecureDataLink::send_header` + `note_ack` (wave-47 code, refs updated) | wave-47 tests, refs updated to `22843-03` |
+| 05-3474-23-22845-02 | RE-MINTED as `05-3474-23-22843-04` (wave-48; sweep-28 REJECT: duplicates anchored batch-18 fragmentation entry) | `aps::SecureDataLink::accept` (wave-47 code, refs updated) | wave-47 tests, refs updated to `22843-04` |
+
+## Wave-48 traceability — secured-APS re-mint + APS ack leg + captured-air vectors (lane 2)
+
+Confirmation sweep 28 (wave-47) REJECTed the wave-47
+`05-3474-23-22845-01/02` secured-APS-data rows: the numbers duplicate
+the anchored batch-18 fragmentation entries
+(`22845-01`/`-02` = §2.2.8.4.5 transmit preconditions / window-size-1
+baseline, CONFIRM as cited). Content verified; numbers re-minted
+under free numbers below. Freeness checked 2026-10-29 against this
+file (no `22843-03/04`, no `22844-02`) and the private-corpus
+full-corpus sweep file (`requirements-wave-full-corpus.md`: no
+`22843-03/04`, no `22844-02`; `22843-01/02` + `22844-01` stay
+untouched) plus `requirements-seed.md` and the repo tree — zero hits
+outside wave-48. The secured-data rows keep their §2.2.8.4.3 (Use of
+Acknowledgements) clause home: `-03` = send-side ack expectation,
+`-04` = receive-side ack owed back (anchors p0102-L2460-L2463 /
+p0102-L2472-L2476, the 22843-01/02 family spans). The new ack leg
+(`ack_for` generation on the request bit, `parse_ack` parsing, retry
+accounting, NO_ACK confirm) mints `05-3474-23-22844-02` under §2.2.8.4.4
+Retransmissions (anchor p0102-L2483-L2498, the 22844-01 span). Old →
+new mapping: `22845-01` → `22843-03`, `22845-02` → `22843-04`;
+PROGRESS wave-48 row records the same mapping. 3 repo-minted IDs,
+MINTED-pending-confirm. Paraphrase only (D1).
+
+Captured-air vectors: wave-47 lane-1 ran post-join application
+transactions on a live Ember TC (t1 no-ack → 3x retry →
+DELIVERY_FAILED; t2 acked → SUCCESS) with sniffer pcaps
+(`~/hwscratch/w47/t1.pcap` sha256
+`c689d5675fc8356a633af5c2956b7c360d84a97b5fa61aa320d39b47d49a0e79`,
+745 frames; `~/hwscratch/w47/t2.pcap` sha256
+`aba1df7ae9ee70f72fa55cb83ee12571a97f36591b85343b1db172cadcbc8ce8`,
+748 frames). Frames ride NWK-secured, so the repo pins hashes +
+analyzer-observed decision metadata only (no key bytes, no
+plaintext); offline reproduction procedure:
+`python3 analyze47.py` in `~/hwscratch/w47` with the lab `0600` key
+files (report `~/hwscratch/w47/SUMMARY.md` §1/§5).
+
+| Requirement ID | State | Implementing code | Verifying test |
+|----------------|-------|-------------------|----------------|
+| 05-3474-23-22843-03 | implemented + verified | `aps::SecureDataLink::send_header` + `note_ack` (security flag set, counter taken + advanced, unicast-only ack expectation, off-unicast ack-request forced clear; §2.2.8.4.3, anchor p0102-L2460-L2463) | `aps/tests/secure.rs::secured_send_advances_counter_and_expects_ack` + `::secured_counter_wraps` + `rounddance-sim/tests/app_transaction.rs::secured_aps_data_two_node` (counter-managed secured send over the medium, ack clears) |
+| 05-3474-23-22843-04 | implemented + verified | `aps::SecureDataLink::accept` (unsecured → `Unsecured`, non-data → `IllegalRequest`, replayed source + counter → `NoAck`, else ack expectation owed back; §2.2.8.4.3, anchor p0102-L2472-L2476) | `aps/tests/secure.rs::secured_receive_checks_flag_dup_and_ack` + sim secured leg (both-layer accept, captured replay refused at NWK guard then APS guard, next fresh frame advances) |
+| 05-3474-23-22844-02 | implemented + verified | `aps::secure::{ack_for, parse_ack}` (ack generated only for ack-requested unicast — endpoints swapped, cluster/profile/counter copied, ack-request clear; parsing yields the correlation triple, command acks correlate to nothing; §2.2.8.4.4, anchor p0102-L2483-L2498) + `RetrySession` accounting (no-ack → retransmits to cap → `Failed(NoAck)` = DELIVERY_FAILED surfacing; ack → `Acked`) | `aps/tests/secure.rs::ack_generated_only_on_request_bit` + `::ack_roundtrip_parses_to_correlation_triple` + `::ack_parse_refuses_malformed` + `::retry_without_ack_fails_no_ack_after_cap` (t1 shape) + `::retry_with_ack_succeeds` (t2 shape) + `::captured_air_t1_t2_vector_shapes` (pcap hashes + copy-count metadata + T3 Read decision replay) + `rounddance-sim/tests/app_transaction.rs::aps_ack_leg_acked_vs_unacked_two_node` (acked → success then silent → `Failed(NoAck)` over the medium) |
