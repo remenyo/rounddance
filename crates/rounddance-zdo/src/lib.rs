@@ -27,12 +27,13 @@ pub mod desc;
 pub mod endpoint;
 pub mod mgmt;
 pub mod status;
+pub mod transaction;
 pub mod zdp;
 
 pub use bind::{endpoint_bindable, group_member_endpoint, BindManager};
 pub use cluster::{
     response_cluster, CLUSTER_ACTIVE_EP_REQ, CLUSTER_BIND_REQ, CLUSTER_DEVICE_ANNCE,
-    CLUSTER_IEEE_ADDR_REQ, CLUSTER_MATCH_DESC_REQ, CLUSTER_MGMT_LEAVE_REQ,
+    CLUSTER_IEEE_ADDR_REQ, CLUSTER_MATCH_DESC_REQ, CLUSTER_MGMT_LEAVE_REQ, CLUSTER_MGMT_LQI_REQ,
     CLUSTER_MGMT_NWK_UPDATE_REQ, CLUSTER_MGMT_PERMIT_JOINING_REQ, CLUSTER_NODE_DESC_REQ,
     CLUSTER_NWK_ADDR_REQ, CLUSTER_POWER_DESC_REQ, CLUSTER_SIMPLE_DESC_REQ, CLUSTER_UNBIND_REQ,
     RESPONSE_BIT,
@@ -43,10 +44,11 @@ pub use desc::{
 };
 pub use endpoint::{endpoint_answerable, simple_desc_fits, EndpointTable, MAX_LOCAL_ENDPOINTS};
 pub use mgmt::{
-    MgmtLeaveReq, MgmtLeaveRsp, MgmtNwkUpdateNotify, MgmtNwkUpdateReq, MgmtPermitJoiningReq,
-    MgmtPermitJoiningRsp, MAX_ENERGY_VALUES,
+    MgmtLeaveReq, MgmtLeaveRsp, MgmtLqiReq, MgmtLqiRsp, MgmtNwkUpdateNotify, MgmtNwkUpdateReq,
+    MgmtPermitJoiningReq, MgmtPermitJoiningRsp, NeighborEntry, MAX_ENERGY_VALUES, MAX_NEIGHBORS,
 };
 pub use status::ZdpStatus;
+pub use transaction::{transaction_expected, Pending, PendingTable, TxnError};
 pub use zdp::{
     ActiveEpReq, ActiveEpRsp, BindDstMode, BindEntry, BindRsp, DeviceAnnce, IeeeAddrReq,
     IeeeAddrRsp, MatchDescReq, MatchDescRsp, NodeDescReq, NodeDescRsp, NwkAddrReq, NwkAddrRsp,

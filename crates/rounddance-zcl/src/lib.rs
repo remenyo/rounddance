@@ -51,6 +51,7 @@ pub mod schedule;
 pub mod snapshot;
 pub mod status;
 pub mod supply;
+pub mod transaction;
 pub mod types;
 pub mod wd;
 
@@ -66,6 +67,10 @@ pub use dispatch::{
 pub use frame::{Direction, FrameControl, FrameType, Header};
 pub use reporting::{change_qualifies, QueryAnswer, ReportSlot, ReportingEngine};
 pub use status::ZclStatus;
+pub use transaction::{
+    build_default_response, decode_default_response, reply_direction_ok, Pending, PendingTable,
+    TsnAlloc, TxnError, MAX_DEFAULT_RSP_LEN,
+};
 pub use types::{DataType, Value, MAX_ARRAY_BYTES, MAX_ARRAY_ELEMS, MAX_STR_LEN};
 
 /// Crate identifier.

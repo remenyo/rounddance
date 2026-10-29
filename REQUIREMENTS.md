@@ -1135,3 +1135,38 @@ key bytes stay local-only outside the repo. 1 repo-minted ID
 | Requirement ID | State | Implementing code | Verifying test |
 |----------------|-------|-------------------|----------------|
 | 05-3474-23-4434-01 | implemented + verified | `commission::classical::JoinerMachine::on_transport_open` (MIC-checked open in `KeyWait`: failure → `ConfirmMismatch`, never promotes, never latches; auxiliary counter must strictly advance the last adopted one — replay/duplicate → `ConfirmMismatch`; success latches `netkey_adopted` + `last_aux_counter`, stays in `KeyWait` for verify; outside `KeyWait` → `BadState`) + `JOINER_TRANSPORT_GRACE_TICKS` (10-tick ≈10 s bound for the post-association wait, `22-65816-030-56-04` time-box, no new ID) | `commission/tests/vectors.rs::vector_tc_first_transport_open_05_3474_23_4434_01` (wrong-state open, MIC-fail, same-counter replay, lower-counter replay, fresh-counter adopt + full path to Joined) + `rounddance-sim/tests/join_tc_first.rs` (complete flow through open→adopt→verify→announce→join, MIC-fail→`ConfirmMismatch`, leave-eject on both wait legs→`JoinTimeout`, counter-replay→`ConfirmMismatch`, 5-frame air panel + k1-row capture consistency, deterministic replay) |
+
+## Wave-47 traceability — post-join application transaction path (lane 2)
+
+Wave-46 closed the joiner path at `Joined`. This wave lands the
+post-join application transaction path the joined device speaks next:
+ZDO request/response correlation by transaction sequence plus cluster
+(`zdo::transaction::PendingTable`, covering Match_Desc + Bind/Unbind +
+Mgmt_Lqi and every other answered command — the response-less announce
+never opens, strays never correlate); the previously missing
+`Mgmt_Lqi_req` (0x0031) / `Mgmt_Lqi_rsp` neighbor-table codec; the ZCL
+transaction layer (`zcl::transaction`: wrapping sequence allocator,
+per-endpoint pending set keyed on sequence + cluster, Default
+Response builder over the reused triage rule — errors answer even with
+the disable bit set, successes stay silent when it is set, a Default
+Response is never answered); and the secured APS data send/receive
+path (`aps::SecureDataLink`: counter-managed secured headers, unicast
+ack-expectation tracking, receive-side security-flag + duplicate
+rejection). No w46/w47 captures carry post-join application traffic
+(join runs only; `~/hwscratch/w47/` holds a backup log plus a state
+dump, no HW-lane transaction set at commit time), so there are no
+captured-air application vectors to hash in — the sim decision tests
+pin the wire shapes instead (synthetic vectors, deterministic replay),
+and the divergence note stands for wave-48: mirror the HW lane's
+transaction set once it exists. Key bytes stay local-only outside the
+repo. 7 repo-minted IDs, MINTED-pending-confirm. Paraphrase only (D1).
+
+| Requirement ID | State | Implementing code | Verifying test |
+|----------------|-------|-------------------|----------------|
+| 05-3474-23-24332-01 | implemented + verified | `zdo::mgmt::MgmtLqiReq` (TSN + start index) + `CLUSTER_MGMT_LQI_REQ` (0x0031) wired into `response_cluster` | `zdo/tests/transaction.rs::mgmt_lqi_pair_round_trip` (round trip) + `rounddance-sim/tests/app_transaction.rs::zdo_match_bind_lqi_two_node` (request→page→correlate over the medium) |
+| 05-3474-23-24332-02 | implemented + verified | `zdo::mgmt::MgmtLqiRsp` (total count + page start + `NeighborEntry` page, success-only entries, `MAX_NEIGHBORS` bound) + `NeighborEntry` (21-octet record, reserved-bit + range refusal) | `zdo/tests/transaction.rs::mgmt_lqi_pair_round_trip` (2-entry page round trip, reserved-bit refusal, over-long-page refusal, non-success carries no entries) + sim LQI leg (neighbor page names A with LQI 180) |
+| 05-3474-23-24401-01 | implemented + verified | `zdo::transaction::{PendingTable, transaction_expected}` (open refuses response-less/duplicate/full; close correlates only on response-cluster + echoed TSN against an open entry, else `None`) | `zdo/tests/transaction.rs::match_desc_correlates_by_tsn_and_cluster` + `::bind_and_unbind_stay_distinct` + `::announce_never_opens_and_table_bounds_hold` + Match_Desc/Bind pair round trips + `rounddance-sim/tests/app_transaction.rs::zdo_match_bind_lqi_two_node` (three transactions over the medium, stray-duplicate uncorrelated) |
+| 07-5123-08-2413-02 | implemented + verified | `zcl::transaction::{TsnAlloc, PendingTable, reply_direction_ok}` (wrapping allocator; pending keyed on sequence + cluster; reports carry no open entry so they stay uncorrelated) | `zcl/tests/transaction.rs::tsn_allocator_sequences_and_wraps` + `::pending_table_matches_tsn_and_cluster` + `::reply_direction_gate` + `rounddance-sim/tests/app_transaction.rs::zcl_read_toggle_defaultrsp_two_node` (Read TSN correlated, Toggle applied silent) |
+| 07-5123-08-2512-03 | implemented + verified | `zcl::transaction::build_default_response` (reply header echoes TSN with flipped direction + disable bit set; body echoes command + status; triage `07-5123-08-2512-01/02` reused) | `zcl/tests/transaction.rs::default_response_builder_triage` (success answered/disabled-silent, error-always-answered, broadcast-silent, never-answers-DefaultRsp) + sim unknown-command leg (UNSUP_COMMAND round trip with TSN echo) |
+| 05-3474-23-22845-01 | implemented + verified | `aps::SecureDataLink::send_header` + `note_ack` (security flag set, counter taken + advanced, unicast-only ack expectation, off-unicast ack-request forced clear) | `aps/tests/secure.rs::secured_send_advances_counter_and_expects_ack` + `::secured_counter_wraps` + `rounddance-sim/tests/app_transaction.rs::secured_aps_data_two_node` (counter-managed secured send over the medium, ack clears) |
+| 05-3474-23-22845-02 | implemented + verified | `aps::SecureDataLink::accept` (unsecured → `Unsecured`, non-data → `IllegalRequest`, replayed source + counter → `NoAck`, else ack expectation owed back) | `aps/tests/secure.rs::secured_receive_checks_flag_dup_and_ack` + sim secured leg (both-layer accept, captured replay refused at NWK guard then APS guard, next fresh frame advances) |

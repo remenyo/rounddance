@@ -237,6 +237,237 @@ impl MgmtNwkUpdateReq {
 /// Requirement `05-3474-23-24339-02` (MINTED-pending-confirm).
 pub const MAX_ENERGY_VALUES: usize = 27;
 
+/// Bound on neighbor entries carried in one `Mgmt_Lqi_rsp` (declared
+/// budget; longer over-air lists are rejected with
+/// [`Error::TooManyEntries`]).
+///
+/// Requirement `05-3474-23-24332-02` (MINTED-pending-confirm).
+pub const MAX_NEIGHBORS: usize = 8;
+
+/// `Mgmt_Lqi_req`: ask for a page of the remote neighbor table
+/// (§2.4.3.3.2, by the cluster-numbering pattern of the sibling
+/// management commands; no line anchor claimed).
+///
+/// Requirement `05-3474-23-24332-01` (MINTED-pending-confirm).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MgmtLqiReq {
+    /// Transaction sequence, echoed in the response.
+    pub tsn: u8,
+    /// First neighbor-table entry to report.
+    pub start_index: u8,
+}
+
+impl MgmtLqiReq {
+    /// Wire length.
+    pub const LEN: usize = 2;
+
+    /// Decode a neighbor-table request frame.
+    pub fn decode(buf: &[u8]) -> Result<Self, Error> {
+        if buf.len() < Self::LEN {
+            return Err(Error::Truncated);
+        }
+        Ok(Self {
+            tsn: buf[0],
+            start_index: buf[1],
+        })
+    }
+
+    /// Encode into `out`.
+    pub fn encode_into(&self, out: &mut [u8]) -> Result<usize, Error> {
+        if out.len() < Self::LEN {
+            return Err(Error::BufferTooSmall);
+        }
+        out[0] = self.tsn;
+        out[1] = self.start_index;
+        Ok(Self::LEN)
+    }
+}
+
+/// One neighbor-table entry in a `Mgmt_Lqi_rsp`: who the neighbor is
+/// and how well it hears (paraphrase of the neighbor-table record
+/// shape; no line anchor claimed).
+///
+/// Requirement `05-3474-23-24332-02` (MINTED-pending-confirm).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NeighborEntry {
+    /// Extended PAN the neighbor belongs to.
+    pub ext_pan: u64,
+    /// Neighbor's long address.
+    pub ieee: u64,
+    /// Neighbor's network address.
+    pub nwk: u16,
+    /// Device kind: `0` coordinator, `1` router, `2` end device.
+    pub device_type: u8,
+    /// Whether the neighbor's receiver stays on when idle.
+    pub rx_on_idle: bool,
+    /// Relationship: `0` parent, `1` child, `2` sibling, `3` none,
+    /// `4` previous child.
+    pub relationship: u8,
+    /// Neighbor's tree depth.
+    pub depth: u8,
+    /// Last measured link quality (0–255).
+    pub lqi: u8,
+}
+
+impl NeighborEntry {
+    /// Wire length of one entry.
+    pub const LEN: usize = 21;
+
+    /// Decode one entry.
+    pub fn decode(buf: &[u8]) -> Result<Self, Error> {
+        if buf.len() < Self::LEN {
+            return Err(Error::Truncated);
+        }
+        let device_type = buf[18] & 0x03;
+        if buf[18] & 0xc0 != 0 {
+            return Err(Error::InvalidValue(buf[18]));
+        }
+        let relationship = (buf[18] >> 3) & 0x07;
+        if device_type > 2 || relationship > 4 {
+            return Err(Error::InvalidValue(buf[18]));
+        }
+        Ok(Self {
+            ext_pan: u64::from_le_bytes([
+                buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
+            ]),
+            ieee: u64::from_le_bytes([
+                buf[8], buf[9], buf[10], buf[11], buf[12], buf[13], buf[14], buf[15],
+            ]),
+            nwk: u16::from_le_bytes([buf[16], buf[17]]),
+            device_type,
+            rx_on_idle: buf[18] & 0x04 != 0,
+            relationship,
+            depth: buf[19],
+            lqi: buf[20],
+        })
+    }
+
+    /// Encode one entry into `out`.
+    pub fn encode_into(&self, out: &mut [u8]) -> Result<usize, Error> {
+        if self.device_type > 2 || self.relationship > 4 {
+            return Err(Error::InvalidValue(0xff));
+        }
+        if out.len() < Self::LEN {
+            return Err(Error::BufferTooSmall);
+        }
+        out[0..8].copy_from_slice(&self.ext_pan.to_le_bytes());
+        out[8..16].copy_from_slice(&self.ieee.to_le_bytes());
+        out[16..18].copy_from_slice(&self.nwk.to_le_bytes());
+        out[18] = self.device_type | (u8::from(self.rx_on_idle) << 2) | (self.relationship << 3);
+        out[19] = self.depth;
+        out[20] = self.lqi;
+        Ok(Self::LEN)
+    }
+}
+
+/// `Mgmt_Lqi_rsp`: answer to [`MgmtLqiReq`]: total entry count, page
+/// start, and the entry page itself (empty unless the outcome is
+/// success).
+///
+/// Requirement `05-3474-23-24332-02` (MINTED-pending-confirm).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MgmtLqiRsp {
+    /// Echoed transaction sequence.
+    pub tsn: u8,
+    /// Outcome of the inquiry.
+    pub status: ZdpStatus,
+    /// Total neighbor-table entries on the responder.
+    pub neighbor_count: u8,
+    /// Page start echoed from the request.
+    pub start_index: u8,
+    /// Page entries, first `entry_len` entries valid (present only on
+    /// success).
+    pub entries: [NeighborEntry; MAX_NEIGHBORS],
+    /// How many page entries are present.
+    pub entry_len: u8,
+}
+
+impl MgmtLqiRsp {
+    /// Wire length without entries.
+    pub const MIN_LEN: usize = 5;
+
+    /// Decode a neighbor-table response frame.
+    pub fn decode(buf: &[u8]) -> Result<Self, Error> {
+        if buf.len() < Self::MIN_LEN {
+            return Err(Error::Truncated);
+        }
+        let status = ZdpStatus::from_code(buf[1]);
+        let mut rsp = Self {
+            tsn: buf[0],
+            status,
+            neighbor_count: buf[2],
+            start_index: buf[3],
+            entries: [NeighborEntry {
+                ext_pan: 0,
+                ieee: 0,
+                nwk: 0,
+                device_type: 0,
+                rx_on_idle: false,
+                relationship: 0,
+                depth: 0,
+                lqi: 0,
+            }; MAX_NEIGHBORS],
+            entry_len: 0,
+        };
+        if !status.is_success() {
+            return Ok(rsp);
+        }
+        let count = buf[4] as usize;
+        if count > MAX_NEIGHBORS {
+            return Err(Error::TooManyEntries);
+        }
+        if buf.len() < Self::MIN_LEN + NeighborEntry::LEN * count {
+            return Err(Error::Truncated);
+        }
+        rsp.entry_len = count as u8;
+        let mut i = 0;
+        while i < count {
+            let base = Self::MIN_LEN + NeighborEntry::LEN * i;
+            rsp.entries[i] = NeighborEntry::decode(&buf[base..base + NeighborEntry::LEN])?;
+            i += 1;
+        }
+        Ok(rsp)
+    }
+
+    /// Encode into `out`.
+    pub fn encode_into(&self, out: &mut [u8]) -> Result<usize, Error> {
+        let count = self.entry_len as usize;
+        if count > MAX_NEIGHBORS {
+            return Err(Error::TooManyEntries);
+        }
+        let success = self.status.is_success();
+        let n = Self::MIN_LEN
+            + if success {
+                NeighborEntry::LEN * count
+            } else {
+                0
+            };
+        if out.len() < n {
+            return Err(Error::BufferTooSmall);
+        }
+        out[0] = self.tsn;
+        out[1] = self.status.code();
+        out[2] = self.neighbor_count;
+        out[3] = self.start_index;
+        out[4] = self.entry_len;
+        if success {
+            let mut i = 0;
+            while i < count {
+                let base = Self::MIN_LEN + NeighborEntry::LEN * i;
+                self.entries[i].encode_into(&mut out[base..base + NeighborEntry::LEN])?;
+                i += 1;
+            }
+        }
+        Ok(n)
+    }
+
+    /// Page entries as a slice.
+    #[must_use]
+    pub fn entry_list(&self) -> &[NeighborEntry] {
+        &self.entries[..self.entry_len as usize]
+    }
+}
+
 /// `Mgmt_NWK_Update_notify` (and the update response, same shape):
 /// scan outcome naming scanned channels, transmission counts, and one
 /// energy sample per scanned channel (§2.4.3.3.9.3, anchors

@@ -61,6 +61,12 @@ pub const CLUSTER_BIND_REQ: u16 = 0x0021;
 ///
 /// Requirement `05-3474-23-24323-01` (MINTED-pending-confirm).
 pub const CLUSTER_UNBIND_REQ: u16 = 0x0022;
+/// ZDP request cluster: neighbor-table (LQI) inquiry (§2.4.3.3.2,
+/// by the cluster-numbering pattern of the sibling management
+/// commands; no line anchor claimed).
+///
+/// Requirement `05-3474-23-24332-01` (MINTED-pending-confirm).
+pub const CLUSTER_MGMT_LQI_REQ: u16 = 0x0031;
 /// ZDP request cluster: ask a remote device to leave the network
 /// (§2.4.3.3.5, anchor p0145-L3530-L3531).
 ///
@@ -100,6 +106,7 @@ pub const fn response_cluster(request: u16) -> Option<u16> {
         | CLUSTER_MATCH_DESC_REQ
         | CLUSTER_BIND_REQ
         | CLUSTER_UNBIND_REQ
+        | CLUSTER_MGMT_LQI_REQ
         | CLUSTER_MGMT_LEAVE_REQ
         | CLUSTER_MGMT_PERMIT_JOINING_REQ
         | CLUSTER_MGMT_NWK_UPDATE_REQ => Some(request | RESPONSE_BIT),

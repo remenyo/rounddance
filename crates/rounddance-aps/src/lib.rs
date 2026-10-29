@@ -25,6 +25,7 @@
 pub mod frag;
 pub mod frame;
 pub mod retry;
+pub mod secure;
 pub mod status;
 pub mod tables;
 
@@ -42,6 +43,7 @@ pub use retry::{
     AckExpect, AckInfo, DupRejectTable, RetrySession, RetryVerdict, DUP_TABLE_SIZE,
     MAX_FRAME_RETRIES, MIN_DUP_TABLE_SIZE,
 };
+pub use secure::SecureDataLink;
 pub use status::{ApsStatus, StatusError};
 pub use tables::{BindingDst, BindingEntry, BindingTable, GroupTable, MAX_BINDINGS, MAX_GROUPS};
 
