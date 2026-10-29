@@ -1698,7 +1698,8 @@ install-code path. This wave lands the update sequencing plus the
 decision-matched sim scenario. Reproduce-then-fix per behavior
 (HEAD-API repro failed first: no `TclkUpdate` module existed; a
 10 s-spare assertion was corrected to the 9.98 s air margin). 2
-repo-minted IDs (`RD-SIM-01..02`), MINTED-pending-confirm. Also
+repo-minted IDs (`RD-SIM-01..02`), MINTED at mint; CONFIRMED via
+corpus sweep-47 (0 corrections / 0 REJECT). Also
 carried from wave-65: `RD-INSPECT-39..40` flipped
 MINTED-pending-confirm → CONFIRMED via corpus sweep-46 (0
 corrections / 0 REJECT), rows and preamble updated in place. No lab
@@ -1720,5 +1721,35 @@ as the hwscratch offline open hands its fields to its battery.
 
 | Requirement ID | State | Implementing code | Verifying test |
 |----------------|-------|-------------------|----------------|
-| RD-SIM-01 | implemented + verified | `commission::classical::{TclkUpdate, TclkState}` (joiner-side update sequencing on an already-joined device: `begin` request-once; `note_transport_frame` exact-pair `0x05`/`TRANSPORT_KEY_TYPE_TCLK` classification, foreign-first tolerated; `on_transport_open` MIC latch `tclk_latched`, stays for the verify round; `note_verify_sent` latched-only gate; `on_confirm` success-only authorize to `Authorized`; `NoTransport`/`JoinTimeout`/`BadState` edges) + `TRANSPORT_KEY_TYPE_TCLK` (`0x04`, the on-air key-type field) + `CONFIRM_KEY_STATUS_SUCCESS` (`0x00`) | `commission/tests/vectors.rs::vector_tclk_update_transcript_rd_sim_01` (failing-first via the sim HEAD-API repro: full request→classify→open→verify→confirm transcript; foreign-first tolerated) + `::vector_tclk_bad_confirm_never_authorizes_rd_sim_01` + `::vector_tclk_mic_fail_never_latches_rd_sim_01` + `::vector_tclk_out_of_order_is_bad_state_rd_sim_01` + `::vector_tclk_wait_timeouts_and_eject_rd_sim_01` |
-| RD-SIM-02 | implemented + verified | `sim/tests/tclk_stay_joined.rs` (phase-0 TC-first join to `Joined` + TC admit/verify, then the four update legs plus a stay-joined poll over one `ScriptedRadio`: request → TCLK transport (`exchange_key` fresh≠stored) → verify → confirm `0x00` (both sides authorize) → acked poll; opaque leg tags, exact-delay script; latch→CONFIRM == 3.62 s asserted, budget 13.6 s with 9.98 s spare asserted, end−latch ≥ 78.75 s asserted, TC `tick` zero-eviction asserted, trace leave-free asserted) | `sim/tests/tclk_stay_joined.rs::tclk_stay_joined_first_try_no_leave` (failing-first: missing `TclkUpdate` API; exact decision-log pin) + `::tclk_stay_joined_replay_is_deterministic` (same seed+script → identical log + trace; second seed decides identically) + `::tclk_eject_mid_update_never_authorizes` (mid-update eject → `JoinTimeout`, never `Authorized`) |
+| RD-SIM-01 | implemented + verified, CONFIRMED (sweep-47) | `commission::classical::{TclkUpdate, TclkState}` (joiner-side update sequencing on an already-joined device: `begin` request-once; `note_transport_frame` exact-pair `0x05`/`TRANSPORT_KEY_TYPE_TCLK` classification, foreign-first tolerated; `on_transport_open` MIC latch `tclk_latched`, stays for the verify round; `note_verify_sent` latched-only gate; `on_confirm` success-only authorize to `Authorized`; `NoTransport`/`JoinTimeout`/`BadState` edges) + `TRANSPORT_KEY_TYPE_TCLK` (`0x04`, the on-air key-type field) + `CONFIRM_KEY_STATUS_SUCCESS` (`0x00`) | `commission/tests/vectors.rs::vector_tclk_update_transcript_rd_sim_01` (failing-first via the sim HEAD-API repro: full request→classify→open→verify→confirm transcript; foreign-first tolerated) + `::vector_tclk_bad_confirm_never_authorizes_rd_sim_01` + `::vector_tclk_mic_fail_never_latches_rd_sim_01` + `::vector_tclk_out_of_order_is_bad_state_rd_sim_01` + `::vector_tclk_wait_timeouts_and_eject_rd_sim_01` |
+| RD-SIM-02 | implemented + verified, CONFIRMED (sweep-47) | `sim/tests/tclk_stay_joined.rs` (phase-0 TC-first join to `Joined` + TC admit/verify, then the four update legs plus a stay-joined poll over one `ScriptedRadio`: request → TCLK transport (`exchange_key` fresh≠stored) → verify → confirm `0x00` (both sides authorize) → acked poll; opaque leg tags, exact-delay script; latch→CONFIRM == 3.62 s asserted, budget 13.6 s with 9.98 s spare asserted, end−latch ≥ 78.75 s asserted, TC `tick` zero-eviction asserted, trace leave-free asserted) | `sim/tests/tclk_stay_joined.rs::tclk_stay_joined_first_try_no_leave` (failing-first: missing `TclkUpdate` API; exact decision-log pin) + `::tclk_stay_joined_replay_is_deterministic` (same seed+script → identical log + trace; second seed decides identically) + `::tclk_eject_mid_update_never_authorizes` (mid-update eject → `JoinTimeout`, never `Authorized`) |
+
+## Wave-67 traceability — GP bidirectional sim (lane 2)
+
+Waves 65/66 proved the bidirectional GP air behavior (commission
+→ reply → data with the sink's PAIRED → HANDOFF → DEDUP-DROP
+transitions under the counter-window dedup rule; GPDF shape
+census), but `rounddance-sim/tests/gp_bidir.rs` drove the
+`CommissioningSession` directly — no leg ran through the unified
+sink intake, so the sim never proved the air decision path. This
+wave reworks that scenario so every leg runs through
+`receive::receive` over the scripted radio: secured
+receive-after-transmit announcement admits and parks the session,
+the staged PANID reply serves inside the 20–25 ms window, the
+GPD's *secured* Success frame commissions through the same intake
+(PAIRED, MicOnly entry installed), paired secured data hands off
+to NWK (HANDOFF, `PairedEndpoints`), the replayed counter drops
+with `SecurityFailed` and the advanced counter hands off again
+(DEDUP-DROP). Reproduce-then-fix per behavior (new timeline test
+run first; a mutated decision pin was refused, then restored —
+the pin is load-bearing). 1 repo-minted ID (`RD-SIM-03`),
+MINTED-pending-confirm. Also carried from wave-66: `RD-SIM-01..02`
+flipped MINTED-pending-confirm → CONFIRMED via corpus sweep-47 (0
+corrections / 0 REJECT), rows and preamble updated in place. No lab
+use, no corpus writes; sealed legs re-seal under a synthetic
+test-only key (same class as the wave-64 precedent); wording in
+code/tests is paraphrase only (D1).
+
+| Requirement ID | State | Implementing code | Verifying test |
+|----------------|-------|-------------------|----------------|
+| RD-SIM-03 | implemented + verified | `sim/tests/gp_bidir.rs` (single-GPD bidirectional timeline through the unified sink intake over `ScriptedRadio`: secured rx-after-tx ask → `AdmitCommissioning`; staged PANID reply served at 22 ms inside the 20–25 ms window with reply-PAN decode check; secured Success → `Commissioned` with sink-table pairing; secured data → `Handoff` (`PairedEndpoints`, `0x0104`/`0xFFFF`/`0x00`); replayed counter → `Drop(SecurityFailed)`; advanced counter → `Handoff`) | `sim/tests/gp_bidir.rs::gp_bidir_intake_timeline_pairs_hands_off_and_dedups` (6-decision log pin, decision-for-decision against the air model; mutation-refused) + `::gp_bidir_replay_is_deterministic` (same seed+script → identical trace + log) + `::gp_bidir_mismatch_and_timeout_edges` (foreign secured Success → `TransactionMismatch`; lapsed window → `ReplyTimeout`, back to `Idle`) |

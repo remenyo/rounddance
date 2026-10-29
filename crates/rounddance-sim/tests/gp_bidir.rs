@@ -1,19 +1,30 @@
-//! Bidirectional GP commissioning across the scripted medium with
-//! deterministic replay.
+//! Bidirectional GP commissioning through the unified sink intake
+//! across the scripted medium, with deterministic replay.
 //!
-//! A GPD commissioning announcement asking for network parameters
-//! parks the sink session; the sink stages a Commissioning Reply,
-//! serves it inside the GPD's receive window over the radio, and the
-//! GPD's Success frame completes the exchange and populates the
-//! translation table. A mismatched Success and a lapsed window are
-//! refused. Replaying the same seed + script yields the identical
-//! trace.
+//! Decision match to the proven air behavior (w65 4/4 + sink 8/8
+//! with PAIRED → HANDOFF → DEDUP-DROP; GPDF shape census): every leg
+//! of the timeline runs through `receive::receive`, so the sink
+//! transitions and the counter-window dedup rule are the same code
+//! path the air proofs exercised —
 //!
-//! Requirement traceability: `14-0563-19-A173-01` (capable-peer gate),
-//! `14-0563-19-A173-02` (bounded reply window), `14-0563-19-A4212-01`
-//! (reply codec), `14-0563-19-A4212-02` (stage/serve/Success flow),
-//! `14-0563-19-A152-01` (one queued frame per GPD),
-//! `14-0563-19-A152-02` (20–25 ms serve window).
+//! * commission: a secured receive-after-transmit commissioning
+//!   announcement admits while the mode is open and parks the
+//!   bidirectional session;
+//! * reply: the staged PANID reply is served inside the 20–25 ms
+//!   window over the radio;
+//! * pairing: the GPD's secured Success frame commissions through
+//!   the same intake (PAIRED);
+//! * data: the paired GPD's secured data hands off to NWK (HANDOFF);
+//! * dedup-drop: the replayed counter drops with `SecurityFailed`
+//!   and the advanced counter hands off again (DEDUP-DROP).
+//!
+//! Replaying the same seed + script yields the identical trace and
+//! decision log.
+//!
+//! Requirement traceability: RD-SIM-03 (repo-minted) over RD-GP-02
+//! (intake decisions), RD-GP-05 (Success pairing),
+//! `14-0563-19-A36-05` (dedup), `-A173-02` (reply window),
+//! `-A4212-02` (stage/serve/Success flow).
 
 use rounddance_gp::*;
 use rounddance_mac_sap::{
@@ -26,8 +37,76 @@ const SINK: u16 = 0x0002;
 const GPD_NODE: u16 = 0x0003;
 const SRCID: u32 = 0x1234_5678;
 
+/// Test-only GP key (committed; lab keys stay local-only).
+const TEST_KEY: [u8; 16] = [0x5au8; 16];
+
 /// Serve offset in milliseconds: inside the 20–25 ms window.
 const SERVE_AT_MS: u64 = 22;
+
+fn test_nonce(srcid: u32, ctr: u32) -> [u8; 13] {
+    let id = srcid.to_le_bytes();
+    let c = ctr.to_le_bytes();
+    [
+        id[0], id[1], id[2], id[3], id[0], id[1], id[2], id[3], c[0], c[1], c[2], c[3], 0x05,
+    ]
+}
+
+fn test_ks(nonce: &[u8; 13], ctr: u32) -> [u8; 16] {
+    use rounddance_security::encrypt_block_aes128;
+    let mut blk = [0u8; 16];
+    blk[0] = 0x01;
+    blk[1..14].copy_from_slice(nonce);
+    blk[14..16].copy_from_slice(&(ctr as u16).to_be_bytes());
+    encrypt_block_aes128(&TEST_KEY, &blk)
+}
+
+fn test_tag(nonce: &[u8; 13], aad_extra: &[u8], msg: &[u8]) -> [u8; 4] {
+    use rounddance_security::encrypt_block_aes128;
+    let mut b0 = [0u8; 16];
+    b0[0] = 0x40 | 0x08 | 0x01;
+    b0[1..14].copy_from_slice(nonce);
+    b0[14..16].copy_from_slice(&(msg.len() as u16).to_be_bytes());
+    let mut mac_in = Vec::new();
+    mac_in.extend_from_slice(&(aad_extra.len() as u16).to_be_bytes());
+    mac_in.extend_from_slice(aad_extra);
+    while mac_in.len() % 16 != 0 {
+        mac_in.push(0);
+    }
+    mac_in.extend_from_slice(msg);
+    while mac_in.len() % 16 != 0 {
+        mac_in.push(0);
+    }
+    let mut x = encrypt_block_aes128(&TEST_KEY, &b0);
+    for blk in mac_in.chunks(16) {
+        let mut mix = [0u8; 16];
+        for (i, b) in blk.iter().enumerate() {
+            mix[i] = x[i] ^ b;
+        }
+        x = encrypt_block_aes128(&TEST_KEY, &mix);
+    }
+    let s0 = test_ks(nonce, 0);
+    [x[0] ^ s0[0], x[1] ^ s0[1], x[2] ^ s0[2], x[3] ^ s0[3]]
+}
+
+/// Seal one MicOnly GPDF under the test key: header + cleartext
+/// section + MIC.
+fn seal(srcid: u32, ctr: u32, rx_after_tx: bool, section: &[u8]) -> Vec<u8> {
+    let mut ext = 0x30u8;
+    if rx_after_tx {
+        ext |= 0x40;
+    }
+    let mut header = vec![0x8cu8, ext];
+    header.extend_from_slice(&srcid.to_le_bytes());
+    header.extend_from_slice(&ctr.to_le_bytes());
+    let nonce = test_nonce(srcid, ctr);
+    let mut aad_extra = header.clone();
+    aad_extra.extend_from_slice(section);
+    let tag = test_tag(&nonce, &aad_extra, &[]);
+    let mut out = header;
+    out.extend_from_slice(section);
+    out.extend_from_slice(&tag);
+    out
+}
 
 fn gpdf_for(cmd: u8, payload: &[u8]) -> Vec<u8> {
     let frame = Gpdf {
@@ -89,35 +168,85 @@ fn deliver(seed: u64, from: u16, to: u16, msdu: &[u8]) -> (Vec<String>, Vec<u8>)
     )
 }
 
-fn bidir_ann() -> CommissioningAnnouncement {
-    CommissioningAnnouncement {
-        app: AppId::SrcId,
-        gpd: SRCID as u64,
-        endpoint: 0xFF,
-        pan_id_request: true,
-        key_request: false,
-        rx_after_tx: true,
-        security_capable: false,
-        key_present: false,
+struct SinkSide {
+    keys: GpKeySlots,
+    session: CommissioningSession,
+    sinks: SinkTable<8>,
+    translations: TranslationTable<8>,
+    replay: GpReplay<8>,
+    opened: [u8; MAX_GP_OPEN],
+}
+
+impl SinkSide {
+    fn new() -> Self {
+        let mut keys = GpKeySlots::new();
+        keys.set(TEST_KEY, true);
+        Self {
+            keys,
+            session: CommissioningSession::new(),
+            sinks: SinkTable::<8>::new(),
+            translations: TranslationTable::<8>::new(),
+            replay: GpReplay::<8>::new(),
+            opened: [0u8; MAX_GP_OPEN],
+        }
+    }
+
+    fn receive(&mut self, air: &[u8], commissioning_open: bool) -> SinkDecision {
+        receive(
+            air,
+            &self.keys,
+            commissioning_open,
+            &mut self.session,
+            &mut self.sinks,
+            &mut self.translations,
+            &mut self.replay,
+            &mut self.opened,
+        )
     }
 }
 
-/// One full scenario run: returns the medium traces plus the
-/// commissioned PAN identifier the GPD accepted.
-fn scenario(seed: u64) -> (Vec<String>, u16) {
+/// One full scenario run: returns the medium traces plus the sink's
+/// decision log, decision-for-decision against the air model
+/// (PAIRED → HANDOFF → DEDUP-DROP).
+fn scenario(seed: u64) -> (Vec<String>, Vec<String>) {
     let mut trace = Vec::new();
+    let mut decisions = Vec::new();
+    let mut sink = SinkSide::new();
 
-    // Sink side: announcement parks the session with a deadline.
-    let mut session = CommissioningSession::new();
-    session.begin(bidir_ann());
+    // Leg 1 — commission: the secured receive-after-transmit
+    // announcement admits while the mode is open and parks the
+    // bidirectional session.
+    let ask = seal(SRCID, 1, true, &[0xe0, 0x02, 0xf3, 0x32]);
+    let (t, air) = deliver(seed, GPD_NODE, SINK, &ask);
+    trace.extend(t);
     assert_eq!(
-        session.complete_at(0).unwrap_err(),
+        sink.receive(&air, true),
+        SinkDecision::AdmitCommissioning {
+            gpd: SRCID as u64,
+            endpoint: 0x00,
+            command: 0xe0,
+        },
+    );
+    decisions.push("ask:admit".to_string());
+    sink.session.begin(CommissioningAnnouncement {
+        app: AppId::SrcId,
+        gpd: SRCID as u64,
+        endpoint: 0x00,
+        pan_id_request: true,
+        key_request: false,
+        rx_after_tx: true,
+        security_capable: true,
+        key_present: false,
+    });
+    assert_eq!(
+        sink.session.complete_at(0).unwrap_err(),
         GpError::BidirectionalPending
     );
-    assert_eq!(session.state(), CommissioningState::AwaitingReply);
+    assert_eq!(sink.session.state(), CommissioningState::AwaitingReply);
 
-    // Sink stages the PANID-only reply and queues it for the window.
-    session
+    // Leg 2 — reply: the staged PANID reply serves inside the
+    // 20–25 ms window over the radio and names our PAN.
+    sink.session
         .stage_reply(CommissioningReply {
             options: ReplyOptions {
                 pan_id_present: true,
@@ -133,36 +262,13 @@ fn scenario(seed: u64) -> (Vec<String>, u16) {
         })
         .unwrap();
     let mut reply_buf = [0u8; CommissioningReply::MAX_LEN];
-    let reply_len = session.build_reply(&mut reply_buf).unwrap();
-    let mut queue = GpTxQueue::<1>::new();
-    queue
-        .enqueue(GpTxQueueEntry {
-            id: SRCID as u64,
-            endpoint: 0xFF,
-            frame: {
-                let mut f = [0u8; MAX_GPDF];
-                f[..reply_len].copy_from_slice(&reply_buf[..reply_len]);
-                f
-            },
-            frame_len: reply_len as u8,
-            lifetime: 5_000,
-        })
-        .unwrap();
-
-    // Serve inside the 20–25 ms window: the queued reply goes over
-    // the radio addressed to the GPD as command 0xF0.
+    let reply_len = sink.session.build_reply(&mut reply_buf).unwrap();
     assert!((TX_OFFSET_MS..=TX_OFFSET_MAX_MS).contains(&SERVE_AT_MS));
-    session.tick(SERVE_AT_MS).unwrap();
-    let queued = queue.find(SRCID as u64, 0xFF).unwrap();
-    let air = gpdf_for(
-        CMD_COMMISSIONING_REPLY,
-        &queued.frame[..queued.frame_len as usize],
-    );
-    let (t1, got) = deliver(seed, SINK, GPD_NODE, &air);
-    trace.extend(t1);
-    assert_eq!(got, air);
-
-    // GPD side: reply decodes and names our PAN.
+    sink.session.tick(SERVE_AT_MS).unwrap();
+    let served = gpdf_for(CMD_COMMISSIONING_REPLY, &reply_buf[..reply_len]);
+    let (t, got) = deliver(seed.wrapping_add(1), SINK, GPD_NODE, &served);
+    trace.extend(t);
+    assert_eq!(got, served);
     let (frame, _) = Gpdf::decode(&got).unwrap();
     match frame.body {
         GpdfBody::Gp { command, payload } => {
@@ -172,65 +278,128 @@ fn scenario(seed: u64) -> (Vec<String>, u16) {
         }
         GpdfBody::LpedOpaque(_) => panic!("expected GP reply body"),
     }
-    queue.remove(SRCID as u64).unwrap();
+    decisions.push("reply:served".to_string());
 
-    // GPD answers Success; the sink commissions and seeds translation.
-    let success = gpdf_for(CMD_SUCCESS, &[]);
-    let (t2, got2) = deliver(seed.wrapping_add(1), GPD_NODE, SINK, &success);
-    trace.extend(t2);
-    assert_eq!(got2, success);
-    let (sframe, _) = Gpdf::decode(&got2).unwrap();
-    match sframe.body {
-        GpdfBody::Gp { command, payload } => {
-            assert_eq!(command, CMD_SUCCESS);
-            assert!(payload.is_empty());
+    // Leg 3 — pairing: the GPD's secured Success frame commissions
+    // through the same intake (PAIRED).
+    let success = seal(SRCID, 2, false, &[CMD_SUCCESS]);
+    let (t, air) = deliver(seed.wrapping_add(2), GPD_NODE, SINK, &success);
+    trace.extend(t);
+    assert_eq!(
+        sink.receive(&air, false),
+        SinkDecision::Commissioned {
+            gpd: SRCID as u64,
+            endpoint: 0x00,
+        },
+    );
+    decisions.push("success:commissioned".to_string());
+    assert!(sink.sinks.find(GpdId::SrcId(SRCID)).is_some());
+
+    // Leg 4 — data: the paired GPD's secured data hands off to NWK
+    // (HANDOFF).
+    let data = seal(SRCID, 3, false, &[0x20, 0x01]);
+    let (t, air) = deliver(seed.wrapping_add(3), GPD_NODE, SINK, &data);
+    trace.extend(t);
+    match sink.receive(&air, false) {
+        SinkDecision::Handoff(h) => {
+            assert_eq!((h.profile, h.cluster, h.command), (0x0104, 0xFFFF, 0x00));
+            assert_eq!(h.route, NwkRoute::PairedEndpoints);
+            decisions.push("data:handoff:0104/ffff/00".to_string());
         }
-        GpdfBody::LpedOpaque(_) => panic!("expected GP success body"),
+        other => panic!("expected handoff, got {:?}", other),
     }
-    let seed_entry = session.note_success(SRCID as u64, 0xFF).unwrap().unwrap();
-    assert_eq!(session.state(), CommissioningState::Commissioned);
-    let mut translations = TranslationTable::<4>::new();
-    translations.upsert(seed_entry.materialize()).unwrap();
-    assert!(translations.lookup(GpdId::SrcId(SRCID), 0x20, 0).is_some());
-    (trace, PAN)
+
+    // Leg 5 — dedup-drop: the replayed counter drops, the advanced
+    // counter hands off again (DEDUP-DROP).
+    let (t, air) = deliver(seed.wrapping_add(4), GPD_NODE, SINK, &data);
+    trace.extend(t);
+    assert_eq!(
+        sink.receive(&air, false),
+        SinkDecision::Drop(GpError::SecurityFailed),
+    );
+    decisions.push("replay:drop:SecurityFailed".to_string());
+    let data_next = seal(SRCID, 4, false, &[0x20, 0x01]);
+    let (t, air) = deliver(seed.wrapping_add(5), GPD_NODE, SINK, &data_next);
+    trace.extend(t);
+    assert!(matches!(
+        sink.receive(&air, false),
+        SinkDecision::Handoff(_)
+    ));
+    decisions.push("data:handoff:advanced".to_string());
+
+    (trace, decisions)
 }
 
-// 14-0563-19-A4212-02 + A152-01 + A152-02: reply staged, queued,
-// served in-window over the radio, Success commissions.
+// RD-SIM-03: the bidirectional timeline runs commission → reply →
+// pairing → data → dedup-drop with the air-model decision at every
+// leg (PAIRED → HANDOFF → DEDUP-DROP).
 #[test]
-fn gp_bidir_commissioning_reply_two_node() {
-    let (_, pan) = scenario(0xB1D1);
-    assert_eq!(pan, PAN);
+fn gp_bidir_intake_timeline_pairs_hands_off_and_dedups() {
+    let (_, decisions) = scenario(0xB1D1);
+    assert_eq!(
+        decisions,
+        vec![
+            "ask:admit",
+            "reply:served",
+            "success:commissioned",
+            "data:handoff:0104/ffff/00",
+            "replay:drop:SecurityFailed",
+            "data:handoff:advanced",
+        ],
+    );
 }
 
 // Decision determinism: the same seed + script replays the identical
-// trace and the identical accepted PAN.
+// trace and the identical decision log.
 #[test]
 fn gp_bidir_replay_is_deterministic() {
-    let (trace_a, pan_a) = scenario(0x2222);
-    let (trace_b, pan_b) = scenario(0x2222);
+    let (trace_a, decisions_a) = scenario(0x2222);
+    let (trace_b, decisions_b) = scenario(0x2222);
     assert_eq!(trace_a, trace_b);
-    assert_eq!(pan_a, pan_b);
+    assert_eq!(decisions_a, decisions_b);
     assert!(!trace_a.is_empty());
+    assert_eq!(decisions_a.len(), 6);
 }
 
-// 14-0563-19-A173-02 + mismatch edge: a foreign Success is refused
-// and a lapsed window times out instead of completing.
+// Mismatch + timeout edges: a foreign Success is refused and a
+// lapsed window times out instead of completing.
 #[test]
 fn gp_bidir_mismatch_and_timeout_edges() {
-    let mut session = CommissioningSession::new();
-    session.begin(bidir_ann());
+    let mut sink = SinkSide::new();
+    let ask = seal(SRCID, 1, true, &[0xe0, 0x02, 0xf3, 0x32]);
     assert_eq!(
-        session.complete_at(0).unwrap_err(),
+        sink.receive(&ask, true),
+        SinkDecision::AdmitCommissioning {
+            gpd: SRCID as u64,
+            endpoint: 0x00,
+            command: 0xe0,
+        },
+    );
+    sink.session.begin(CommissioningAnnouncement {
+        app: AppId::SrcId,
+        gpd: SRCID as u64,
+        endpoint: 0x00,
+        pan_id_request: true,
+        key_request: false,
+        rx_after_tx: true,
+        security_capable: true,
+        key_present: false,
+    });
+    assert_eq!(
+        sink.session.complete_at(0).unwrap_err(),
         GpError::BidirectionalPending
     );
+    // A secured Success from another GPD refuses as a transaction
+    // mismatch (counter 1 is fresh for the foreign GPD, so the
+    // refusal names the transaction, not the replay window).
+    let foreign = seal(0x9999_9999, 1, false, &[CMD_SUCCESS]);
     assert_eq!(
-        session.note_success(0x9999_9999, 0xFF).unwrap_err(),
-        GpError::TransactionMismatch
+        sink.receive(&foreign, false),
+        SinkDecision::Drop(GpError::TransactionMismatch)
     );
     assert_eq!(
-        session.tick(REPLY_TIMEOUT_MS).unwrap_err(),
+        sink.session.tick(REPLY_TIMEOUT_MS).unwrap_err(),
         GpError::ReplyTimeout
     );
-    assert_eq!(session.state(), CommissioningState::Idle);
+    assert_eq!(sink.session.state(), CommissioningState::Idle);
 }
