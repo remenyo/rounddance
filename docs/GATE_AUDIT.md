@@ -20,6 +20,20 @@ check fails only on pre-existing arbitrator unix/pty host-tool errors,
 `tools/c-check.sh` DECISION-MATCH digest `0x3ea31047e1933c90` (gcc 14.2.0),
 ESP `riscv32imac-esp-espidf +esp` check exit 0.
 
+Wave-63 re-verification at HEAD 5ece806 (zero code changes since wave-62;
+see "Wave-63 extension + re-confirmation" at the end of this file):
+
+- `cargo test --workspace`: 120 `test result: ok` suites / 859 passed / 0 failed, exit 0
+- `cargo clippy --workspace --all-targets -- -D warnings`: 0 warnings, exit 0
+- `cargo fmt --check`: clean, exit 0
+- `cargo check --workspace --exclude lab-arbitrator --target wasm32-unknown-unknown`: exit 0
+- 15 crates `--no-default-features --target wasm32-unknown-unknown`: all green
+  (mac-sap, nwk, aps, zdo, security, zcl, gp, commission, compat, direct,
+  roles, rcp, ifc, sim, inspect)
+- `tools/host-wasm-check.sh`: IDENTICAL native == wasm32-wasmtime, exit 0
+- corpus `coverage_gate.py` read-only: PASS
+  (docs=13 pages=3766/3766 unresolved=0 seed=519/519 pending=0), no corpus writes
+
 ## Gate table
 
 | Gate | Exit evidence (paths + symbols + tests) | Verdict + cause |
@@ -30,7 +44,7 @@ ESP `riscv32imac-esp-espidf +esp` check exit 0.
 | radio boundary | MAC SAP + adapter split per `SCOPE.md` §4; `rounddance-hal-esp/src/adapter.rs` (`EspAdapter`, 4 TX slots, +10 dBm cap, Len+2, PAN/foreign-PAN routing) + `MockDriver` 26 tests + `examples/esp_adapter_shape.rs`; `RD-HAL-ESP-01..13` rows; wave-23 OTA field note + wave-25 `docs/otbr/{topology,protocol}.md` S3↔H2 UART @460800 | GREEN (full on-target validation parked — see R6) |
 | first complete transaction | `rounddance-hal-host` `run_first_transaction(ScenarioConfig::first_transaction())`: form → install-code/MMO join → DeviceAnnce → counter checkpoint → secured ZCL On → timer-gated report → replay refused; digest `0x3ea31047e1933c90`, `sample_trace.txt` 35 lines; `tools/host-wasm-check.sh` IDENTICAL; `PROGRESS.md` row 28 | GREEN |
 | core roles | `rounddance-roles/src/{children,indirect,coordinator,router,enddevice,sleepy,endpoint}.rs` (`ChildTable`, `IndirectQueue`, `RouterApp` route/app fairness `MAX_ROUTE_PER_TICK`/`MAX_APP_PER_TICK`); 8 role transcripts + 3 fairness proofs + 6k fuzz; `rounddance-sim/tests/roles_network.rs` 3-node coord+router-with-app-endpoint+sleepy join/route/indirect/rejoin + replay; `PROGRESS.md` row 18 | GREEN |
-| app framework | C6-standalone `rounddance-hal-esp::app` (`CoordinatorApp`/`JoinerApp`, `role_from_mac`, `SerialLog`); `tests/c6_standalone.rs` 4 host proofs; S3+H2 `rounddance-rcp` (`frame/cmd/uart/driver/peer`) + 6-test `rcp_otbr_path.rs`; Direct `rounddance-direct` + `direct_commission.rs`; `rounddance-browser` 13 getters + `tools/browser-check.sh`; `rounddance-ffi` + `harness/c/{txn.c,txn.cpp}` + `tools/c-check.sh` | GREEN (real-browser run open — see R4) |
+| app framework | C6-standalone `rounddance-hal-esp::app` (`CoordinatorApp`/`JoinerApp`, `role_from_mac`, `SerialLog`); `tests/c6_standalone.rs` 4 host proofs; S3+H2 `rounddance-rcp` (`frame/cmd/uart/driver/peer`) + 6-test `rcp_otbr_path.rs`; Direct `rounddance-direct` + `direct_commission.rs`; `rounddance-browser` 13 getters + `tools/browser-check.sh`; `rounddance-ffi` + `harness/c/{txn.c,txn.cpp}` + `tools/c-check.sh`; real-browser run closed wave-34 (`tools/browser-real.sh`, headless Chromium DECISION-MATCH — see R4) | GREEN |
 | coverage expansion | SE/metering `rounddance-zcl/{metering,electrical,price,keyest,mirror,snapshot,schedule,sampling,supply,notify}.rs` (waves 14/26/28/31) + sim `se_loop/se_mirror_loop/se_schedule_loop/se_notify_loop` + replays; IAS ACE/WD + price blocks (wave-22) + `ias_loop`/`se_block_loop`; Touchlink completion (wave-20) + `touchlink_commission.rs`; compressed-point P-256 (wave-29) + compressed sim leg; level-0 AUX hardening (wave-23) + `join_unsecured_tc.rs`; 3.0-compat (wave-24) + `compat_30_join.rs` | GREEN (deferrals closed or by-design; remainders — see R3, R5) |
 | portability validation | Wave-30 matrix at HEAD: `cargo test --workspace` 97 suites green then (642 passed/0 failed re-verified this wave at 99 suites incl. sim-`forbid` change), clippy 0, fmt clean, no-default-features + wasm legs green, wasmtime/browser/C DECISION-MATCH pins, ESP-target check exit 0 | GREEN |
 
@@ -56,7 +70,7 @@ ESP `riscv32imac-esp-espidf +esp` check exit 0.
 - R1 NWK routing/commands not started (`PROGRESS.md` row 9 note; confirmed: no `RouteRequest`/`RouteReply`/`LinkStatus` codecs in `rounddance-nwk`, only `discover_route` passthrough in `nlde.rs`). Cause: never scheduled. Owner: repo.
 - R2 Standards corpus page/section coverage still "In progress (parallel stream)" (`PROGRESS.md` row 3). Cause: full-corpus sweep ongoing outside this repo. Owner: corpus.
 - R3 GP bidirectional commissioning reply path: structures + explicit stubs only (wave-11 note). Cause: deferred follow-up. Owner: repo.
-- R4 Real-browser run of `harness/browser/index.html` open (`RD-BROWSER-04`; wasmtime leg DECISION-MATCH only). Cause: no browser/JS engine on box. Owner: human-blocker (first box with a browser records the verdict).
+- R4 Real-browser run of `harness/browser/index.html` — CLOSED wave-34 (amended wave-63 with cited proof): `PROGRESS.md` wave-34 row records headless Chromium 156.0.8078.47 executing `harness/browser/index.html` → DECISION-MATCH digest `0x3ea31047e1933c90` trace_lines=35, all 13 getters == native (== pinned, == wasmtime); reproducer `tools/browser-real.sh` + install/run docs `harness/browser/README` both in repo at HEAD. (Stale pointer: `REQUIREMENTS.md` row 582 still says "browser execution open" — superseded by the wave-34 evidence above; row text not yet updated.)
 - R5 PRO profile support: SCOPE §7 best-effort tracked fallback, zero PRO rows/evidence in repo. Cause: explicitly best-effort, never scheduled. Owner: repo.
 - R6 Full on-target ESP validation beyond best-effort `cargo check`s parked on hardware/human (`BLOCKERS.md` B-001/B-002/B-003 wifi-deaf quarantines, 15.4-ONLY policy). Cause: needs hands + healthy units. Owner: HW/human-blocker.
 - R7 802.15.4 MAC corpus requirements "coverage pending" (wave-16 note: no MAC corpus mined; `mac-sap` has no corpus req IDs). Cause: corpus gap. Owner: corpus.
@@ -91,3 +105,49 @@ repo-wide style classes — zero code churn this wave.
 - Wave-62 lane 2: `PROGRESS.md` wave-62 row; `REQUIREMENTS.md`
   wave-61 section (RD-COMPAT-08..10 flipped → CONFIRMED via
   sweep-42, 0 corrections / 0 REJECT); evidence `~/hwscratch/w62/`.
+
+## Wave-63 extension + re-confirmation (HEAD 5ece806, 2026-10-29)
+
+Repo-only, offline: no lab use, no corpus writes, zero new IDs.
+Working tree clean at HEAD; zero code changes since wave-62 lane 2,
+so the matrix below re-pins identical numbers (evidence
+`~/hwscratch/w63/`: `test.log`, `clippy.log`, `fmt.log`, `wasm.log`,
+`hostwasm.log`).
+
+Full matrix (quoted, all exits 0):
+
+- `cargo test --workspace`: 120 `test result: ok` suites / 859 passed / 0 failed, exit 0
+- `cargo clippy --workspace --all-targets -- -D warnings`: 0 warnings, exit 0
+- `cargo fmt --check`: clean, exit 0
+- `cargo check --workspace --exclude lab-arbitrator --target wasm32-unknown-unknown`: exit 0
+- 15 crates `--no-default-features --target wasm32-unknown-unknown`: all green
+- `tools/host-wasm-check.sh`: IDENTICAL native == wasm32-wasmtime, exit 0
+- corpus `coverage_gate.py` read-only: PASS
+  (docs=13 pages=3766/3766 unresolved=0 seed=519/519 pending=0)
+
+### 9-gate re-confirmation (every verdict stands, current evidence)
+
+| Gate | Current evidence (waves 40–62) | Verdict |
+|------|-------------------------------|---------|
+| foundation | Unchanged since wave-32; `forbid(unsafe_code)` gap closed wave-32 and still holds — wave-63 grep: zero `unsafe` blocks/fns in all 14 protocol-crate `src` trees (only `inspect-live` bin + HAL/FFI shims, as documented) | GREEN |
+| standards readiness | Unchanged; NWK/APS/ZDO codecs + vectors + fuzz + sim legs intact at 859-test HEAD; R1 closed wave-33 (`nwk::{commands,route}` + `RouterMachine` seam + `route_discovery.rs`) | GREEN |
+| lab readiness | Unchanged repo-side; arbitrator + lease discipline exercised by every lab lane through wave-62 with zero quarantine (`~/hwscratch/w55`–`w62` lane SUMMARies all end leases-none/quarantine-none) | GREEN |
+| radio boundary | Unchanged; `EspAdapter` + `MockDriver` + parity legs now also the reference for the Ember (wave-60) and TI (wave-61) adapter parity tests | GREEN |
+| first complete transaction | Unchanged; host-wasm-check IDENTICAL re-pinned this wave | GREEN |
+| core roles | Unchanged; `RouterMachine` routing seam (wave-33) rides the existing `forward` path, fairness budgets intact | GREEN |
+| app framework | Real-browser leg now closed — see R4 amendment above; wasmtime/browser/C DECISION-MATCH pins unchanged | GREEN |
+| coverage expansion | Unchanged; SE/keyest/Touchlink/3.0-compat/PRO-best-effort rows intact, all CONFIRMED or MINTED-pending-confirm as recorded | GREEN |
+| portability validation | Re-pinned this wave: full matrix above, byte-identical to wave-62 (120/859/0) | GREEN |
+
+### Extension exit-evidence rows (waves 40–62, proof pointers)
+
+| Extension | Exit evidence (paths + results) |
+|-----------|-------------------------------|
+| Inspector engine + sender + air-loop | `crates/rounddance-inspect`: `session::SeqWindow` replay/gap/late accounting (wave-41, `tests/engine.rs` 13 tests) → `decrypt::open_nwk` + host `sniffer`/`inspect-live` + `live_air.rs` 11 tests with verbatim w48/w49 air goldens (wave-49) → sub-NWK dissectors + quirk split (wave-50, `decode_depth.rs`) → Touchlink (wave-51) + GPDF (wave-52) legs → `SessionTimeline` 16-row/8-event-ring tables + `LoopbackSender` 8×256B + `write_pcap` linktype-195 artifact `~/hwscratch/w58/sender_roundtrip.pcap` + 1191/1493/5218-frame zero-error replays (wave-58, `timeline.rs` 9 + `sender.rs` 4 tests); `REQUIREMENTS.md` RD-INSPECT-09..38 (09..36 CONFIRMED-or-pending as recorded, 37..38 CONFIRMED via sweep-39) |
+| Ember + TI adapter skeletons | `rounddance-compat::{ember,ti}` + `tests/{ember,ti}_vectors.rs` 14+14 tests with byte-exact codec pins + decision-for-decision parity legs vs `EspAdapter`+`MockDriver` (waves 60–61); RD-COMPAT-05..10 all CONFIRMED (sweep-41/42, 0 corrections / 0 REJECT — `REQUIREMENTS.md` rows 721–723, 743–745); MG21/MG24/CC2652 untouched |
+| ZBOSS MLME + NWK + stay-joined | Lab exit evidence (repo untouched): FULL MLME SUCCESS over the air — beacon-req→beacon, 3/3 assoc-req→MAC-ack, assoc-response short=0xB710 status=0 (w59 lane 2 `~/hwscratch/w59/lane2/SUMMARY.md`, NCS 2.x ZBOSS ported to nRF54L15 via 3-file patch, PAN 0x430D ch15); NWK join 4/4 SUCCESS with 115/115 secured opens under recovered netkey + host keyconfirm `0x5f5401af` all cycles (w60 lane 1 `~/hwscratch/w60/lane1/SUMMARY.md`, PAN 0xa6cc ch15, three-sided ESP+sniffer+ZBOSS logs); stay-joined MECHANISM NAILED: ZBOSS ejects ~13.6 s post-commission (`R21_TCLK` TIMEOUT → NWK Leave) because the joiner never initiates the TCLK exchange — TC authorization policy one layer up, follow-up scoped in §8 |
+| fw-opt (E510-DEAF A/B) | Lab exit evidence (repo untouched): stock vs opt firmware behave IDENTICALLY on E510 (scan 0/0/0 both, join-fail both, full erase before every flash) while the same stock binary joins first-attempt on 7F68 — UNIT-FAULT (E510 WiFi RF path), suspect antenna call REFUTED (present+identical+executes); 5 opt deltas pinned (`~/hwscratch/w56/lane1/SUMMARY.md`, `scan-opt/` fair-A/B build); queued user-asked fw-optimization wave (partitions + sdkconfig) stays open by design |
+| Fleet lessons | Standing lesson re-confirmed twice: full `erase-flash` CURED 7F68 wifi-deafness (w55 lane 1: first-attempt join, rssi −40…−43 dBm, NVS/PHY-cal corruption not RF damage — backup retained, restore deliberately skipped); E510 full-erase approved 2026-10-29, SDR fw need not be restored (memory `esp-fleet-lessons.md`); first remedy = full-erase, not quarantine (zero quarantine held all waves) |
+
+Verdict changes this wave: exactly one — R4 open → CLOSED (cited proof
+above). All 9 gate verdicts GREEN, no other amendments.
