@@ -1796,11 +1796,13 @@ discipline, FLAG/ESC stuffing, CRC-16/CCITT via the shared `29B1`
 check reused from `ember::crc16`). Like the wave-60/61 layers, all
 control values are an adapter-local skeleton namespace, not the NCP
 command set — pinning real NCP values waits for the transport
-decision. Codec-only (no link state machine: retransmit/ack-window
-bookkeeping is follow-up). One repo-minted ID (`RD-COMPAT-11`),
-MINTED-pending-confirm at mint. No lab use, no corpus writes;
-wording in code/tests is paraphrase only (D1).
+decision. Wave-71 adds the link state machine on top (no new
+IDs): `AshTxWindow` (bounded sender-side ack-window bookkeeping)
+plus `AshRxState` (receiver-side expected/ack cursor). One
+repo-minted ID (`RD-COMPAT-11`), MINTED-pending-confirm at mint.
+No lab use, no corpus writes; wording in code/tests is paraphrase
+only (D1).
 
 | Requirement ID | State | Implementing code | Verifying test |
 |----------------|-------|-------------------|----------------|
-| RD-COMPAT-11 | implemented + verified | `ash::{encode_data, encode_ack, encode_nak, encode_rst, encode_rstack, encode_error, decode, decode_control, pack_data_header, next_num}`: DATA header codec (frm/ack/reTx), 5 control-frame shapes with body-length contracts, FLAG/LEN/stuffing/CRC framing over a bounded stack temp (all-or-nothing, panic-free by construction), 3-bit wrap + overflow refusal | `compat/tests/ash_vectors.rs` 12 tests: 4 byte-pinned full-frame vectors (DATA / ACK+NAK+RST / RSTACK+ERROR / reTx+stuffing), control-octet shape + refusal matrix, number wrap + `BadNumber`, CRC/truncation/oversize/short-output refusals, control body-length policing, max-stuffed-payload round-trip + all-or-nothing, EZSP-frame-body layering leg |
+| RD-COMPAT-11 | implemented + verified | `ash::{encode_data, encode_ack, encode_nak, encode_rst, encode_rstack, encode_error, decode, decode_control, pack_data_header, next_num}`: DATA header codec (frm/ack/reTx), 5 control-frame shapes with body-length contracts, FLAG/LEN/stuffing/CRC framing over a bounded stack temp (all-or-nothing, panic-free by construction), 3-bit wrap + overflow refusal; wave-71 `ash::{AshTxWindow, AshRxState, RetxDecision, RxOutcome, ASH_TX_WINDOW}`: sender window (fresh-number allocate, cumulative ACK retire, `try_allocate -> None` window-full backpressure, NAK-triggered `RetxDecision` run with `re_tx` re-encode, stale/duplicate ACK retires 0, `BadNumber` on out-of-range), receiver cursor (in-order accept, duplicate re-ACK, gap → NAK with held ack number, wrap, reset) — counters only, every named frame still through the all-or-nothing `encode_data`/`decode` path | `compat/tests/ash_vectors.rs` 16 tests: wave-70 12 (4 byte-pinned full-frame vectors (DATA / ACK+NAK+RST / RSTACK+ERROR / reTx+stuffing), control-octet shape + refusal matrix, number wrap + `BadNumber`, CRC/truncation/oversize/short-output refusals, control body-length policing, max-stuffed-payload round-trip + all-or-nothing, EZSP-frame-body layering leg) + wave-71 4 (allocate/ACK/backpressure incl. reopen + duplicate/stale legs, NAK-retransmit run round-tripped with `re_tx` through the codec, receiver accept/duplicate/gap/wrap/reset legs, off-wire ACK driving the sender window) |

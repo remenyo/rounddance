@@ -9,8 +9,9 @@
 
 use rounddance_compat::ash::{
     decode, decode_control, encode_ack, encode_data, encode_error, encode_nak, encode_rst,
-    encode_rstack, next_num, pack_data_header, AshError, AshKind, ACK_BASE, ERROR_CTRL,
-    MAX_ASH_DATA, NAK_BASE, NUM_MASK, RSTACK_CTRL, RST_CTRL,
+    encode_rstack, next_num, pack_data_header, AshError, AshKind, AshRxState, AshTxWindow,
+    RxOutcome, ACK_BASE, ASH_TX_WINDOW, ERROR_CTRL, MAX_ASH_DATA, NAK_BASE, NUM_MASK, RSTACK_CTRL,
+    RST_CTRL,
 };
 use rounddance_compat::ember::FLAG;
 
@@ -278,4 +279,163 @@ fn ash_carries_ezsp_frame_body() {
         }
     );
     assert_eq!(frame.payload_bytes(), wire_body);
+}
+
+/// Sender window: fresh numbers allocate in order, the window fills
+/// at 7 outstanding (one number stays free of the 3-bit space), the
+/// 8th allocation refuses (`None` backpressure), and a cumulative
+/// ACK retires the covered run and reopens the window.
+#[test]
+fn ash_tx_window_allocate_ack_backpressure() {
+    assert_eq!(ASH_TX_WINDOW, 7);
+    let mut tx = AshTxWindow::new();
+    assert!(tx.can_send());
+    assert!(!tx.window_full());
+    assert_eq!(tx.outstanding(), 0);
+    for expect in 0..ASH_TX_WINDOW {
+        assert_eq!(tx.try_allocate(), Some(expect));
+    }
+    assert!(tx.window_full());
+    assert!(!tx.can_send());
+    assert_eq!(tx.try_allocate(), None);
+    assert_eq!(tx.outstanding(), ASH_TX_WINDOW);
+    // Cumulative ACK through frame 2 retires frames 0, 1, 2.
+    assert_eq!(tx.on_ack(2), Ok(3));
+    assert_eq!(tx.outstanding(), 4);
+    assert_eq!(tx.base(), 3);
+    assert!(tx.can_send());
+    assert!(!tx.window_full());
+    // Freed slots hand out the next fresh numbers (wrap discipline).
+    assert_eq!(tx.try_allocate(), Some(7));
+    assert_eq!(tx.try_allocate(), Some(0));
+    assert_eq!(tx.try_allocate(), Some(1));
+    assert!(tx.window_full());
+    // Duplicate ACK (names only retired frames) retires nothing.
+    assert_eq!(tx.on_ack(2), Ok(0));
+    assert_eq!(tx.outstanding(), 7);
+    // Out-of-range ACK numbers never encode and never retire.
+    assert_eq!(tx.on_ack(8), Err(AshError::BadNumber));
+    assert_eq!(tx.outstanding(), 7);
+}
+
+/// NAK-triggered retransmit leg, end to end over the codec: fill the
+/// window, ACK part of it, NAK the rest, then re-encode the
+/// retransmit run with the retransmit flag set and decode it back.
+#[test]
+fn ash_nak_retransmit_run_round_trips_with_retx_flag() {
+    let mut tx = AshTxWindow::new();
+    let mut rx = AshRxState::new();
+    // Send frames 0..=3 through the real encoder, receiver accepts
+    // the first two in order (ack now 1, expects 2).
+    let mut wire = [0u8; 64];
+    for frm in 0..4u8 {
+        assert_eq!(tx.try_allocate(), Some(frm));
+        let ack = rx.ack_num();
+        let n = encode_data(frm, ack, false, &[0x50 + frm], &mut wire).unwrap();
+        let (frame, _) = decode(&wire[..n]).unwrap();
+        let AshKind::Data {
+            frm_num,
+            ack_num: _,
+            re_tx,
+        } = frame.kind
+        else {
+            panic!("DATA frame expected");
+        };
+        assert!(!re_tx);
+        if frm < 2 {
+            assert_eq!(rx.on_data(frm_num), Ok(RxOutcome::Accept));
+        }
+    }
+    assert_eq!(rx.ack_num(), 1);
+    // Receiver sees frame 3 while still expecting 2: a gap, so it
+    // NAKs with ack 1. The NAK frame itself round-trips the codec.
+    assert_eq!(rx.on_data(3), Ok(RxOutcome::Gap));
+    let mut nak_wire = [0u8; 16];
+    let n = encode_nak(rx.ack_num(), &mut nak_wire).unwrap();
+    let (nak, _) = decode(&nak_wire[..n]).unwrap();
+    assert_eq!(nak.kind, AshKind::Nak { ack_num: 1 });
+    // Sender files the NAK: frame 1 stays cumulatively acked (frames
+    // 0, 1 retired), retransmit run starts at 2 over frames 2, 3.
+    let decision = tx.on_nak(1).unwrap();
+    assert!(decision.needed());
+    assert_eq!(decision.start_frm, 2);
+    assert_eq!(decision.count, 2);
+    assert_eq!(tx.outstanding(), 2);
+    // Re-encode the run with the retransmit flag: both decode back
+    // with `re_tx` set and the receiver accepts frame 2 in order.
+    for k in 0..decision.count {
+        let frm = (decision.start_frm + k) & NUM_MASK;
+        let n = encode_data(frm, 0, true, &[0x50 + frm], &mut wire).unwrap();
+        let (frame, _) = decode(&wire[..n]).unwrap();
+        assert_eq!(
+            frame.kind,
+            AshKind::Data {
+                frm_num: frm,
+                ack_num: 0,
+                re_tx: true
+            }
+        );
+        if k == 0 {
+            assert_eq!(rx.on_data(frm), Ok(RxOutcome::Accept));
+        }
+    }
+    assert_eq!(rx.ack_num(), 2);
+    // NAK with nothing outstanding reports an empty run (no work).
+    let mut idle = AshTxWindow::new();
+    let decision = idle.on_nak(0).unwrap();
+    assert!(!decision.needed());
+    assert_eq!(decision.count, 0);
+    assert_eq!(idle.on_nak(8), Err(AshError::BadNumber));
+}
+
+/// Receiver legs: in-order accept advances, a repeat of the newest
+/// accepted frame re-acknowledges without advancing, a gap holds the
+/// ack number for the NAK, and out-of-range numbers refuse.
+#[test]
+fn ash_rx_accept_duplicate_gap_legs() {
+    let mut rx = AshRxState::new();
+    assert_eq!(rx.expected(), 0);
+    assert_eq!(rx.ack_num(), 0);
+    assert_eq!(rx.on_data(0), Ok(RxOutcome::Accept));
+    assert_eq!(rx.expected(), 1);
+    assert_eq!(rx.ack_num(), 0);
+    // Repeat of frame 0 (retransmission before frame 1 arrives):
+    // duplicate, cursors hold.
+    assert_eq!(rx.on_data(0), Ok(RxOutcome::Duplicate));
+    assert_eq!(rx.expected(), 1);
+    assert_eq!(rx.on_data(2), Ok(RxOutcome::Gap));
+    assert_eq!(rx.ack_num(), 0);
+    assert_eq!(rx.on_data(1), Ok(RxOutcome::Accept));
+    assert_eq!(rx.ack_num(), 1);
+    assert_eq!(rx.expected(), 2);
+    // Wrap: accept through 7 then 0 in order.
+    for frm in 2..8u8 {
+        assert_eq!(rx.on_data(frm), Ok(RxOutcome::Accept));
+    }
+    assert_eq!(rx.ack_num(), 7);
+    assert_eq!(rx.on_data(0), Ok(RxOutcome::Accept));
+    assert_eq!(rx.ack_num(), 0);
+    assert_eq!(rx.on_data(8), Err(AshError::BadNumber));
+    rx.reset();
+    assert_eq!(rx.expected(), 0);
+    assert_eq!(rx.ack_num(), 0);
+}
+
+/// ACK-only frames drive the sender window through the real codec:
+/// the ack number decoded off the wire retires the matching run.
+#[test]
+fn ash_ack_frame_drives_tx_window_off_wire() {
+    let mut tx = AshTxWindow::new();
+    for frm in 0..3u8 {
+        assert_eq!(tx.try_allocate(), Some(frm));
+    }
+    let mut wire = [0u8; 16];
+    let n = encode_ack(1, &mut wire).unwrap();
+    let (frame, _) = decode(&wire[..n]).unwrap();
+    let AshKind::Ack { ack_num } = frame.kind else {
+        panic!("ACK frame expected");
+    };
+    assert_eq!(tx.on_ack(ack_num), Ok(2));
+    assert_eq!(tx.outstanding(), 1);
+    assert_eq!(tx.retransmit_pending().start_frm, 2);
 }

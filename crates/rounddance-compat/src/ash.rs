@@ -47,7 +47,20 @@
 //! ```
 //!
 //! Requirement traceability (repo-minted, MINTED-pending-confirm):
-//! `RD-COMPAT-11` (ASH link-control codec).
+//! `RD-COMPAT-11` (ASH link-control codec + ack-window state machine).
+//!
+//! # Ack-window state machine ([`AshTxWindow`], [`AshRxState`])
+//!
+//! Codec-only framing above is not enough to move DATA: the sender
+//! tracks which 3-bit frame numbers are still unacknowledged
+//! ([`AshTxWindow`]: cumulative ACK/NAK intake, `reTx` retransmit
+//! cursor, window-full backpressure) and the receiver tracks the
+//! next expected frame number ([`AshRxState`]: in-order accept,
+//! duplicate re-acknowledge, gap → NAK). Both sides are plain
+//! bounded counters — no heap, no panics — and every frame they
+//! name still goes through the [`encode_data`]/[`decode`] path
+//! above (all-or-nothing), so the vectors pin the wire, not the
+//! counters.
 
 use crate::ember::{crc16, ESC, ESC_XOR, FLAG};
 
@@ -553,4 +566,238 @@ pub fn decode(buf: &[u8]) -> Result<(AshFrame, usize), AshError> {
         frame.payload[..payload_len].copy_from_slice(&body[2..2 + payload_len]);
     }
     Ok((frame, end + 1))
+}
+
+/// Largest count of DATA frames the sender may leave unacknowledged
+/// at once: with 3-bit sequence numbers one number must stay free so
+/// a fresh frame number never aliases an outstanding one.
+pub const ASH_TX_WINDOW: u8 = 7;
+
+/// Where a retransmission run starts and how many frames it covers.
+/// Frame numbers run `start, start+1, ...` modulo 8; every frame in
+/// the run re-encodes with the retransmit flag set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RetxDecision {
+    /// First frame number to retransmit (`0..=7`).
+    pub start_frm: u8,
+    /// Count of frames to retransmit (`0` when nothing is owed).
+    pub count: u8,
+}
+
+impl RetxDecision {
+    /// True when at least one frame is owed a retransmission.
+    #[must_use]
+    pub const fn needed(self) -> bool {
+        self.count > 0
+    }
+}
+
+/// Sender-side ack-window bookkeeping: which frame numbers are still
+/// owed an acknowledgement. Numbers only — payload storage stays
+/// with the caller; every (re)transmission still goes through
+/// [`encode_data`], with `re_tx = false` for fresh frames and
+/// `re_tx = true` for frames inside a [`RetxDecision`] run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AshTxWindow {
+    /// Oldest unacknowledged frame number (valid only while
+    /// `outstanding > 0`).
+    base: u8,
+    /// Next fresh frame number to hand out.
+    next_frm: u8,
+    /// Count of unacknowledged frames (`0..=ASH_TX_WINDOW`).
+    outstanding: u8,
+}
+
+impl AshTxWindow {
+    /// Reset link: no frame owed, both cursors at zero.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            base: 0,
+            next_frm: 0,
+            outstanding: 0,
+        }
+    }
+
+    /// Oldest unacknowledged frame number (`base`; meaningful only
+    /// while [`Self::outstanding`] is nonzero).
+    #[must_use]
+    pub const fn base(self) -> u8 {
+        self.base
+    }
+
+    /// Next fresh frame number [`Self::try_allocate`] will hand out.
+    #[must_use]
+    pub const fn next_frm(self) -> u8 {
+        self.next_frm
+    }
+
+    /// Count of frames still owed an acknowledgement.
+    #[must_use]
+    pub const fn outstanding(self) -> u8 {
+        self.outstanding
+    }
+
+    /// True while another fresh frame may be allocated.
+    #[must_use]
+    pub const fn can_send(self) -> bool {
+        self.outstanding < ASH_TX_WINDOW
+    }
+
+    /// True when the window is exhausted: the sender must stop
+    /// allocating fresh frames until an ACK/NAK frees a slot
+    /// (backpressure signal).
+    #[must_use]
+    pub const fn window_full(self) -> bool {
+        self.outstanding >= ASH_TX_WINDOW
+    }
+
+    /// Allocate a fresh frame number (`re_tx = false` on the wire),
+    /// or `None` when the window is full (backpressure — send
+    /// nothing, wait for an ACK/NAK).
+    pub fn try_allocate(&mut self) -> Option<u8> {
+        if self.window_full() {
+            return None;
+        }
+        let frm = self.next_frm;
+        self.next_frm = next_num(self.next_frm);
+        self.outstanding += 1;
+        Some(frm)
+    }
+
+    /// Cumulative ACK intake: every outstanding frame numbered
+    /// `base..=ack_num` (mod 8) is retired. Returns how many frames
+    /// were newly acknowledged (`0` for a duplicate or stale ACK
+    /// that retires nothing — never an error).
+    ///
+    /// # Errors
+    ///
+    /// [`AshError::BadNumber`] when `ack_num` exceeds 3 bits.
+    pub fn on_ack(&mut self, ack_num: u8) -> Result<u8, AshError> {
+        if ack_num > NUM_MASK {
+            return Err(AshError::BadNumber);
+        }
+        // Distance from `base` through `ack_num` inclusive, mod 8
+        // (`1..=8`): the frames this ACK would retire.
+        let span = (ack_num.wrapping_add(8).wrapping_sub(self.base) & NUM_MASK) + 1;
+        if span > self.outstanding {
+            // Names frames already retired or never sent: stale or
+            // duplicate ACK, retires nothing.
+            return Ok(0);
+        }
+        self.base = next_num(ack_num);
+        self.outstanding -= span;
+        Ok(span)
+    }
+
+    /// Current retransmit run: from `base` over every outstanding
+    /// frame (`count == 0` when nothing is owed).
+    #[must_use]
+    pub const fn retransmit_pending(self) -> RetxDecision {
+        RetxDecision {
+            start_frm: self.base,
+            count: self.outstanding,
+        }
+    }
+
+    /// NAK intake: first retires whatever the piggybacked `ack_num`
+    /// cumulatively acknowledges (same rule as [`Self::on_ack`]),
+    /// then reports the retransmit run starting at
+    /// `ack_num + 1` over the frames still outstanding. Every frame
+    /// in the run re-encodes with the retransmit flag set.
+    ///
+    /// # Errors
+    ///
+    /// [`AshError::BadNumber`] when `ack_num` exceeds 3 bits.
+    pub fn on_nak(&mut self, ack_num: u8) -> Result<RetxDecision, AshError> {
+        self.on_ack(ack_num)?;
+        Ok(self.retransmit_pending())
+    }
+}
+
+impl Default for AshTxWindow {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// What the receiver owes the sender after one DATA frame number.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RxOutcome {
+    /// In-order frame: advance and (piggyback or standalone) ACK it.
+    Accept,
+    /// Repeat of the newest accepted frame: re-ACK, deliver nothing.
+    Duplicate,
+    /// Anything else: a gap — NAK with [`AshRxState::ack_num`].
+    Gap,
+}
+
+/// Receiver-side frame-number bookkeeping: the next expected DATA
+/// frame number plus the newest in-order number received (the value
+/// every piggybacked/standalone ACK or NAK carries).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AshRxState {
+    /// Next in-order DATA frame number.
+    expected: u8,
+    /// Newest in-order DATA frame number received (the ACK number).
+    ack: u8,
+}
+
+impl AshRxState {
+    /// Reset link: expect frame 0, acknowledge number 0.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            expected: 0,
+            ack: 0,
+        }
+    }
+
+    /// Next in-order DATA frame number.
+    #[must_use]
+    pub const fn expected(self) -> u8 {
+        self.expected
+    }
+
+    /// Newest in-order DATA frame number received: the `ack_num` for
+    /// the next piggybacked DATA header, ACK-only, or NAK frame.
+    #[must_use]
+    pub const fn ack_num(self) -> u8 {
+        self.ack
+    }
+
+    /// Reset both cursors (link reset).
+    pub fn reset(&mut self) {
+        self.expected = 0;
+        self.ack = 0;
+    }
+
+    /// File one received DATA frame number.
+    ///
+    /// # Errors
+    ///
+    /// [`AshError::BadNumber`] when `frm_num` exceeds 3 bits.
+    pub fn on_data(&mut self, frm_num: u8) -> Result<RxOutcome, AshError> {
+        if frm_num > NUM_MASK {
+            return Err(AshError::BadNumber);
+        }
+        if frm_num == self.expected {
+            self.ack = frm_num;
+            self.expected = next_num(self.expected);
+            Ok(RxOutcome::Accept)
+        } else if frm_num == self.ack && self.expected != self.ack {
+            // Repeat of the newest accepted frame (the `expected !=
+            // ack` guard keeps the very first frame 0 from reading
+            // as its own duplicate before anything arrived).
+            Ok(RxOutcome::Duplicate)
+        } else {
+            Ok(RxOutcome::Gap)
+        }
+    }
+}
+
+impl Default for AshRxState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
