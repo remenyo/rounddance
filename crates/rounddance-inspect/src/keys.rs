@@ -12,6 +12,21 @@
 /// Maximum NWK key slots (active + alternate, e.g. during rotation).
 pub const MAX_NWK_KEYS: usize = 2;
 
+/// Maximum GP key slots, indexed by the GPDF key-bit value (one slot
+/// for the group-key class, one for the individual-key class).
+pub const MAX_GP_KEYS: usize = 2;
+
+/// One loaded GP key: raw octets plus the wire key-bit value the lab
+/// provisioned it under.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GpKeySlot {
+    /// Raw 128-bit key octets. Never rendered.
+    pub key: [u8; 16],
+    /// Key-bit value this slot answers (`false` group class,
+    /// `true` individual class).
+    pub key_bit: bool,
+}
+
 /// One loaded NWK key: raw octets plus the key sequence number the
 /// lab provisioned it under.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -28,6 +43,9 @@ pub struct KeySlots {
     slots: [Option<KeySlot>; MAX_NWK_KEYS],
     /// Number of `set_network_key` calls (rotation count).
     pub loads: u32,
+    gp_slots: [Option<GpKeySlot>; MAX_GP_KEYS],
+    /// Number of `set_gp_key` calls (rotation count).
+    pub gp_loads: u32,
 }
 
 impl Default for KeySlots {
@@ -43,6 +61,8 @@ impl KeySlots {
         Self {
             slots: [None; MAX_NWK_KEYS],
             loads: 0,
+            gp_slots: [None; MAX_GP_KEYS],
+            gp_loads: 0,
         }
     }
 
@@ -69,6 +89,60 @@ impl KeySlots {
     /// Drop every loaded key.
     pub fn clear(&mut self) {
         self.slots = [None; MAX_NWK_KEYS];
+        self.gp_slots = [None; MAX_GP_KEYS];
+    }
+
+    /// Load (or replace by key-bit value) one GP key. A full table
+    /// evicts the stalest-loaded slot (index 0); loads are counted
+    /// with saturation.
+    pub fn set_gp_key(&mut self, key: [u8; 16], key_bit: bool) {
+        self.gp_loads = self.gp_loads.saturating_add(1);
+        if let Some(slot) = self
+            .gp_slots
+            .iter_mut()
+            .find(|s| matches!(s, Some(e) if e.key_bit == key_bit))
+        {
+            *slot = Some(GpKeySlot { key, key_bit });
+            return;
+        }
+        if let Some(slot) = self.gp_slots.iter_mut().find(|s| s.is_none()) {
+            *slot = Some(GpKeySlot { key, key_bit });
+            return;
+        }
+        self.gp_slots[0] = Some(GpKeySlot { key, key_bit });
+    }
+
+    /// Drop every loaded GP key; NWK slots are untouched.
+    pub fn clear_gp_keys(&mut self) {
+        self.gp_slots = [None; MAX_GP_KEYS];
+    }
+
+    /// Number of loaded GP slots.
+    #[must_use]
+    pub fn gp_loaded(&self) -> usize {
+        self.gp_slots.iter().filter(|s| s.is_some()).count()
+    }
+
+    /// Whether any GP key is loaded (counter-protected GPDFs seen
+    /// from here on count as decryptable-offline; a verified-open
+    /// tree leg counts decryptable regardless — see
+    /// [`crate::session`]).
+    #[must_use]
+    pub fn has_gp_key(&self) -> bool {
+        self.gp_slots.iter().any(|s| s.is_some())
+    }
+
+    /// Key octets for the slot provisioned under `key_bit`, if
+    /// loaded. The GP decryptor resolves strictly by the wire
+    /// key-bit: a protected frame naming an unloaded class never
+    /// decrypts, even when the other class slot is loaded.
+    #[must_use]
+    pub fn gp_key_by_bit(&self, key_bit: bool) -> Option<[u8; 16]> {
+        self.gp_slots
+            .iter()
+            .filter_map(|s| *s)
+            .find(|s| s.key_bit == key_bit)
+            .map(|s| s.key)
     }
 
     /// Number of loaded NWK slots.
@@ -115,6 +189,14 @@ impl KeySlots {
             });
             i += 1;
         }
-        Self { slots, loads }
+        // GP slots are live-only state (like radio readings, never
+        // snapshot state): a restore restarts with no GP key
+        // material, and the schema stays at v1.
+        Self {
+            slots,
+            loads,
+            gp_slots: [None; MAX_GP_KEYS],
+            gp_loads: 0,
+        }
     }
 }

@@ -14,10 +14,12 @@
 //! a terminal node — the bytes are still shown, never silently dropped.
 //! Fixed-shape MAC command payloads ([`mac`]), NWK command payloads
 //! ([`nwkcmd`]), the Touchlink envelope on broadcast-PAN outers
-//! ([`touchlink`]), and the ZDO envelope on profile `0x0000` ([`zdo`])
-//! earn named layers of their own. Broadcast-PAN data outers never
-//! enter the NWK dissector, and only the stack NWK protocol version
-//! decodes.
+//! ([`touchlink`]), the ZDO envelope on profile `0x0000` ([`zdo`]),
+//! and the Green-Power device frame on payloads the stack NWK codec
+//! refuses ([`gp`], reusing the `rounddance-gp` codec) earn named
+//! layers of their own. Broadcast-PAN data outers never enter the
+//! NWK dissector, and only the stack NWK protocol version decodes —
+//! Green-Power (version 3) routes to the GP leg instead.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_code)]
@@ -26,6 +28,7 @@ pub mod aps;
 pub mod capture;
 pub mod chain;
 pub mod decrypt;
+pub mod gp;
 pub mod keys;
 pub mod mac;
 pub mod nwk;

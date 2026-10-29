@@ -470,14 +470,91 @@ pub enum TouchlinkKind {
     Unknown,
 }
 
+/// Green-Power device-frame summary: the named sub-dissector for
+/// MAC data payloads that refuse the stack NWK codec (stub NWK,
+/// protocol version 3). Frame control, addressing, protection
+/// level, the bidirectional-reply request bit, the security frame
+/// counter, and the command envelope are always named; a sealed
+/// (encrypted, unverified) command section files
+/// [`GpKind::EncryptedSealed`] with no command identifier, and
+/// command bodies stay unmodeled by design (as with ZDO envelopes).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GpNode {
+    /// Data (0) vs maintenance (1) frame.
+    pub frame_type: u8,
+    /// Auto-commissioning sub-field.
+    pub auto_commissioning: bool,
+    /// Application identifier (0 source identifier, 1 LPED,
+    /// 2 IEEE address plus endpoint).
+    pub app_id: u8,
+    /// Protection level (0 none, 2 counter plus MIC, 3 encrypted).
+    pub level: u8,
+    /// Key-type wire bit (group vs individual key classes).
+    pub key_bit: bool,
+    /// Receive-after-transmit request (bidirectional-reply window).
+    pub rx_after_tx: bool,
+    /// Sender side: clear = GPD, set = proxy.
+    pub direction_proxy: bool,
+    /// GPD source identifier (`0` for IEEE / LPED identities and
+    /// maintenance frames).
+    pub src_id: u32,
+    /// GPD IEEE address, when the identity scheme carries one.
+    pub ieee: Option<u64>,
+    /// GPD endpoint, jointly identifying IEEE-addressed devices.
+    pub endpoint: Option<u8>,
+    /// Security frame counter (`Some` exactly when the level puts
+    /// counter + MIC on air).
+    pub frame_counter: Option<u32>,
+    /// GPD command identifier (`None` for sealed sections and LPED
+    /// bodies).
+    pub command_id: Option<u8>,
+    /// Named command shape.
+    pub kind: GpKind,
+    /// Command payload length in octets (integrity word excluded,
+    /// `0` while sealed).
+    pub payload_len: u16,
+    /// True when the level puts counter + MIC on air; the session
+    /// engine folds these frames into the secured accounting.
+    pub secured: bool,
+}
+
+/// Named Green-Power command shapes. Data commands outside the six
+/// reply-path identifiers file [`GpKind::Data`] with the identifier;
+/// anything the codec refuses files no leg at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GpKind {
+    /// Application data command.
+    Data,
+    /// Commissioning (`0xE0`).
+    Commissioning,
+    /// Decommissioning (`0xE1`, payloadless).
+    Decommissioning,
+    /// Success (`0xE2`, payloadless).
+    Success,
+    /// Channel request (`0xE3`).
+    ChannelRequest,
+    /// Commissioning reply (`0xF0`, proxy side of the
+    /// bidirectional exchange).
+    CommissioningReply,
+    /// Channel configuration (`0xF3`).
+    ChannelConfig,
+    /// Maintenance-frame command envelope.
+    Maintenance,
+    /// LPED body, kept opaque.
+    LpedOpaque,
+    /// Encrypted command section, sealed: no slotted key has
+    /// verified it open, so no command identifier is named.
+    EncryptedSealed,
+}
+
 /// Terminal note: the chain stopped here with bytes left over.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NoteNode {
-    /// Machine-readable reason (`"secured"` for an NWK/APS key-domain
-    /// miss, `"mac-secured"` for a MAC sealed outer, `"truncated"`,
-    /// `"unknown"`, `"trailing"`, `"ack"`, `"beacon"`,
-    /// `"mac-command"`, `"decrypted"`, `"interpan"` for a
-    /// broadcast-PAN outer routed to the Touchlink leg).
+    /// Machine-readable reason (`"secured"` for an NWK/APS/GP
+    /// key-domain miss, `"mac-secured"` for a MAC sealed outer,
+    /// `"truncated"`, `"unknown"`, `"trailing"`, `"ack"`,
+    /// `"beacon"`, `"mac-command"`, `"decrypted"`, `"interpan"` for
+    /// a broadcast-PAN outer routed to the Touchlink leg).
     pub reason: &'static str,
     /// Octets remaining at this layer.
     pub remaining: u16,
@@ -503,15 +580,18 @@ pub enum Layer {
     Zcl(ZclNode),
     /// ZDO envelope (profile `0x0000`, never ZCL).
     Zdo(ZdoNode),
+    /// Green-Power device frame (stub NWK, never beside NWK/APS).
+    Gp(GpNode),
     /// Chain stop note.
     Note(NoteNode),
 }
 
 /// Maximum layers per tree: MAC + NWK + APS + ZCL/ZDO + one stop
-/// note, MAC + NWK + command leg + one stop note, or MAC +
-/// Touchlink + one stop note. Named command, profile, and
-/// inter-PAN legs take a layer slot that an unnamed stop used to
-/// fill alone, so depth grows by at most one per frame.
+/// note, MAC + NWK + command leg + one stop note, MAC + Touchlink +
+/// one stop note, or MAC + GP + one stop note. Named command,
+/// profile, inter-PAN, and Green-Power legs take a layer slot that
+/// an unnamed stop used to fill alone, so depth grows by at most one
+/// per frame.
 pub const MAX_LAYERS: usize = 5;
 
 /// Bounded decode tree: the full dissector-chain result for one frame.
@@ -679,6 +759,17 @@ impl DecodeTree {
         for slot in self.layers() {
             if let Some(Layer::Touchlink(t)) = slot {
                 return Some(*t);
+            }
+        }
+        None
+    }
+
+    /// First Green-Power layer, if present.
+    #[must_use]
+    pub fn gp(&self) -> Option<GpNode> {
+        for slot in self.layers() {
+            if let Some(Layer::Gp(g)) = slot {
+                return Some(*g);
             }
         }
         None

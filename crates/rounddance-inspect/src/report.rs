@@ -5,8 +5,8 @@
 //! remaining length, never decrypted.
 
 use crate::tree::{
-    Addr, DecodeTree, Layer, MacCmdKind, MacCmdNode, NwkCmdKind, NwkCmdNode, TouchlinkKind,
-    TouchlinkNode,
+    Addr, DecodeTree, GpKind, GpNode, Layer, MacCmdKind, MacCmdNode, NwkCmdKind, NwkCmdNode,
+    TouchlinkKind, TouchlinkNode,
 };
 use std::fmt::Write as _;
 
@@ -139,6 +139,25 @@ pub fn to_text(tree: &DecodeTree) -> String {
                     t.payload_len,
                 );
             }
+            Layer::Gp(g) => {
+                let _ = writeln!(
+                    s,
+                    "  gp: {} app={} lvl={} keybit={} {} cmd={} ctr={} len={}B{}",
+                    if g.frame_type == 0 { "data" } else { "maint" },
+                    g.app_id,
+                    g.level,
+                    if g.key_bit { 1 } else { 0 },
+                    gp_text(&g.kind),
+                    g.command_id
+                        .map(|v| format!("{v:#04x}"))
+                        .unwrap_or_else(|| String::from("-")),
+                    g.frame_counter
+                        .map(|v| format!("{v:#010x}"))
+                        .unwrap_or_else(|| String::from("-")),
+                    g.payload_len,
+                    if g.rx_after_tx { " rx-after-tx" } else { "" },
+                );
+            }
             Layer::Note(n) => {
                 let _ = writeln!(s, "  …: {} ({}B left)", n.reason, n.remaining);
             }
@@ -230,6 +249,9 @@ pub fn to_json(tree: &DecodeTree) -> String {
             }
             Layer::Touchlink(t) => {
                 s.push_str(&touchlink_json(t));
+            }
+            Layer::Gp(g) => {
+                s.push_str(&gp_json(g));
             }
             Layer::Note(n) => {
                 s.push_str(&format!(
@@ -787,6 +809,46 @@ fn touchlink_json(t: &TouchlinkNode) -> String {
     format!(
         "{{\"touchlink\":{{\"tid\":{},\"cmd\":{},\"kind\":\"{kind}\",\"len\":{}{extra}}}}}",
         t.tid, t.command_id, t.payload_len,
+    )
+}
+
+fn gp_text(k: &GpKind) -> &'static str {
+    match k {
+        GpKind::Data => "data",
+        GpKind::Commissioning => "commissioning",
+        GpKind::Decommissioning => "decommissioning",
+        GpKind::Success => "success",
+        GpKind::ChannelRequest => "channel-request",
+        GpKind::CommissioningReply => "commissioning-reply",
+        GpKind::ChannelConfig => "channel-config",
+        GpKind::Maintenance => "maintenance",
+        GpKind::LpedOpaque => "lped-opaque",
+        GpKind::EncryptedSealed => "encrypted-sealed",
+    }
+}
+
+fn gp_json(g: &GpNode) -> String {
+    format!(
+        "{{\"gp\":{{\"type\":{},\"app\":{},\"lvl\":{},\"keybit\":{},\"rx\":{},\"proxy\":{},\"srcid\":{},\"ieee\":{},\"cmd\":{},\"kind\":\"{}\",\"ctr\":{},\"len\":{},\"secured\":{}}}}}",
+        g.frame_type,
+        g.app_id,
+        g.level,
+        g.key_bit,
+        g.rx_after_tx,
+        g.direction_proxy,
+        g.src_id,
+        g.ieee
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| String::from("null")),
+        g.command_id
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| String::from("null")),
+        gp_text(&g.kind),
+        g.frame_counter
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| String::from("null")),
+        g.payload_len,
+        g.secured,
     )
 }
 

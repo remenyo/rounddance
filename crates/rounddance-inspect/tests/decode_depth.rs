@@ -6,7 +6,10 @@
 //! rssi +126 — the INS-LIVE-02 class); the ZDO and session legs are
 //! codec-built shapes of the live-confirmed classes (analyzer
 //! `~/hwscratch/w49/analyze49.py`: `zdo/annce`, `zdo/lqi-rsp`,
-//! `nwk/rejoin-req`, ...). No key material anywhere.
+//! `nwk/rejoin-req`, ...). The GPDF octets are verbatim wave-51 lane-1
+//! air frames (`~/hwscratch/w51/lane1_*.pcap`, linktype 230, GAP-5:
+//! every GPDF stops `unknown` — L 84/84, K 84, H2 28). No key material
+//! anywhere.
 
 use rounddance_inspect::{chain, report, session, tree};
 
@@ -631,11 +634,19 @@ fn repro_nwk_version_guard_refuses_ver5() {
     let tree = chain::dissect(&ver5).unwrap();
     assert!(tree.nwk().is_none(), "no NWK leg under version 5");
     assert_eq!(note_reasons(&tree), vec!["unknown"]);
-    // Version 3 (Green-Power value): same refusal, no leg.
+    // Version 3 (Green-Power value): contract evolution in wave 52
+    // (RD-INSPECT-32) — the GP leg is now modeled, and these very
+    // bytes are a well-formed unsecured GPDF (data, SrcId
+    // `0x56123400`, command `0x78`), so the chain names MAC + GP
+    // beside `trailing` instead of refusing. Version 5 above still
+    // stops `unknown`: no leg exists for it.
     let ver3 = hex("4188016137ffff34120c00341256781e090000");
     let tree3 = chain::dissect(&ver3).unwrap();
     assert!(tree3.nwk().is_none());
-    assert_eq!(note_reasons(&tree3), vec!["unknown"]);
+    let g3 = tree3.gp().expect("version-3 GP leg");
+    assert_eq!(g3.src_id, 0x5612_3400);
+    assert_eq!(g3.command_id, Some(0x78));
+    assert_eq!(note_reasons(&tree3), vec!["trailing"]);
     // Control: version 2 on the same bytes decodes normally.
     let ver2 = hex("4188016137ffff34120800341256781e090000");
     let ok = chain::dissect(&ver2).unwrap();
@@ -655,4 +666,365 @@ fn mac_secured_stop_stays_out_of_session_secured_counts() {
     assert!(text.contains("mac-secured"));
     let json = report::to_json(&tree);
     assert!(json.contains("\"reason\":\"mac-secured\""));
+}
+
+// ---------------------------------------------------------------------------
+// GAP-5 (wave-51 lane 1): Green-Power device frames stop `unknown` —
+// no GP leg exists (L 84/84, K 84, H2 28). Both repros compile against
+// the HEAD API only (`len` + stop reasons) and must FAIL pre-fix.
+// ---------------------------------------------------------------------------
+
+/// Verbatim w51 L data frame: short-dst-only MAC outer + unsecured
+/// GPDF data (`20 01`, SrcId `0x517f6811`).
+const GPDF_DATA_UNSECURED: &str = "01080f6137ffff8c0011687f512001";
+
+/// Verbatim w51 L data frame: counter-protected GPDF data
+/// (`ext 0x30`, counter `0x0f`, `20 01` + MIC), no key slotted.
+const GPDF_DATA_MIC_ONLY: &str = "01080c6137ffff8c3011687f510f00000020017a871adc";
+
+#[test]
+fn repro_gpdf_data_stops_unknown_without_leg() {
+    let tree = chain::dissect(&hex(GPDF_DATA_UNSECURED)).unwrap();
+    assert!(tree.mac().is_some(), "MAC outer decodes");
+    assert!(tree.nwk().is_none(), "GPDF is not a stack NWK frame");
+    // Required: a named GP leg beside a terminal stop, not `unknown`.
+    assert_eq!(tree.len(), 3, "MAC + GP leg + stop note");
+    assert_eq!(note_reasons(&tree), vec!["trailing"]);
+}
+
+#[test]
+fn repro_gpdf_secured_stops_secured_not_unknown() {
+    let tree = chain::dissect(&hex(GPDF_DATA_MIC_ONLY)).unwrap();
+    assert!(tree.mac().is_some(), "MAC outer decodes");
+    assert!(tree.nwk().is_none(), "GPDF is not a stack NWK frame");
+    // Required: the counter-protected shape files the key-domain
+    // stop (`secured`), never the catch-all `unknown`.
+    assert_eq!(tree.len(), 3, "MAC + GP leg + stop note");
+    assert_eq!(note_reasons(&tree), vec!["secured"]);
+}
+
+// ---------------------------------------------------------------------------
+// GAP-5 closure (wave 52, RD-INSPECT-32/33): Green-Power decode leg.
+// Provenance: every verbatim octet string below is a genuine w51
+// lane-1 air frame (`~/hwscratch/w51/lane1_*.pcap`, linktype 230);
+// the sealed round trips use a synthetic test-only key, never lab
+// key material (wave-49 precedent). One behavior per test.
+// ---------------------------------------------------------------------------
+
+/// Synthetic GP test-only key (committed; lab keys stay local-only).
+const GP_TEST_KEY: [u8; 16] = [0x5au8; 16];
+
+/// Incoming-nonce bytes for a source-identifier GPD: the identifier
+/// repeated, the counter, the fixed control octet.
+fn gp_test_nonce(srcid: u32, ctr: u32) -> [u8; 13] {
+    let id = srcid.to_le_bytes();
+    let c = ctr.to_le_bytes();
+    [
+        id[0], id[1], id[2], id[3], id[0], id[1], id[2], id[3], c[0], c[1], c[2], c[3], 0x05,
+    ]
+}
+
+fn gp_test_ks(key: &[u8; 16], nonce: &[u8; 13], ctr: u32) -> [u8; 16] {
+    use rounddance_security::encrypt_block_aes128;
+    let mut blk = [0u8; 16];
+    blk[0] = 0x01;
+    blk[1..14].copy_from_slice(nonce);
+    blk[14..16].copy_from_slice(&(ctr as u16).to_be_bytes());
+    encrypt_block_aes128(key, &blk)
+}
+
+/// CCM* integrity word over (`aad_extra`, `msg`) with flags 0x49
+/// (associated data present, 4-octet word, 2-octet length).
+fn gp_test_tag(key: &[u8; 16], nonce: &[u8; 13], aad_extra: &[u8], msg: &[u8]) -> [u8; 4] {
+    use rounddance_security::encrypt_block_aes128;
+    let mut b0 = [0u8; 16];
+    b0[0] = 0x40 | 0x08 | 0x01;
+    b0[1..14].copy_from_slice(nonce);
+    b0[14..16].copy_from_slice(&(msg.len() as u16).to_be_bytes());
+    let mut mac_in = Vec::new();
+    mac_in.extend_from_slice(&(aad_extra.len() as u16).to_be_bytes());
+    mac_in.extend_from_slice(aad_extra);
+    while mac_in.len() % 16 != 0 {
+        mac_in.push(0);
+    }
+    mac_in.extend_from_slice(msg);
+    while mac_in.len() % 16 != 0 {
+        mac_in.push(0);
+    }
+    let mut x = encrypt_block_aes128(key, &b0);
+    for blk in mac_in.chunks(16) {
+        let mut mix = [0u8; 16];
+        for (i, b) in blk.iter().enumerate() {
+            mix[i] = x[i] ^ b;
+        }
+        x = encrypt_block_aes128(key, &mix);
+    }
+    let s0 = gp_test_ks(key, nonce, 0);
+    [x[0] ^ s0[0], x[1] ^ s0[1], x[2] ^ s0[2], x[3] ^ s0[3]]
+}
+
+/// Counter-mode seal of one command section (counter from 1).
+fn gp_test_ct(key: &[u8; 16], nonce: &[u8; 13], section: &[u8]) -> Vec<u8> {
+    let mut ct = vec![0u8; section.len()];
+    for (i, chunk) in section.chunks(16).enumerate() {
+        let k = gp_test_ks(key, nonce, 1 + i as u32);
+        for (j, b) in chunk.iter().enumerate() {
+            ct[i * 16 + j] = b ^ k[j];
+        }
+    }
+    ct
+}
+
+/// MAC short-dst-only outer (the GPD-originated shape on air) around
+/// one GPDF payload.
+fn gp_wrap(msdu: &[u8]) -> Vec<u8> {
+    let mut frame = vec![0x01u8, 0x08, 0x5a, 0x61, 0x37, 0xff, 0xff];
+    frame.extend_from_slice(msdu);
+    frame
+}
+
+#[test]
+fn gp_data_leg_names_frame_control_and_addressing() {
+    // Verbatim w51 L: unsecured data `20 01`, SrcId `0x517f6811`.
+    let tree = chain::dissect(&hex(GPDF_DATA_UNSECURED)).unwrap();
+    assert_eq!(tree.len(), 3, "MAC + GP + stop note");
+    let m = tree.mac().expect("mac node");
+    assert_eq!(m.frame_type, 1);
+    assert!(!m.security_enabled);
+    let g = tree.gp().expect("gp node");
+    assert_eq!(g.frame_type, 0);
+    assert!(!g.auto_commissioning);
+    assert_eq!(g.app_id, 0);
+    assert_eq!(g.level, 0);
+    assert!(!g.key_bit);
+    assert!(!g.rx_after_tx);
+    assert!(!g.direction_proxy);
+    assert_eq!(g.src_id, 0x517f_6811);
+    assert_eq!(g.ieee, None);
+    assert_eq!(g.frame_counter, None);
+    assert_eq!(g.command_id, Some(0x20));
+    assert_eq!(g.kind, tree::GpKind::Data);
+    assert_eq!(g.payload_len, 1);
+    assert!(!g.secured);
+    assert!(tree.nwk().is_none());
+    assert!(tree.aps().is_none());
+    assert_eq!(note_reasons(&tree), vec!["trailing"]);
+    let text = report::to_text(&tree);
+    assert!(text.contains("gp: data"), "report names the leg:\n{text}");
+    assert!(text.contains("cmd=0x20"));
+    let json = report::to_json(&tree);
+    assert!(json.contains("\"gp\":{"), "json names the leg: {json}");
+    assert!(json.contains("\"cmd\":32"));
+    // Session: nothing secured, one network row, no device row (the
+    // short-dst-only outer carries no source address).
+    let mut eng = session::SessionEngine::new();
+    eng.note_tree(&tree);
+    assert_eq!(eng.secured_decryptable, 0);
+    assert_eq!(eng.secured_orphan, 0);
+    let net = eng.network(0x3761).expect("PAN row");
+    assert_eq!(net.frames, 1);
+    assert_eq!(net.secured, 0);
+}
+
+#[test]
+fn gp_commissioning_leg_names_long_and_compact() {
+    // Verbatim w51 L: unsecured commissioning, 23-octet body.
+    let long = hex("0108006137ffff8c0011687f51e002c3b26ee456f3ef39194b39b5d6b9b4fac9f80a000000");
+    let tree = chain::dissect(&long).unwrap();
+    let g = tree.gp().expect("gp node");
+    assert_eq!(g.command_id, Some(0xe0));
+    assert_eq!(g.kind, tree::GpKind::Commissioning);
+    assert_eq!(g.payload_len, 23);
+    assert_eq!(note_reasons(&tree), vec!["trailing"]);
+    // Verbatim w51 L: compact 2-octet commissioning body `02 43`.
+    let short = hex("0108066137ffff8c0014687f51e00243");
+    let tree2 = chain::dissect(&short).unwrap();
+    let g2 = tree2.gp().expect("gp node");
+    assert_eq!(g2.command_id, Some(0xe0));
+    assert_eq!(g2.kind, tree::GpKind::Commissioning);
+    assert_eq!(g2.payload_len, 2);
+    assert_eq!(g2.src_id, 0x517f_6814);
+    assert_eq!(note_reasons(&tree2), vec!["trailing"]);
+}
+
+#[test]
+fn gp_bidirectional_request_leg_names_rx_after_tx() {
+    // Verbatim w51 B8: commissioning with the receive-after-transmit
+    // request set (the bidirectional-reply window ask), 7-octet body.
+    let tree = chain::dissect(&hex("0108006137ffff8c4016687f51e002f3320a000000")).unwrap();
+    let g = tree.gp().expect("gp node");
+    assert!(g.rx_after_tx, "reply-window request bit");
+    assert!(!g.direction_proxy);
+    assert_eq!(g.level, 0);
+    assert_eq!(g.command_id, Some(0xe0));
+    assert_eq!(g.kind, tree::GpKind::Commissioning);
+    assert_eq!(g.payload_len, 7);
+    assert!(!g.secured);
+    assert_eq!(note_reasons(&tree), vec!["trailing"]);
+    let text = report::to_text(&tree);
+    assert!(
+        text.contains("rx-after-tx"),
+        "report flags the ask:\n{text}"
+    );
+}
+
+#[test]
+fn gp_secured_mic_only_names_command_beside_secured_stop() {
+    // Verbatim w51 L: counter-protected data (`ext 0x30`, key-bit
+    // class, counter `0x0f`), no key slotted.
+    let tree = chain::dissect(&hex(GPDF_DATA_MIC_ONLY)).unwrap();
+    assert_eq!(tree.len(), 3, "MAC + GP + stop note");
+    let g = tree.gp().expect("gp node");
+    assert_eq!(g.level, 2);
+    assert!(g.key_bit);
+    assert_eq!(g.frame_counter, Some(0x0f));
+    // The command travels in the clear under the counter-plus-MIC
+    // level, so the leg is named even while sealed.
+    assert_eq!(g.command_id, Some(0x20));
+    assert_eq!(g.kind, tree::GpKind::Data);
+    assert_eq!(g.payload_len, 1);
+    assert!(g.secured);
+    assert_eq!(note_reasons(&tree), vec!["secured"]);
+    // Session: one secured orphan, no device row (no source on air).
+    let mut eng = session::SessionEngine::new();
+    eng.note_tree(&tree);
+    assert_eq!(eng.secured_decryptable, 0);
+    assert_eq!(eng.secured_orphan, 1);
+    // Verbatim w51 H2: counter-protected decommissioning, empty body.
+    let decomm = chain::dissect(&hex("01081cffffffff8c3012687f5124000000e1acd6a5bd")).unwrap();
+    let d = decomm.gp().expect("gp node");
+    assert_eq!(d.command_id, Some(0xe1));
+    assert_eq!(d.kind, tree::GpKind::Decommissioning);
+    assert_eq!(d.payload_len, 0);
+    assert_eq!(note_reasons(&decomm), vec!["secured"]);
+    // Verbatim w51 L: counter-protected 23-octet commissioning.
+    let comm = chain::dissect(&hex("0108276137ffff8c3011687f5115000000e002c3b26ee456f3ef39194b39b5d6b9b4fac9f815000000b96abe58")).unwrap();
+    let c = comm.gp().expect("gp node");
+    assert_eq!(c.command_id, Some(0xe0));
+    assert_eq!(c.kind, tree::GpKind::Commissioning);
+    assert_eq!(c.payload_len, 23);
+    assert_eq!(c.frame_counter, Some(0x15));
+    assert_eq!(note_reasons(&comm), vec!["secured"]);
+}
+
+#[test]
+fn gp_encrypted_seals_command_without_key() {
+    // Verbatim w51 L: encrypted section — the command identifier is
+    // ciphertext, so no command is named while sealed.
+    let tree = chain::dissect(&hex("0108126137ffff8c3811687f5113000000518b52aeb021fe")).unwrap();
+    assert_eq!(tree.len(), 3, "MAC + GP + stop note");
+    let g = tree.gp().expect("gp node");
+    assert_eq!(g.level, 3);
+    assert!(g.key_bit);
+    assert_eq!(g.frame_counter, Some(0x13));
+    assert_eq!(g.command_id, None);
+    assert_eq!(g.kind, tree::GpKind::EncryptedSealed);
+    assert_eq!(g.payload_len, 0);
+    assert!(g.secured);
+    assert_eq!(note_reasons(&tree), vec!["secured"]);
+    let mut eng = session::SessionEngine::new();
+    eng.note_tree(&tree);
+    assert_eq!(eng.secured_decryptable, 0);
+    assert_eq!(eng.secured_orphan, 1);
+}
+
+#[test]
+fn gp_decrypt_opens_with_slotted_key_and_stops_without() {
+    // Synthetic counter-protected data under the test-only key:
+    // header 8c 30 <srcid 0x517f6811> <ctr 7> + section 20 01 + MIC.
+    let srcid = 0x517f_6811u32;
+    let ctr = 7u32;
+    let section = [0x20u8, 0x01];
+    let mut header = vec![0x8cu8, 0x30];
+    header.extend_from_slice(&srcid.to_le_bytes());
+    header.extend_from_slice(&ctr.to_le_bytes());
+    let nonce = gp_test_nonce(srcid, ctr);
+    let mut aad_extra = header.clone();
+    aad_extra.extend_from_slice(&section);
+    let tag = gp_test_tag(&GP_TEST_KEY, &nonce, &aad_extra, &[]);
+    let mut msdu = header.clone();
+    msdu.extend_from_slice(&section);
+    msdu.extend_from_slice(&tag);
+    let frame = gp_wrap(&msdu);
+    // Slotted key-bit class: verified open, command leg, `decrypted`.
+    let mut eng = session::SessionEngine::new();
+    eng.set_gp_key(GP_TEST_KEY, true);
+    let open = chain::dissect_with_keys(&frame, eng.keys()).unwrap();
+    assert_eq!(open.len(), 3, "MAC + GP + stop note");
+    let g = open.gp().expect("gp node past the open");
+    assert_eq!(g.command_id, Some(0x20));
+    assert_eq!(g.kind, tree::GpKind::Data);
+    assert_eq!(note_reasons(&open), vec!["decrypted"]);
+    eng.note_tree(&open);
+    assert_eq!(eng.secured_decryptable, 1);
+    assert_eq!(eng.secured_orphan, 0);
+    // No key: identical bytes stop sealed.
+    let shut = chain::dissect(&frame).unwrap();
+    assert_eq!(note_reasons(&shut), vec!["secured"]);
+    assert_eq!(shut.gp().expect("gp node").command_id, Some(0x20));
+    // Wrong key-bit class, wrong key bytes, and any mutated octet:
+    // never opens without the slotted key.
+    let mut wrong_bit = session::SessionEngine::new();
+    wrong_bit.set_gp_key(GP_TEST_KEY, false);
+    assert_eq!(
+        note_reasons(&chain::dissect_with_keys(&frame, wrong_bit.keys()).unwrap()),
+        vec!["secured"]
+    );
+    let mut wrong_key = session::SessionEngine::new();
+    wrong_key.set_gp_key([0x11u8; 16], true);
+    assert_eq!(
+        note_reasons(&chain::dissect_with_keys(&frame, wrong_key.keys()).unwrap()),
+        vec!["secured"]
+    );
+    for flip in [msdu.len() + 6, msdu.len() + 3, 9] {
+        let mut bad = frame.clone();
+        bad[flip] ^= 0x01;
+        assert_eq!(
+            note_reasons(&chain::dissect_with_keys(&bad, eng.keys()).unwrap()),
+            vec!["secured"],
+            "mutation at {flip} must fail integrity"
+        );
+    }
+    // Session per-domain gating: a GP-sealed tree folded into an
+    // engine holding only an NWK slot still files orphan (NWK slots
+    // never cover GP legs).
+    let mut nwk_only = session::SessionEngine::new();
+    nwk_only.set_network_key([0x77u8; 16], 0);
+    nwk_only.note_tree(&shut);
+    assert_eq!(nwk_only.secured_decryptable, 0);
+    assert_eq!(nwk_only.secured_orphan, 1);
+}
+
+#[test]
+fn gp_encrypted_decrypt_reveals_command_with_slotted_key() {
+    // Synthetic encrypted commissioning under the test-only key:
+    // section e0 02 sealed with CTR, header-only AAD.
+    let srcid = 0x517f_6814u32;
+    let ctr = 0x21u32;
+    let section = [0xe0u8, 0x02];
+    let mut header = vec![0x8cu8, 0x38];
+    header.extend_from_slice(&srcid.to_le_bytes());
+    header.extend_from_slice(&ctr.to_le_bytes());
+    let nonce = gp_test_nonce(srcid, ctr);
+    let ct = gp_test_ct(&GP_TEST_KEY, &nonce, &section);
+    let tag = gp_test_tag(&GP_TEST_KEY, &nonce, &header, &section);
+    let mut msdu = header;
+    msdu.extend_from_slice(&ct);
+    msdu.extend_from_slice(&tag);
+    let frame = gp_wrap(&msdu);
+    // Sealed: no command named.
+    let shut = chain::dissect(&frame).unwrap();
+    let s = shut.gp().expect("gp node");
+    assert_eq!(s.kind, tree::GpKind::EncryptedSealed);
+    assert_eq!(s.command_id, None);
+    assert_eq!(note_reasons(&shut), vec!["secured"]);
+    // Slotted: verified open reveals the commissioning envelope.
+    let mut eng = session::SessionEngine::new();
+    eng.set_gp_key(GP_TEST_KEY, true);
+    let open = chain::dissect_with_keys(&frame, eng.keys()).unwrap();
+    let g = open.gp().expect("gp node past the open");
+    assert_eq!(g.command_id, Some(0xe0));
+    assert_eq!(g.kind, tree::GpKind::Commissioning);
+    assert_eq!(g.payload_len, 1);
+    assert_eq!(note_reasons(&open), vec!["decrypted"]);
 }

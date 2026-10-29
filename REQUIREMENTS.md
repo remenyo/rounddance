@@ -1343,4 +1343,65 @@ this HEAD (`~/hwscratch/w51/replay_<t>.log`); report
 |----------------|-------|-------------------|----------------|
 | RD-INSPECT-29 | implemented + verified | `chain` inter-PAN gate (unsecured data outer + destination PAN/destination/source PAN all broadcast → Touchlink leg, never `nwk::decode`; NWK-broadcast data on a joined PAN still routes to NWK) + `interpan` terminal stop (parsed or refused alike) | `inspect/tests/decode_depth.rs::repro_inter_pan_never_enters_nwk` (failing-first: verbatim ch20 scan-rsp hallucinated `mac+nwk+aps+zcl` pre-fix; post-fix both scan shapes file MAC + Touchlink + `interpan`, no NWK/APS/ZCL leg, gate-boundary broadcast still NWK) + replays (c11/c20/c25/probe: 122/122/122/114 `interpan` stops, 480 total, 0 hallucinations, 0 dissect errors) |
 | RD-INSPECT-30 | implemented + verified | `touchlink::decode` (LE transaction + command + exact-length live bodies — scan-req/rsp, start-req/rsp, join-req/rsp; unmodeled commands file `Unknown` with identifier; sub-transaction or wrong-length named shapes refuse; wrapped keys stay sealed) + `tree::{TouchlinkNode, TouchlinkKind}` + `report` text/JSON `touchlink` legs + `inspect-live` depth key + session attribution unchanged (MAC source row, broadcast-PAN network, zero secured accounting) | `inspect/tests/decode_depth.rs::touchlink_envelope_names_all_six_live_shapes` (failing-first: no leg pre-fix; tid/cmd/kind/length asserts on all six verbatim frames + report shapes + session rows + short/wrong-length/unknown-cmd edges) |
-| RD-INSPECT-31 | implemented + verified | `nwk::decode` version gate (`NwkError::BadVersion`: only the stack version 2 continues; Green-Power 3 refuses like any other alien version since no GP leg is modeled) — shared by `dissect` and `dissect_nwk` | `inspect/tests/decode_depth.rs::repro_nwk_version_guard_refuses_ver5` (failing-first: ver-5 header filed an NWK leg pre-fix; ver 5 + ver 3 both stop `mac+unknown` with no NWK leg, ver-2 control still decodes) + `::live_air::captured_corpus_pins_touchlink_w50` (4 pcap hashes + frame counts + per-command census incl. the probe §5.1 start-rsp miss) |
+| RD-INSPECT-31 | implemented + verified | `nwk::decode` version gate (`NwkError::BadVersion`: only the stack version 2 continues; Green-Power 3 refuses like any other alien version since no GP leg is modeled) — shared by `dissect` and `dissect_nwk` (w52 evolution: version-3 shapes now take the GP leg — see RD-INSPECT-32; the bare-NWK path and version-5 shapes still refuse) | `inspect/tests/decode_depth.rs::repro_nwk_version_guard_refuses_ver5` (failing-first: ver-5 header filed an NWK leg pre-fix; ver 5 + ver 3 both stop `mac+unknown` with no NWK leg, ver-2 control still decodes; w52: the version-3 arm now asserts the GP leg) + `::live_air::captured_corpus_pins_touchlink_w50` (4 pcap hashes + frame counts + per-command census incl. the probe §5.1 start-rsp miss) |
+
+## Wave-52 traceability — Green-Power decode leg (lane 2)
+
+Wave-51 lane 1 filed GAP-5 (the inspector has no GP layer: all GPDFs
+stop `unknown` — L 84/84, K 84, H2 28) with pcaps archived as
+`~/hwscratch/w51/lane1_*.pcap` (read-only). The GP frame, security,
+and reply codecs already exist in `rounddance-gp`; this wave adds the
+GPDF decode leg to `rounddance-inspect` (frame control, addressing,
+security/command legs including commissioning + data +
+bidirectional-reply shapes as the captures show; secured legs
+decryptability-gated per `KeySlots` exactly like the wave-49 NWK
+decrypt leg — never decrypt without a slotted key) with regression
+goldens from the w51 pcaps (hashes/metadata in the repo; key bytes
+local-only outside the repo with the documented procedure). No lab
+use, no corpus writes; wording in code/tests is paraphrase only (D1).
+Contract evolution carried from wave 51: RD-INSPECT-31's `ver3` arm
+now files the GP leg — those bytes are a well-formed unsecured GPDF
+(data, SrcId `0x56123400`, command `0x78`), so "version 3 refuses"
+holds only where no GP leg is modeled (bare-NWK path and version-5
+shapes); the RD-INSPECT-31 row below is unchanged history. 2
+repo-minted IDs (`RD-INSPECT-32..33`), MINTED-pending-confirm.
+
+Captured-air vectors: the verbatim w51 lane-1 GPDF octets pinned in
+`inspect/tests/decode_depth.rs` (unsecured data, long + compact
+commissioning, the reply-window ask, counter-protected
+data/decommissioning/commissioning, sealed encrypted sections)
+carry captured-air ciphertext/MIC only — openable solely with the
+lab keys, never embedded — the same class as the committed Ember
+vectors; no key bytes anywhere. The w51 pcaps pin as metadata only:
+`lane1_runA5.pcap` sha256
+`afeca7f063fea6a65e524c1c017ddc613b2ab26716c53ed09ea6120e3c99954b`
+(543 frames, 67 GPDFs), `lane1_runB8.pcap` sha256
+`527c463df6e7d9b62c1d99e2860231a0478865871d08936562be56ea1d59a52a`
+(565 frames, 18 GPDFs), `lane1_runC2.pcap` sha256
+`75e2fbebe1f03e32f6e2c0b6f7b49b49c6ba7359263f2e3736a3992deaae1498`
+(416 frames, 22 GPDFs), `lane1_runD.pcap` sha256
+`e3a8cc20cc3f7a0d1176fe9d61d02aa0ce26ff826a9ee309720eb44eb7fae5f9`
+(599 frames, 80 GPDFs), `lane1_runE.pcap` sha256
+`5057d90aea88218a2e63e0bb1edea31687081914ab44387323d3ab230628ac0e`
+(601 frames, 84 GPDFs), `lane1_runF.pcap` sha256
+`4b18b8e17d3d1da00cda9d1d81768120a47d9bc185c8c033dae7da37b9ec46a5`
+(424 frames, 24 GPDFs), `lane1_runG.pcap` sha256
+`9acd1ef8173753980e370a9573bb3d47840eb690e88622dc6521cc73a612e31a`
+(444 frames, 28 GPDFs), `lane1_runH2.pcap` sha256
+`b047dfedf16acbffaff429d064fb771403495cc0ca6badc72ec59f273b298367`
+(451 frames, 28 GPDFs), `lane1_runK.pcap` sha256
+`75aa318fd3c5106b08553f213a475ef31d5b0d0e26e55c206b1e190ff3e69f67`
+(616 frames, 84 GPDFs), `lane1_runL.pcap` sha256
+`4bebd87075d2a9ecba714b2d6d590580cb29f4efd914fcbe0f7827a33b31317c`
+(559 frames, 84 GPDFs) — 5218 frames, 519 GPDFs total; per-shape
+census unsecured data 46 / commissioning-long 162 / compact 20 /
+counter-protected data 193 / decommissioning 42 / commissioning 10 /
+reply-window ask 10 / sealed encrypted 36 (8 distinct). Offline
+reproduction procedure: `python3 analyze52_gp.py` in `~/hwscratch/w52/`
+(CENSUS PASS: 519/519 GPDFs match the pins); report
+`~/hwscratch/w52/SUMMARY_gp.md`.
+
+| Requirement ID | State | Implementing code | Verifying test |
+|----------------|-------|-------------------|----------------|
+| RD-INSPECT-32 | implemented + verified | `gp::decode` / `decode_opened` (reused `rounddance-gp` codec → `tree::{GpNode, GpKind}`: data vs maintenance, auto-commissioning, source-identifier / IEEE-plus-endpoint / LPED addressing, level / key-bit / rx-after-tx / direction-proxy, frame counter, command envelope — data `0x20`, commissioning `0xE0` long + compact, decommissioning `0xE1`, success `0xE2`, channel-request `0xE3`, commissioning-reply `0xF0`, channel-config `0xF3`, maintenance / LPED-opaque / `EncryptedSealed`; bodies unmodeled) + `chain` GP arm (stack-NWK refusal routes to the GP leg before the historical `unknown`; unsecured legs ride beside `trailing`, protected-but-unverified beside `secured`; stop taxonomy unchanged) + `report` text/JSON `gp` legs + `inspect-live` depth key + RD-INSPECT-31 contract evolution (the version-3 probe bytes file MAC + GP + `trailing`) | `inspect/tests/decode_depth.rs::repro_gpdf_data_stops_unknown_without_leg` + `::repro_gpdf_secured_stops_secured_not_unknown` (failing-first: HEAD-API repros, `unknown` pre-fix) + `::gp_data_leg_names_frame_control_and_addressing` + `::gp_commissioning_leg_names_long_and_compact` + `::gp_bidirectional_request_leg_names_rx_after_tx` (verbatim w51 shapes incl. report legs + session rows) + `::live_air::captured_corpus_pins_gp_w51` (10 pcap hashes + 5218 frames + 519 GPDFs + per-shape census incl. GAP-5 L 84/84, K 84, H2 28) + offline `analyze52_gp.py` CENSUS PASS |
+| RD-INSPECT-33 | implemented + verified | `keys::{GpKeySlot, set_gp_key, gp_key_by_bit, has_gp_key}` (strict wire key-bit match, live-only state — snapshot restore restarts empty, schema stays v1) + `decrypt::open_gp` (CCM* integrity check for the counter-plus-MIC level, decrypt-then-check for the encrypted level, GP nonce + header AAD; `None` on no slot, class miss, proxy-outgoing, LPED/maintenance, or any integrity failure — never decrypts without a slotted key) + `chain` verified-open leg (`decrypted` stop + full command envelope, sealed legs keep `secured`) + `session::note_tree` per-domain gating (NWK slots never cover GP legs, GP slots never cover NWK legs; verified-open tree evidence still counts) | `inspect/tests/decode_depth.rs::gp_secured_mic_only_names_command_beside_secured_stop` (verbatim w51 protected shapes: cleartext command beside `secured`, orphan accounting) + `::gp_encrypted_seals_command_without_key` (sealed shape, no command) + `::gp_decrypt_opens_with_slotted_key_and_stops_without` (synthetic test-only-key seal→open, no-key / wrong-bit / wrong-key / mutated-octet legs, per-domain orphan) + `::gp_encrypted_decrypt_reveals_command_with_slotted_key` + spec worked-example conformance checked locally only (spec printed key, counter-plus-MIC tag + encrypted decrypt — never committed) |

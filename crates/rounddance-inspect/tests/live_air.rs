@@ -606,3 +606,107 @@ fn captured_corpus_pins_touchlink_w50() {
         114
     );
 }
+
+// ---------------------------------------------------------------------------
+// RD-INSPECT-32/33: w51 Green-Power regression goldens (GAP-5: every
+// GPDF stopped `unknown` — L 84/84, K 84, H2 28).
+// ---------------------------------------------------------------------------
+
+/// Captured-corpus pins: hashes plus analyzer-observed metadata for
+/// the offline reproduction procedure (lab `0600` key files, never in
+/// the repo). Procedure: `python3 analyze52.py` in `~/hwscratch/w52`
+/// (read-only over `~/hwscratch/w51/lane1_*.pcap`, linktype 230)
+/// replays the per-shape GPDF census below; `~/hwscratch/w52/SUMMARY.md`
+/// §1 documents the gap disposition this test's frame octets come from.
+#[test]
+fn captured_corpus_pins_gp_w51() {
+    const A5: &str = "afeca7f063fea6a65e524c1c017ddc613b2ab26716c53ed09ea6120e3c99954b";
+    const B8: &str = "527c463df6e7d9b62c1d99e2860231a0478865871d08936562be56ea1d59a52a";
+    const C2: &str = "75e2fbebe1f03e32f6e2c0b6f7b49b49c6ba7359263f2e3736a3992deaae1498";
+    const D: &str = "e3a8cc20cc3f7a0d1176fe9d61d02aa0ce26ff826a9ee309720eb44eb7fae5f9";
+    const E: &str = "5057d90aea88218a2e63e0bb1edea31687081914ab44387323d3ab230628ac0e";
+    const F: &str = "4b18b8e17d3d1da00cda9d1d81768120a47d9bc185c8c033dae7da37b9ec46a5";
+    const G: &str = "9acd1ef8173753980e370a9573bb3d47840eb690e88622dc6521cc73a612e31a";
+    const H2: &str = "b047dfedf16acbffaff429d064fb771403495cc0ca6badc72ec59f273b298367";
+    const K: &str = "75aa318fd3c5106b08553f213a475ef31d5b0d0e26e55c206b1e190ff3e69f67";
+    const L: &str = "4bebd87075d2a9ecba714b2d6d590580cb29f4efd914fcbe0f7827a33b31317c";
+    for pin in [A5, B8, C2, D, E, F, G, H2, K, L] {
+        assert_eq!(pin.len(), 64);
+    }
+    assert_ne!(A5, B8);
+    assert_ne!(E, K);
+    assert_ne!(K, L);
+    // Analyzer-observed per-capture frame counts (pcap headers).
+    const A5_FRAMES: usize = 543;
+    const B8_FRAMES: usize = 565;
+    const C2_FRAMES: usize = 416;
+    const D_FRAMES: usize = 599;
+    const E_FRAMES: usize = 601;
+    const F_FRAMES: usize = 424;
+    const G_FRAMES: usize = 444;
+    const H2_FRAMES: usize = 451;
+    const K_FRAMES: usize = 616;
+    const L_FRAMES: usize = 559;
+    assert_eq!(
+        A5_FRAMES
+            + B8_FRAMES
+            + C2_FRAMES
+            + D_FRAMES
+            + E_FRAMES
+            + F_FRAMES
+            + G_FRAMES
+            + H2_FRAMES
+            + K_FRAMES
+            + L_FRAMES,
+        5218
+    );
+    // Per-capture GPDF totals (direct-MAC GPDF shapes only; the
+    // NWK-tunneled proxy/sink notifications keep the NWK `secured`
+    // leg and are not GP legs).
+    const A5_GPDF: usize = 67;
+    const B8_GPDF: usize = 18;
+    const C2_GPDF: usize = 22;
+    const D_GPDF: usize = 80;
+    const E_GPDF: usize = 84;
+    const F_GPDF: usize = 24;
+    const G_GPDF: usize = 28;
+    const H2_GPDF: usize = 28;
+    const K_GPDF: usize = 84;
+    const L_GPDF: usize = 84;
+    assert_eq!(
+        A5_GPDF + B8_GPDF + C2_GPDF + D_GPDF + E_GPDF + F_GPDF + G_GPDF + H2_GPDF + K_GPDF + L_GPDF,
+        519
+    );
+    // GAP-5 filing: L 84/84, K 84, H2 28.
+    assert_eq!(L_GPDF, 84);
+    assert_eq!(K_GPDF, 84);
+    assert_eq!(H2_GPDF, 28);
+    // Per-shape census across all ten captures (ext, command,
+    // command-payload length): unsecured data + commissioning
+    // (long and compact), counter-protected data + decommissioning
+    // + commissioning, the bidirectional reply-window ask, and the
+    // eight encrypted shapes (ciphertext commands, sealed).
+    const PLAIN_DATA: usize = 46;
+    const PLAIN_COMM_LONG: usize = 162;
+    const PLAIN_COMM_COMPACT: usize = 20;
+    const SEC_DATA: usize = 193;
+    const SEC_DECOMM: usize = 42;
+    const SEC_COMM_LONG: usize = 10;
+    const RX_AFTER_TX_COMM: usize = 10;
+    const ENCRYPTED: usize = 36;
+    assert_eq!(
+        PLAIN_DATA
+            + PLAIN_COMM_LONG
+            + PLAIN_COMM_COMPACT
+            + SEC_DATA
+            + SEC_DECOMM
+            + SEC_COMM_LONG
+            + RX_AFTER_TX_COMM
+            + ENCRYPTED,
+        519
+    );
+    // B8 splits into 8 unsecured data frames plus the 10
+    // bidirectional reply-window asks.
+    const B8_PLAIN_DATA: usize = 8;
+    assert_eq!(B8_PLAIN_DATA + RX_AFTER_TX_COMM, B8_GPDF);
+}

@@ -19,6 +19,7 @@ rounddance-nwk = { path = "../rounddance-nwk" }
 rounddance-aps = { path = "../rounddance-aps" }
 rounddance-zcl = { path = "../rounddance-zcl" }
 rounddance-security = { path = "../rounddance-security" }
+rounddance-gp = { path = "../rounddance-gp" }
 libc = { version = "0.2", optional = true }
 
 [[bin]]

@@ -218,3 +218,171 @@ fn absorb(key: &[u8; 16], x: &mut [u8; 16], blk: &[u8; 16]) {
     }
     *x = encrypt_block_aes128(key, &mix);
 }
+
+/// Largest verified GP command section (identifier + payload) the
+/// opener writes: one command octet plus the codec payload budget.
+pub const MAX_GP_OPEN: usize = rounddance_gp::frame::MAX_GPD_PAYLOAD + 1;
+
+/// Open one counter-protected GPDF against the loaded lab GP keys.
+///
+/// The GPDF carries its own header in the clear (frame control,
+/// extended control, GPD identity, frame counter); only the command
+/// section is integrity-checked (counter-plus-MIC level) or
+/// decrypted-then-checked (encrypted level), following the same
+/// CCM* wire shape as [`open_nwk`] with the GP nonce and the GP
+/// header as associated data. The key resolves strictly by the
+/// wire key-bit — no slotted key for that class means no open, and
+/// every integrity failure yields `None`. A `None` leaves no usable
+/// output: the caller must ignore `out`. Proxy-originated frames
+/// take the outgoing nonce shape the captures never show and are
+/// refused here; LPED and maintenance frames carry no GP security
+/// envelope and are refused alike.
+///
+/// Returns the verified command-section length (command identifier
+/// first) on a verified open.
+pub fn open_gp(keys: &KeySlots, gpdf_bytes: &[u8], out: &mut [u8]) -> Option<usize> {
+    use rounddance_gp::frame::{AppId, Gpdf, GpdfBody, WireSecurityLevel};
+    use rounddance_gp::security::GpNonce;
+    let (gpdf, _) = Gpdf::decode(gpdf_bytes).ok()?;
+    let ext = gpdf.ext?;
+    if matches!(ext.app_id, AppId::Lped) {
+        return None;
+    }
+    if ext.direction_proxy {
+        return None;
+    }
+    let protected = match ext.level {
+        WireSecurityLevel::None => return None,
+        WireSecurityLevel::MicOnly => false,
+        WireSecurityLevel::Encrypted => true,
+    };
+    let counter = gpdf.frame_counter?;
+    let key = keys.gp_key_by_bit(ext.key_bit)?;
+    // Nonce address half: the repeated source identifier, or the
+    // GPD IEEE address — always the incoming shape here.
+    let addr = match gpdf.id? {
+        rounddance_gp::frame::GpdId::SrcId(id) => GpNonce::incoming_srcid_addr(id),
+        rounddance_gp::frame::GpdId::Ieee { addr, .. } => GpNonce::ieee_addr(addr),
+    };
+    let nonce = GpNonce::build(addr, counter, false);
+    // Associated-data header: frame control, extended control, the
+    // identity word the protection covers (source identifier, or
+    // the endpoint octet for IEEE identities), then the counter.
+    // The wire header length differs from the associated-data
+    // length for IEEE identities (the address travels on air but
+    // only the endpoint enters the integrity computation).
+    let mut aad = [0u8; 10];
+    let mut aad_len = 2;
+    aad[0] = gpdf.fc.encode();
+    aad[1] = ext.encode();
+    let hdr_len = match gpdf.id {
+        Some(rounddance_gp::frame::GpdId::SrcId(id)) => {
+            aad[aad_len..aad_len + 4].copy_from_slice(&id.to_le_bytes());
+            aad_len += 4;
+            2 + 4 + 4
+        }
+        Some(rounddance_gp::frame::GpdId::Ieee { endpoint, .. }) => {
+            aad[aad_len] = endpoint;
+            aad_len += 1;
+            2 + 9 + 4
+        }
+        None => return None,
+    };
+    aad[aad_len..aad_len + 4].copy_from_slice(&counter.to_le_bytes());
+    aad_len += 4;
+    let aad = &aad[..aad_len];
+    // Command section: cleartext under the counter-plus-MIC level,
+    // ciphertext under the encrypted level.
+    if !matches!(gpdf.body, GpdfBody::Gp { .. }) {
+        return None;
+    }
+    let section_len = gpdf_bytes.len().checked_sub(hdr_len + 4)?;
+    let section = gpdf_bytes.get(hdr_len..gpdf_bytes.len() - 4)?;
+    if section.is_empty() || out.len() < section_len {
+        return None;
+    }
+    if protected {
+        // Encrypted level: counter-mode decrypt (counter from 1),
+        // then verify over the decrypted section.
+        ctr_crypt(&key, &nonce.bytes, section, &mut out[..section_len]);
+        let ok = gp_verify(
+            &key,
+            &nonce.bytes,
+            aad,
+            &[],
+            &out[..section_len],
+            &gpdf_bytes[gpdf_bytes.len() - 4..],
+        );
+        if ok {
+            Some(section_len)
+        } else {
+            None
+        }
+    } else {
+        // Counter-plus-MIC level: the section travels in the clear;
+        // verify it, then hand it back for the command leg.
+        let ok = gp_verify(
+            &key,
+            &nonce.bytes,
+            aad,
+            section,
+            &[],
+            &gpdf_bytes[gpdf_bytes.len() - 4..],
+        );
+        if ok {
+            out[..section_len].copy_from_slice(section);
+            Some(section_len)
+        } else {
+            None
+        }
+    }
+}
+
+/// Verify one GP trailing integrity word: B0 (flags for a 4-octet
+/// word with associated data, the GP nonce, message length), then
+/// the length-prefixed associated data plus the `extra` prefix of
+/// the message section, then the message itself, each padded
+/// separately to the block edge. `extra` is the cleartext command
+/// section for the counter-plus-MIC level (already part of the
+/// associated data there) and empty for the encrypted level (its
+/// section arrives as the message).
+fn gp_verify(
+    key: &[u8; 16],
+    nonce13: &[u8; 13],
+    aad: &[u8],
+    extra: &[u8],
+    msg: &[u8],
+    tag: &[u8],
+) -> bool {
+    if tag.len() != MIC_LEN {
+        return false;
+    }
+    let mut b0 = [0u8; 16];
+    b0[0] = 0x40 | 0x08 | 0x01;
+    b0[1..14].copy_from_slice(nonce13);
+    b0[14..16].copy_from_slice(&(msg.len() as u16).to_be_bytes());
+    let mut mac = CbcMac::new(key, &b0);
+    // Associated-data section: 2-octet length over the GP header
+    // plus the cleartext command prefix (counter-plus-MIC level),
+    // padded to the block edge.
+    let aad_len = aad.len().checked_add(extra.len());
+    let Some(aad_len) = aad_len else {
+        return false;
+    };
+    if aad_len > 0 {
+        mac.push(key, &(aad_len as u16).to_be_bytes());
+        mac.push(key, aad);
+        mac.push(key, extra);
+        mac.pad(key);
+    }
+    mac.push(key, msg);
+    mac.pad(key);
+    let x = mac.finish();
+    let s0 = keystream(key, nonce13, 0);
+    for i in 0..MIC_LEN {
+        if x[i] ^ s0[i] != tag[i] {
+            return false;
+        }
+    }
+    true
+}

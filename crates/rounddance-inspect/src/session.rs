@@ -89,7 +89,7 @@ pub struct DeviceEntry {
     pub last_seq: u8,
     /// Frames attributed to this device.
     pub frames: u32,
-    /// NWK-secured frames attributed here.
+    /// Key-protected (NWK- or GP-secured) frames attributed here.
     pub secured: u32,
     /// NWK sequence replay window (once a NWK header is seen).
     pub nwk_window: Option<SeqWindow>,
@@ -119,7 +119,7 @@ pub struct NetworkEntry {
     pub frames: u32,
     /// Distinct short addresses seen on this PAN (saturates at 255).
     pub devices: u8,
-    /// NWK-secured frames on this PAN.
+    /// Key-protected (NWK- or GP-secured) frames on this PAN.
     pub secured: u32,
     /// First-seen short addresses (dedup cache for [`Self::devices`];
     /// stops learning when full — the counter keeps saturating but a
@@ -138,9 +138,10 @@ pub struct SessionEngine {
     now: u32,
     /// Trees folded so far.
     pub trees: u32,
-    /// Secured NWK frames seen while a key slot was loaded.
+    /// Key-protected frames seen while a slot for the sealed domain
+    /// was loaded (or verified open at the dissector).
     pub secured_decryptable: u32,
-    /// Secured NWK frames seen with no key slot loaded.
+    /// Key-protected frames seen with no slot for the sealed domain.
     pub secured_orphan: u32,
 }
 
@@ -168,6 +169,13 @@ impl SessionEngine {
     /// Operator key loading: delegates to the key slots.
     pub fn set_network_key(&mut self, key: [u8; 16], seq: u8) {
         self.keys.set_network_key(key, seq);
+    }
+
+    /// Operator GP key loading: delegates to the GP key slots (live
+    /// state only — a snapshot restore restarts with no GP key, and
+    /// the schema stays at v1).
+    pub fn set_gp_key(&mut self, key: [u8; 16], key_bit: bool) {
+        self.keys.set_gp_key(key, key_bit);
     }
 
     /// Drop all loaded keys.
@@ -218,14 +226,21 @@ impl SessionEngine {
         // one, else the source PAN (beacons name only their source
         // PAN), else PAN 0 (acknowledgements name no PAN at all).
         let pan = mac.and_then(|m| m.dst_pan.or(m.src_pan)).unwrap_or(0);
-        let secured = nwk.map(|n| n.security).unwrap_or(false);
+        let nwk_sec = nwk.map(|n| n.security).unwrap_or(false);
+        let gp_sec = tree.gp().map(|g| g.secured).unwrap_or(false);
+        let secured = nwk_sec || gp_sec;
         if secured {
             // A verified-open leg is decryptable from tree evidence
             // even when this engine holds no key slot itself (keys
             // may reach only the dissector, as in the keyed-glue
-            // path); otherwise a loaded slot still marks the frame
-            // decryptable-offline, exactly as before.
-            if tree.decrypted() || self.keys.has_key() {
+            // path); otherwise a slot loaded for the sealed domain
+            // still marks the frame decryptable-offline — NWK slots
+            // never cover GP legs, and GP slots never cover NWK
+            // legs — exactly as before for NWK-only trees.
+            let covered = tree.decrypted()
+                || (nwk_sec && self.keys.has_key())
+                || (gp_sec && self.keys.has_gp_key());
+            if covered {
                 self.secured_decryptable = self.secured_decryptable.saturating_add(1);
             } else {
                 self.secured_orphan = self.secured_orphan.saturating_add(1);

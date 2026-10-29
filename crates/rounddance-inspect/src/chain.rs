@@ -11,9 +11,11 @@
 //! MAC command payloads ([`mac`](crate::mac)), NWK command payloads
 //! on unsecured as well as verified-open legs ([`nwkcmd`](crate::nwkcmd)),
 //! the Touchlink envelope on broadcast-PAN outers
-//! ([`touchlink`](crate::touchlink)), and the ZDO envelope on profile
-//! `0x0000` ([`zdo`](crate::zdo)) instead of a ZCL misparse. The
-//! terminal stop taxonomy never moves for a named leg: the note
+//! ([`touchlink`](crate::touchlink)), the ZDO envelope on profile
+//! `0x0000` ([`zdo`](crate::zdo)) instead of a ZCL misparse, and the
+//! Green-Power device frame on payloads the stack NWK codec refuses
+//! ([`gp`](crate::gp)). The terminal stop taxonomy never moves for
+//! a named leg: the note
 //! still files the remainder (zero when the leg consumes the
 //! payload).
 //!
@@ -145,15 +147,69 @@ pub fn dissect_with_keys(frame: &[u8], keys: &KeySlots) -> Result<DecodeTree, Tr
             rest = payload;
         }
         Err(_) => {
-            // Not a Zigbee NWK payload (inter-PAN shapes route to
-            // the Touchlink leg above and never reach this arm):
-            // record the stop and keep the MAC node.
-            stop(&mut tree, "unknown", rest.len());
-            return Ok(tree);
+            // Not a stack NWK payload: Green-Power device frames
+            // ride straight in the MAC payload (stub NWK, version
+            // 3), so a refused NWK header earns a GP leg attempt
+            // before the historical `unknown` stop. Anything the GP
+            // codec also refuses keeps the stop with the MAC node.
+            return finish_gp_or_unknown(tree, rest, keys);
         }
     }
 
     finish_after_nwk(tree, rest)
+}
+
+/// Attempt the Green-Power leg on bytes the stack NWK codec
+/// refused: a decoded GPDF names its leg beside a terminal stop, an
+/// undecodable payload keeps the historical `unknown` stop. The
+/// command envelope of a counter-protected GPDF is named from the
+/// cleartext travel (counter-plus-MIC level) or sealed (encrypted
+/// level) until a slotted GP key verifies it open — exactly the
+/// slotted-key gate of the NWK decrypt leg, so no protected GPDF
+/// ever decrypts without a slotted key.
+fn finish_gp_or_unknown(
+    mut tree: DecodeTree,
+    rest: &[u8],
+    keys: &KeySlots,
+) -> Result<DecodeTree, TreeError> {
+    let node = match crate::gp::decode(rest) {
+        Ok(node) => node,
+        Err(_) => {
+            stop(&mut tree, "unknown", rest.len());
+            return Ok(tree);
+        }
+    };
+    if !node.secured {
+        tree.push(Layer::Gp(node));
+        stop(&mut tree, "trailing", 0);
+        return Ok(tree);
+    }
+    // Counter-protected GPDF: the stop stays `secured` unless a
+    // slotted GP key verifies the section open.
+    let mut scratch = [0u8; decrypt::MAX_GP_OPEN];
+    match decrypt::open_gp(keys, rest, &mut scratch) {
+        Some(n) => match scratch.get(..n) {
+            Some(plain) => match crate::gp::decode_opened(rest, plain) {
+                Ok(opened) => {
+                    tree.push(Layer::Gp(opened));
+                    stop(&mut tree, "decrypted", 0);
+                }
+                Err(_) => {
+                    tree.push(Layer::Gp(node));
+                    stop(&mut tree, "secured", rest.len());
+                }
+            },
+            None => {
+                tree.push(Layer::Gp(node));
+                stop(&mut tree, "secured", rest.len());
+            }
+        },
+        None => {
+            tree.push(Layer::Gp(node));
+            stop(&mut tree, "secured", rest.len());
+        }
+    }
+    Ok(tree)
 }
 
 /// Continue the chain on a plaintext / plain NWK payload: NWK

@@ -1111,6 +1111,7 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "rounddance-aps",
+ "rounddance-gp",
  "rounddance-mac-sap",
  "rounddance-nwk",
  "rounddance-security",
