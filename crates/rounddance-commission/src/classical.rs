@@ -71,6 +71,23 @@ pub const JOINER_TRANSPORT_GRACE_TICKS: u32 = 10;
 /// delivery the joiner is waiting for.
 pub const TRANSPORT_KEY_TYPE_NETWORK: u8 = 0x01;
 
+/// Key-type field selecting the unique Trust-Center link key inside
+/// the transport-key command. The joiner-initiated update the lab
+/// coordinator answers carries this type; it shares the value the
+/// symmetric key-attribute marker carries
+/// ([`KeyAttributes::SYMMETRIC`], `22-65816-030-91-02`) and is named
+/// separately because this is the on-air key-type field, not the
+/// attribute record.
+///
+/// Requirement `RD-SIM-01` (repo-minted, MINTED-pending-confirm).
+pub const TRANSPORT_KEY_TYPE_TCLK: u8 = 0x04;
+
+/// Confirm-Key status naming success: only this value authorizes the
+/// updated link key; any other status fails the update.
+///
+/// Requirement `RD-SIM-01` (repo-minted, MINTED-pending-confirm).
+pub const CONFIRM_KEY_STATUS_SUCCESS: u8 = 0x00;
+
 /// Classical-join failures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JoinError {
@@ -665,6 +682,209 @@ impl JoinerMachine {
             return;
         }
         self.state = JoinerState::Joined;
+    }
+}
+
+/// Joiner-side sequencing of the Trust-Center link-key (TCLK) update
+/// on an already-joined device: request → transport-classify →
+/// open-latch → verify → confirm-status → authorized.
+///
+/// The air shape this sequences is the wave-61 stay-joined flow: the
+/// joiner emits a Request-Key naming the link-key type, the Trust
+/// Center answers with a transport-key command naming that type, the
+/// joiner latches the fresh key after the caller checks the open
+/// (integrity valid, key differs from the stored one — the key bytes
+/// themselves never enter this crate), emits its Verify-Key, and the
+/// Confirm-Key status decides: success authorizes and the device
+/// stays joined; anything else fails the attempt without touching
+/// the existing network membership. A parent eject received
+/// mid-update ends the attempt at once with
+/// [`JoinError::JoinTimeout`]; a silent peer ends it with
+/// [`JoinError::NoTransport`].
+///
+/// Requirement `RD-SIM-01` (repo-minted, MINTED-pending-confirm).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TclkState {
+    /// Created; the request has not gone out.
+    Idle,
+    /// Request-Key emitted; waiting on the TCLK transport.
+    RequestSent,
+    /// TCLK transport classified; waiting on the caller's open.
+    KeyWait,
+    /// Fresh key latched and Verify-Key emitted; waiting on Confirm.
+    VerifySent,
+    /// Confirm-Key success: updated key authorized, still joined.
+    Authorized,
+    /// Terminal failure (see [`TclkUpdate::error`]).
+    Failed,
+}
+
+/// Joiner-side driver for the link-key update.
+#[derive(Debug, Clone, Copy)]
+pub struct TclkUpdate {
+    state: TclkState,
+    error: Option<JoinError>,
+    tclk_latched: bool,
+}
+
+impl TclkUpdate {
+    /// Create idle: no request emitted, nothing latched.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            state: TclkState::Idle,
+            error: None,
+            tclk_latched: false,
+        }
+    }
+
+    /// Current state.
+    #[must_use]
+    pub const fn state(&self) -> TclkState {
+        self.state
+    }
+
+    /// Terminal failure cause, if any.
+    #[must_use]
+    pub const fn error(&self) -> Option<JoinError> {
+        self.error
+    }
+
+    /// Whether the fresh link key latched from a checked transport
+    /// open. Set only by a successful [`TclkUpdate::on_transport_open`];
+    /// never set by classification, verify, or timeouts.
+    #[must_use]
+    pub const fn tclk_latched(&self) -> bool {
+        self.tclk_latched
+    }
+
+    fn fail(&mut self, err: JoinError) {
+        self.state = TclkState::Failed;
+        self.error = Some(err);
+    }
+
+    /// Emit the Request-Key: `Idle` moves to `RequestSent`; anywhere
+    /// else this is a caller bug ([`JoinError::BadState`]).
+    pub fn begin(&mut self) {
+        if self.state == TclkState::Idle {
+            self.state = TclkState::RequestSent;
+        } else {
+            self.fail(JoinError::BadState);
+        }
+    }
+
+    /// Classify one post-request APS command frame by its decrypted
+    /// command id and key-type field: the update the lab coordinator
+    /// answers carries the (`TRANSPORT_KEY_CMD`,
+    /// `TRANSPORT_KEY_TYPE_TCLK`) pair and nothing else. A matching
+    /// frame moves `RequestSent` to `KeyWait` (a repeat in `KeyWait`
+    /// is tolerated without effect); any other pair leaves the wait
+    /// unchanged — it is counted nowhere and latches nothing, so a
+    /// network-key-typed or foreign first frame can never promote the
+    /// update. Outside the post-request states the frame is ignored.
+    ///
+    /// Requirement `RD-SIM-01` (repo-minted, MINTED-pending-confirm).
+    pub fn note_transport_frame(&mut self, cmd_id: u8, key_type: u8) {
+        let genuine = cmd_id == TRANSPORT_KEY_CMD && key_type == TRANSPORT_KEY_TYPE_TCLK;
+        match self.state {
+            TclkState::RequestSent if genuine => {
+                self.state = TclkState::KeyWait;
+            }
+            _ => {}
+        }
+    }
+
+    /// Open one classified TCLK transport frame: the caller hands over
+    /// the auxiliary-layer open outcome — whether the integrity check
+    /// passed (`mic_ok`, computed by the caller with the key-load key,
+    /// which never enters this crate). Success latches the fresh key
+    /// (`tclk_latched`) and stays in `KeyWait` for the verify round;
+    /// a MIC failure ends the attempt with
+    /// [`JoinError::ConfirmMismatch`] (a tampered or forged transport
+    /// never promotes). Called outside `KeyWait` this is a caller bug
+    /// ([`JoinError::BadState`]).
+    ///
+    /// Requirement `RD-SIM-01` (repo-minted, MINTED-pending-confirm).
+    pub fn on_transport_open(&mut self, mic_ok: bool) {
+        if self.state != TclkState::KeyWait {
+            self.fail(JoinError::BadState);
+            return;
+        }
+        if !mic_ok {
+            self.fail(JoinError::ConfirmMismatch);
+            return;
+        }
+        self.tclk_latched = true;
+    }
+
+    /// Report that the Verify-Key went out: moves a latched `KeyWait`
+    /// to `VerifySent`. Without a latched key — or outside `KeyWait`
+    /// — this is a caller bug ([`JoinError::BadState`]).
+    ///
+    /// Requirement `RD-SIM-01` (repo-minted, MINTED-pending-confirm).
+    pub fn note_verify_sent(&mut self) {
+        if self.state != TclkState::KeyWait || !self.tclk_latched {
+            self.fail(JoinError::BadState);
+            return;
+        }
+        self.state = TclkState::VerifySent;
+    }
+
+    /// Confirm-Key outcome: `status ==
+    /// CONFIRM_KEY_STATUS_SUCCESS` authorizes the latched key (the
+    /// device stays joined); any other status fails with
+    /// [`JoinError::ConfirmMismatch`]. Called outside `VerifySent`
+    /// this is a caller bug ([`JoinError::BadState`]).
+    ///
+    /// Requirement `RD-SIM-01` (repo-minted, MINTED-pending-confirm).
+    pub fn on_confirm(&mut self, status: u8) {
+        if self.state != TclkState::VerifySent {
+            self.fail(JoinError::BadState);
+            return;
+        }
+        if status != CONFIRM_KEY_STATUS_SUCCESS {
+            self.fail(JoinError::ConfirmMismatch);
+            return;
+        }
+        self.state = TclkState::Authorized;
+    }
+
+    /// Report that the update wait ended with no TCLK transport frame.
+    /// Fails with [`JoinError::NoTransport`] from the waiting states
+    /// (`RequestSent`, `KeyWait`, `VerifySent`); [`JoinError::BadState`]
+    /// anywhere else.
+    pub fn on_transport_timeout(&mut self) {
+        if matches!(
+            self.state,
+            TclkState::RequestSent | TclkState::KeyWait | TclkState::VerifySent
+        ) {
+            self.fail(JoinError::NoTransport);
+        } else {
+            self.fail(JoinError::BadState);
+        }
+    }
+
+    /// Report an incoming NWK leave received mid-update: the parent
+    /// ejected this device, so the attempt ends now instead of polling
+    /// until the transport timeout. Fails with [`JoinError::JoinTimeout`]
+    /// — the "asked to leave" outcome — from the waiting states
+    /// (`RequestSent`, `KeyWait`, `VerifySent`); [`JoinError::BadState`]
+    /// anywhere else.
+    pub fn on_leave(&mut self) {
+        if matches!(
+            self.state,
+            TclkState::RequestSent | TclkState::KeyWait | TclkState::VerifySent
+        ) {
+            self.fail(JoinError::JoinTimeout);
+        } else {
+            self.fail(JoinError::BadState);
+        }
+    }
+}
+
+impl Default for TclkUpdate {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

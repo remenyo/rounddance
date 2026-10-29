@@ -1653,8 +1653,9 @@ now frames through the same path (replay output byte-identical
 before/after over 1486 frames). Reproduce-then-fix per behavior
 (HEAD-API repros failed first: no `stream` module existed; a
 framer overflow-discard bug and a decryptable-count expectation
-were fixed against the shared wire math). 2 repo-minted IDs
-(`RD-INSPECT-39..40`), MINTED-pending-confirm. Also carried from
+were fixed against the shared wire math).2 repo-minted IDs
+(`RD-INSPECT-39..40`), MINTED at mint; CONFIRMED via corpus sweep-46
+(0 corrections / 0 REJECT). Also carried from
 wave-64: `RD-GP-01..06` flipped MINTED-pending-confirm →
 CONFIRMED via corpus sweep-45 (0 corrections / 0 REJECT), rows and
 preamble updated in place. No lab use, no corpus writes; wording
@@ -1681,5 +1682,43 @@ byte-identically before/after the rewire (`/tmp/w65base` vs
 
 | Requirement ID | State | Implementing code | Verifying test |
 |----------------|-------|-------------------|----------------|
-| RD-INSPECT-39 | implemented + verified | `stream::{Framer, parse_line, Parse, LineFrame}` (512-octet bounded line buffer, overlong resync with drop counting, shed-only-straddler backpressure with delivered+dropped accounting identity, CR strip, held tails; no-alloc hex decode with FCS strip + `power:`/`lqi:` defaults matching the shared parser field-for-field; `TooLong` instead of silent truncation) + `Default` + `no_std`/`forbid(unsafe_code)` core | `inspect/tests/stream_ingest.rs::repro_no_streaming_framer` (failing-first) + `::framer_reassembles_split_lines_identically` (byte-at-a-time + prime-chunk splits vs drained baseline, bulk-shed accounting identity) + `::framer_strips_cr_and_holds_partial_tails` + `::framer_resyncs_after_overlong_noise` + `::line_parser_matches_shared_parser_on_recorded_lines` (recorded-line parity vs `sniffer::parse_received` incl. FCS strip, quirk power, defaults, skip legs, `TooLong`) + `stream::tests` unit legs (wire shape, shed-preserves-framed, int-token edges) |
-| RD-INSPECT-40 | implemented + verified | `stream::{Ingest, Step}` (byte pushes, per-complete-line drain: parse → `dissect_with_keys` → `set_radio` → `note_tree`; `Ignored`/`Oversize`/`Frame` steps with frame/error/ignored/oversize counters; snapshots valid after any step) + `inspect-live` `NrfListener` rewire onto `Framer` + `parse_line` (same listener errors, live == replay == stream by shared semantics) | `inspect/tests/stream_ingest.rs::repro_no_incremental_session_ingest` (failing-first) + `::stream_ingest_matches_batch_frame_for_frame` (recorded excerpt + synthetic sealed leg under a slotted test key: identical trees in order + identical snapshot after every frame across 3 chunk schedules; decryptable 2 / orphan 0 on both arms) + `::stream_ingest_isolates_noise_from_the_session` (shell noise, overlong burst, split frame) + local full-set parity (`replay65.log`, 15377 frames ALL PASS) + binary replay byte-identical pre/post rewire (1486 frames) |
+| RD-INSPECT-39 | implemented + verified, CONFIRMED (sweep-46) | `stream::{Framer, parse_line, Parse, LineFrame}` (512-octet bounded line buffer, overlong resync with drop counting, shed-only-straddler backpressure with delivered+dropped accounting identity, CR strip, held tails; no-alloc hex decode with FCS strip + `power:`/`lqi:` defaults matching the shared parser field-for-field; `TooLong` instead of silent truncation) + `Default` + `no_std`/`forbid(unsafe_code)` core | `inspect/tests/stream_ingest.rs::repro_no_streaming_framer` (failing-first) + `::framer_reassembles_split_lines_identically` (byte-at-a-time + prime-chunk splits vs drained baseline, bulk-shed accounting identity) + `::framer_strips_cr_and_holds_partial_tails` + `::framer_resyncs_after_overlong_noise` + `::line_parser_matches_shared_parser_on_recorded_lines` (recorded-line parity vs `sniffer::parse_received` incl. FCS strip, quirk power, defaults, skip legs, `TooLong`) + `stream::tests` unit legs (wire shape, shed-preserves-framed, int-token edges) |
+| RD-INSPECT-40 | implemented + verified, CONFIRMED (sweep-46) | `stream::{Ingest, Step}` (byte pushes, per-complete-line drain: parse → `dissect_with_keys` → `set_radio` → `note_tree`; `Ignored`/`Oversize`/`Frame` steps with frame/error/ignored/oversize counters; snapshots valid after any step) + `inspect-live` `NrfListener` rewire onto `Framer` + `parse_line` (same listener errors, live == replay == stream by shared semantics) | `inspect/tests/stream_ingest.rs::repro_no_incremental_session_ingest` (failing-first) + `::stream_ingest_matches_batch_frame_for_frame` (recorded excerpt + synthetic sealed leg under a slotted test key: identical trees in order + identical snapshot after every frame across 3 chunk schedules; decryptable 2 / orphan 0 on both arms) + `::stream_ingest_isolates_noise_from_the_session` (shell noise, overlong burst, split frame) + local full-set parity (`replay65.log`, 15377 frames ALL PASS) + binary replay byte-identical pre/post rewire (1486 frames) |
+
+## Wave-66 traceability — TCLK stay-joined sim (lane 2)
+
+Wave-61 lane 1 proved the joiner-initiated TCLK update on air (3/3
+cycles vs ZBOSS, first-try CONFIRM `0x00`, ~78.8 s joined,
+`DEVICE_AUTHORIZED`, zero TC→joiner Leaves; evidence
+`~/hwscratch/w61/lane1/SUMMARY.md`) but `rounddance-sim` had no TCLK
+scenario: the join side only modeled the network-key wait
+(`JoinerMachine::note_transport_frame` promotes on `0x05`/`0x01`),
+and the Trust-Center side only exercised `exchange_key` with the
+install-code path. This wave lands the update sequencing plus the
+decision-matched sim scenario. Reproduce-then-fix per behavior
+(HEAD-API repro failed first: no `TclkUpdate` module existed; a
+10 s-spare assertion was corrected to the 9.98 s air margin). 2
+repo-minted IDs (`RD-SIM-01..02`), MINTED-pending-confirm. Also
+carried from wave-65: `RD-INSPECT-39..40` flipped
+MINTED-pending-confirm → CONFIRMED via corpus sweep-46 (0
+corrections / 0 REJECT), rows and preamble updated in place. No lab
+use, no corpus writes; wording in code/tests is paraphrase only (D1).
+
+Decision-matched timeline (w61 cycle-1 air: latch 2.21, req 3.45,
+tclk 3.67, verify 5.45, confirm 5.83, joined 78.75 s): the scenario
+sends each leg over one `ScriptedRadio`, consuming one scripted
+delay per send, so send-to-send spacings replay the air gaps
+exactly — latch→transport 1.46 s, transport→verify 1.78 s,
+verify→confirm 0.38 s, latch→CONFIRM 3.62 s (~3.6 s cited) inside
+the ~13.6 s eject budget with ~10 s to spare (9.98 s), then one
+acked poll at the far end of the 78.75 s joined span
+(~78.8 s cited) with the TC `tick` reporting zero evictions. The
+medium carries one-octet opaque leg tags only — crypto and command
+encoding stay off-repo (same discipline as `join_tc_first.rs`):
+the classified decision fields are handed to the machines exactly
+as the hwscratch offline open hands its fields to its battery.
+
+| Requirement ID | State | Implementing code | Verifying test |
+|----------------|-------|-------------------|----------------|
+| RD-SIM-01 | implemented + verified | `commission::classical::{TclkUpdate, TclkState}` (joiner-side update sequencing on an already-joined device: `begin` request-once; `note_transport_frame` exact-pair `0x05`/`TRANSPORT_KEY_TYPE_TCLK` classification, foreign-first tolerated; `on_transport_open` MIC latch `tclk_latched`, stays for the verify round; `note_verify_sent` latched-only gate; `on_confirm` success-only authorize to `Authorized`; `NoTransport`/`JoinTimeout`/`BadState` edges) + `TRANSPORT_KEY_TYPE_TCLK` (`0x04`, the on-air key-type field) + `CONFIRM_KEY_STATUS_SUCCESS` (`0x00`) | `commission/tests/vectors.rs::vector_tclk_update_transcript_rd_sim_01` (failing-first via the sim HEAD-API repro: full request→classify→open→verify→confirm transcript; foreign-first tolerated) + `::vector_tclk_bad_confirm_never_authorizes_rd_sim_01` + `::vector_tclk_mic_fail_never_latches_rd_sim_01` + `::vector_tclk_out_of_order_is_bad_state_rd_sim_01` + `::vector_tclk_wait_timeouts_and_eject_rd_sim_01` |
+| RD-SIM-02 | implemented + verified | `sim/tests/tclk_stay_joined.rs` (phase-0 TC-first join to `Joined` + TC admit/verify, then the four update legs plus a stay-joined poll over one `ScriptedRadio`: request → TCLK transport (`exchange_key` fresh≠stored) → verify → confirm `0x00` (both sides authorize) → acked poll; opaque leg tags, exact-delay script; latch→CONFIRM == 3.62 s asserted, budget 13.6 s with 9.98 s spare asserted, end−latch ≥ 78.75 s asserted, TC `tick` zero-eviction asserted, trace leave-free asserted) | `sim/tests/tclk_stay_joined.rs::tclk_stay_joined_first_try_no_leave` (failing-first: missing `TclkUpdate` API; exact decision-log pin) + `::tclk_stay_joined_replay_is_deterministic` (same seed+script → identical log + trace; second seed decides identically) + `::tclk_eject_mid_update_never_authorizes` (mid-update eject → `JoinTimeout`, never `Authorized`) |

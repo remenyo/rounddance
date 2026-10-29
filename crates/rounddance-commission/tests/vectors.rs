@@ -4,7 +4,7 @@
 //! Byte strings and transcripts below are hand-computed from the
 //! paraphrased layouts — never spec text (D1, `SCOPE.md` §2).
 //! Requirement IDs: corpus-mined `22-65816-030-*`; repo-minted
-//! `05-3474-23-*` / `07-5123-08-*` (dots stripped),
+//! `05-3474-23-*` / `07-5123-08-*` (dots stripped) / `RD-SIM-*`,
 //! MINTED-pending-confirm. Derived values carrying a `MOCK` comment
 //! pin self-consistency of the [`rounddance_security::mock`] backend,
 //! never interop.
@@ -1986,4 +1986,146 @@ fn vector_field_policy_ranking_and_opt_in_floor() {
     };
     assert!(!strict.acceptable(&row(0x1A2B, 11)));
     assert!(strict.acceptable(&row(0x1A2B, 220)));
+}
+
+// RD-SIM-01: joiner-initiated TCLK update transcript — request,
+// TCLK-typed transport classify, checked open latch, verify sent,
+// success confirm authorizes; the device stays joined throughout.
+#[test]
+fn vector_tclk_update_transcript_rd_sim_01() {
+    let mut u = TclkUpdate::new();
+    assert_eq!(u.state(), TclkState::Idle);
+    assert!(!u.tclk_latched());
+    assert_eq!(u.error(), None);
+    u.begin();
+    assert_eq!(u.state(), TclkState::RequestSent);
+    // Foreign first frames never promote: network-key-typed and
+    // vendor-shaped commands leave the wait unchanged.
+    u.note_transport_frame(TRANSPORT_KEY_CMD, TRANSPORT_KEY_TYPE_NETWORK);
+    u.note_transport_frame(UNSECURED_VENDOR_CMD, 0x00);
+    assert_eq!(u.state(), TclkState::RequestSent);
+    assert!(!u.tclk_latched());
+    // The genuine TCLK transport classifies; the checked open latches.
+    u.note_transport_frame(TRANSPORT_KEY_CMD, TRANSPORT_KEY_TYPE_TCLK);
+    assert_eq!(u.state(), TclkState::KeyWait);
+    u.on_transport_open(true);
+    assert!(u.tclk_latched());
+    assert_eq!(u.state(), TclkState::KeyWait);
+    u.note_verify_sent();
+    assert_eq!(u.state(), TclkState::VerifySent);
+    u.on_confirm(CONFIRM_KEY_STATUS_SUCCESS);
+    assert_eq!(u.state(), TclkState::Authorized);
+    assert_eq!(u.error(), None);
+    assert!(u.tclk_latched());
+}
+
+// RD-SIM-01: the confirm status decides — anything but success fails
+// the attempt with ConfirmMismatch and never authorizes.
+#[test]
+fn vector_tclk_bad_confirm_never_authorizes_rd_sim_01() {
+    let mut u = TclkUpdate::new();
+    u.begin();
+    u.note_transport_frame(TRANSPORT_KEY_CMD, TRANSPORT_KEY_TYPE_TCLK);
+    u.on_transport_open(true);
+    u.note_verify_sent();
+    u.on_confirm(0x01);
+    assert_eq!(u.state(), TclkState::Failed);
+    assert_eq!(u.error(), Some(JoinError::ConfirmMismatch));
+    // The latch stands (the key arrived intact) but the update is
+    // dead: no authorize, no retry from Failed.
+    assert!(u.tclk_latched());
+}
+
+// RD-SIM-01: a tampered transport open never latches and never
+// promotes, even though the classification pair was genuine.
+#[test]
+fn vector_tclk_mic_fail_never_latches_rd_sim_01() {
+    let mut u = TclkUpdate::new();
+    u.begin();
+    u.note_transport_frame(TRANSPORT_KEY_CMD, TRANSPORT_KEY_TYPE_TCLK);
+    assert_eq!(u.state(), TclkState::KeyWait);
+    u.on_transport_open(false);
+    assert_eq!(u.state(), TclkState::Failed);
+    assert_eq!(u.error(), Some(JoinError::ConfirmMismatch));
+    assert!(!u.tclk_latched());
+}
+
+// RD-SIM-01: sequencing order is load-bearing — verify before latch,
+// confirm before verify, and double-begin are all caller bugs.
+#[test]
+fn vector_tclk_out_of_order_is_bad_state_rd_sim_01() {
+    // Verify sent with nothing latched.
+    let mut early = TclkUpdate::new();
+    early.begin();
+    early.note_verify_sent();
+    assert_eq!(early.state(), TclkState::Failed);
+    assert_eq!(early.error(), Some(JoinError::BadState));
+
+    // Confirm heard with no verify outstanding.
+    let mut unasked = TclkUpdate::new();
+    unasked.begin();
+    unasked.note_transport_frame(TRANSPORT_KEY_CMD, TRANSPORT_KEY_TYPE_TCLK);
+    unasked.on_transport_open(true);
+    unasked.on_confirm(CONFIRM_KEY_STATUS_SUCCESS);
+    assert_eq!(unasked.state(), TclkState::Failed);
+    assert_eq!(unasked.error(), Some(JoinError::BadState));
+
+    // The request goes out once.
+    let mut twice = TclkUpdate::new();
+    twice.begin();
+    twice.begin();
+    assert_eq!(twice.state(), TclkState::Failed);
+    assert_eq!(twice.error(), Some(JoinError::BadState));
+}
+
+// RD-SIM-01: the wait still ends on time — silence names NoTransport
+// from any waiting state, and a parent eject names JoinTimeout at
+// once instead of polling to the bound.
+#[test]
+fn vector_tclk_wait_timeouts_and_eject_rd_sim_01() {
+    // Silent peer at each waiting leg.
+    for drive in [
+        (|u: &mut TclkUpdate| u.begin()) as fn(&mut TclkUpdate),
+        |u| {
+            u.begin();
+            u.note_transport_frame(TRANSPORT_KEY_CMD, TRANSPORT_KEY_TYPE_TCLK);
+        },
+        |u| {
+            u.begin();
+            u.note_transport_frame(TRANSPORT_KEY_CMD, TRANSPORT_KEY_TYPE_TCLK);
+            u.on_transport_open(true);
+            u.note_verify_sent();
+        },
+    ] {
+        let mut u = TclkUpdate::new();
+        drive(&mut u);
+        u.on_transport_timeout();
+        assert_eq!(u.state(), TclkState::Failed);
+        assert_eq!(u.error(), Some(JoinError::NoTransport));
+    }
+    // Parent eject at each waiting leg.
+    for drive in [
+        (|u: &mut TclkUpdate| u.begin()) as fn(&mut TclkUpdate),
+        |u| {
+            u.begin();
+            u.note_transport_frame(TRANSPORT_KEY_CMD, TRANSPORT_KEY_TYPE_TCLK);
+            u.on_transport_open(true);
+        },
+    ] {
+        let mut u = TclkUpdate::new();
+        drive(&mut u);
+        u.on_leave();
+        assert_eq!(u.state(), TclkState::Failed);
+        assert_eq!(u.error(), Some(JoinError::JoinTimeout));
+    }
+    // After authorization there is nothing to time out or eject from.
+    let mut done = TclkUpdate::new();
+    done.begin();
+    done.note_transport_frame(TRANSPORT_KEY_CMD, TRANSPORT_KEY_TYPE_TCLK);
+    done.on_transport_open(true);
+    done.note_verify_sent();
+    done.on_confirm(CONFIRM_KEY_STATUS_SUCCESS);
+    done.on_transport_timeout();
+    assert_eq!(done.state(), TclkState::Failed);
+    assert_eq!(done.error(), Some(JoinError::BadState));
 }
