@@ -20,12 +20,12 @@ naming are inherited; only the host/RCP split shape is shared.
 
 ## Wiring (lab record, no hardware touched by this crate)
 
-| S3 | H2 | Purpose |
-|----|----|---------|
-| GPIO18 (TX) | GPIO23 (RX) | RCP commands S3→H2 |
-| GPIO17 (RX) | GPIO24 (TX) | RCP events H2→S3 |
-| GPIO7 | EN | Reset hold (host-driven) |
-| GPIO8 | GPIO9 (BOOT) | Boot select for RCP flashing |
+| S3 | H2 | Purpose | Verified |
+|----|----|---------|----------|
+| GPIO18 (TX) | GPIO23 (RX) | RCP commands S3→H2 | Lab-proven (both-sides UART logs) |
+| GPIO17 (RX) | GPIO24 (TX) | RCP events H2→S3 | Lab-proven (both-sides UART logs) |
+| GPIO7 | EN | Reset hold (host-driven) | **Unverified on this pair** — a 150 ms EN-low pulse left H2 uptime continuous, so the EN wire is unproven lab lore here; hard resets go through USB DTR / esptool instead |
+| GPIO8 | GPIO9 (BOOT) | Boot select for RCP flashing | Unverified with EN (same caveat) |
 
 UART 460800 baud 8N1, raw RCP frames. Constants
 `S3_UART_TX_GPIO` … `RCP_UART_BAUD` in `rounddance-rcp` record this

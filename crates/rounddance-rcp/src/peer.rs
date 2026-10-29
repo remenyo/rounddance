@@ -12,14 +12,16 @@
 //! forced error events, and queued inbound air frames.
 //!
 //! Requirement traceability (repo-minted, MINTED-pending-confirm):
-//! `RD-RCP-09` (power-cap mirror), `RD-RCP-10` (scripted faults).
+//! `RD-RCP-09` (power-cap mirror), `RD-RCP-10` (scripted faults),
+//! `RD-RCP-12` (promiscuous/filtered mirror), `RD-RCP-13`
+//! (version answers), `RD-RCP-14` (SHORT-SNOOP latch).
 
 use crate::cmd::{
     Command, Event, TxOutcome, E_BAD_CHANNEL, E_BAD_COMMAND, E_POWER_CAPPED, MAX_PSDU,
 };
 use crate::frame::{Decoder, Outcome};
 use crate::uart::{LoopPipe, LINK_BYTES};
-use crate::{MAX_TX_POWER_DBM, RCP_FW_VERSION};
+use crate::{MAX_TX_POWER_DBM, RCP_CAPS, RCP_FW_VERSION, RCP_PROTO_VERSION};
 
 /// Energy reported for a channel: pure function of the channel, so
 /// scans never perturb any deterministic stream (same convention as
@@ -57,6 +59,8 @@ pub struct PeerStats {
     pub rx_emitted: u32,
     /// Malformed command frames rejected with [`E_BAD_COMMAND`].
     pub bad_commands: u32,
+    /// Association-response shorts latched by the SHORT-SNOOP.
+    pub short_snoops: u32,
 }
 
 /// The emulated H2 RCP firmware.
@@ -69,6 +73,13 @@ pub struct EmulatedRcp {
     pan: Option<u16>,
     short: Option<u16>,
     ext: Option<u64>,
+    promiscuous: bool,
+    eui: [u8; 8],
+    /// Scripted dead-H2 fault: while set, [`EmulatedRcp::poll`] is a
+    /// no-op — no Ready, no confirms, no RX — modelling the
+    /// download-parked / powered-down unit. Revive by clearing it
+    /// (or by swapping in a fresh peer, modelling a reboot).
+    pub dead: bool,
     event_seq: u8,
     /// Next `n` TX commands radiate but get no confirm (timeout path).
     pub drop_confirms: u8,
@@ -109,6 +120,9 @@ impl EmulatedRcp {
             pan: None,
             short: None,
             ext: None,
+            promiscuous: true,
+            eui: [0u8; 8],
+            dead: false,
             event_seq: 0,
             drop_confirms: 0,
             confirm_status: TxOutcome::Delivered,
@@ -125,6 +139,7 @@ impl EmulatedRcp {
                 scans: 0,
                 rx_emitted: 0,
                 bad_commands: 0,
+                short_snoops: 0,
             },
         }
     }
@@ -159,6 +174,76 @@ impl EmulatedRcp {
         self.ext
     }
 
+    /// Receive mode: true = promiscuous (all frames, no HW ACK —
+    /// the firmware boot default), false = filtered + HW auto-ACK.
+    #[must_use]
+    pub const fn promiscuous(&self) -> bool {
+        self.promiscuous
+    }
+
+    /// 15.4 EUI-64 reported by the version handshake.
+    #[must_use]
+    pub const fn eui(&self) -> [u8; 8] {
+        self.eui
+    }
+
+    /// Set the EUI-64 reported by the version handshake.
+    pub fn set_eui(&mut self, eui: [u8; 8]) {
+        self.eui = eui;
+    }
+
+    /// Latch the assigned short from our own association response
+    /// before any slower path runs. The transport follows the
+    /// response within milliseconds, so the filtered-address check
+    /// only still matches when the short is already latched here —
+    /// the host's confirm (see
+    /// [`crate::driver::RcpDriver::note_assoc_response`]) is the
+    /// idempotent second copy.
+    fn snoop_assoc_short(&mut self, psdu: &[u8]) {
+        let pan = match self.pan {
+            Some(p) => p,
+            None => return,
+        };
+        let ext = match self.ext {
+            Some(e) => e,
+            None => return,
+        };
+        if psdu.len() < 13 {
+            return;
+        }
+        let fcf = u16::from_le_bytes([psdu[0], psdu[1]]);
+        if fcf & 0x07 != 0x03 {
+            return;
+        }
+        if (fcf >> 10) & 0x03 != 0x03 {
+            return;
+        }
+        if u16::from_le_bytes([psdu[3], psdu[4]]) != pan {
+            return;
+        }
+        let mut dst = [0u8; 8];
+        dst.copy_from_slice(&psdu[5..13]);
+        if u64::from_le_bytes(dst) != ext {
+            return;
+        }
+        let moff = match (fcf >> 14) & 0x03 {
+            0x02 => 15,
+            0x03 => 21,
+            _ => return,
+        };
+        if psdu.len() < moff + 4 {
+            return;
+        }
+        if psdu[moff] != 0x02 || psdu[moff + 3] != 0x00 {
+            return;
+        }
+        let short = u16::from_le_bytes([psdu[moff + 1], psdu[moff + 2]]);
+        if short != 0xFFFF && Some(short) != self.short {
+            self.short = Some(short);
+            self.stats.short_snoops = self.stats.short_snoops.saturating_add(1);
+        }
+    }
+
     /// Feed host-side bytes into the peer (test harness moves them
     /// from the driver's outbound FIFO). Full FIFO refuses the tail;
     /// the refused count is returned (never silent loss).
@@ -189,10 +274,13 @@ impl EmulatedRcp {
 
     /// Queue one inbound air frame for emission as an RX event on the
     /// next [`EmulatedRcp::poll`]; `false` when the RX queue is full.
+    /// The SHORT-SNOOP runs first, so an association response latches
+    /// its short even when the RX queue is full.
     pub fn queue_rx(&mut self, psdu: &[u8], rssi: i8, lqi: u8, inter_pan: bool) -> bool {
         if psdu.len() > MAX_PSDU {
             return false;
         }
+        self.snoop_assoc_short(psdu);
         let mut buf = [0u8; MAX_PSDU];
         buf[..psdu.len()].copy_from_slice(psdu);
         let rx = PendingRx {
@@ -359,12 +447,27 @@ impl EmulatedRcp {
                     energy: channel_energy(channel),
                 });
             }
+            Command::GetVersion => {
+                self.emit(&Event::Version {
+                    fw_version: RCP_FW_VERSION,
+                    proto_version: RCP_PROTO_VERSION,
+                    caps: RCP_CAPS,
+                    eui: self.eui,
+                });
+            }
+            Command::SetPromiscuous { promiscuous } => {
+                self.promiscuous = promiscuous;
+            }
         }
     }
 
     /// Process all queued host bytes and emit due responses, queued
-    /// RX events, and any forced error event.
+    /// RX events, and any forced error event. A [`EmulatedRcp::dead`]
+    /// peer does nothing at all.
     pub fn poll(&mut self) {
+        if self.dead {
+            return;
+        }
         while let Some(b) = self.inbound.pop() {
             match self.decoder.push_byte(b) {
                 Some(Outcome::Frame(f)) => self.handle(&f),
@@ -502,6 +605,81 @@ mod tests {
             }]
         );
         assert_eq!(peer.tx_power_dbm(), 0, "hot request never applied");
+    }
+
+    const SNOOP_EXT: u64 = 0xAC87_65FF_FE43_2112;
+
+    fn assoc_rsp_psdu(pan: u16, ext: u64, assigned: u16, status: u8) -> [u8; 19] {
+        // MAC command, long dest, short source: FCF 0x8C03, seq,
+        // dst pan + dst ext, src short, then the assoc-rsp body
+        // (id 0x02, assigned short, status).
+        let mut psdu = [0u8; 19];
+        psdu[0..2].copy_from_slice(&0x8C03u16.to_le_bytes());
+        psdu[2] = 0x55;
+        psdu[3..5].copy_from_slice(&pan.to_le_bytes());
+        psdu[5..13].copy_from_slice(&ext.to_le_bytes());
+        psdu[13..15].copy_from_slice(&0x0000u16.to_le_bytes());
+        psdu[15] = 0x02;
+        psdu[16..18].copy_from_slice(&assigned.to_le_bytes());
+        psdu[18] = status;
+        psdu
+    }
+
+    #[test]
+    fn version_promiscuous_and_dead_fault() {
+        let mut peer = EmulatedRcp::new();
+        assert!(peer.promiscuous(), "firmware boots promiscuous");
+        drive(
+            &mut peer,
+            &Command::SetPromiscuous { promiscuous: false },
+            1,
+        );
+        assert!(collect(&mut peer).is_empty(), "mode set is ack-less");
+        assert!(!peer.promiscuous(), "filtered + HW auto-ACK");
+        drive(&mut peer, &Command::SetPromiscuous { promiscuous: true }, 2);
+        assert!(peer.promiscuous());
+        let eui = [0x74, 0x4D, 0xBD, 0xFF, 0xFE, 0x61, 0x7A, 0xFA];
+        peer.set_eui(eui);
+        drive(&mut peer, &Command::GetVersion, 3);
+        assert_eq!(
+            collect(&mut peer),
+            [Event::Version {
+                fw_version: RCP_FW_VERSION,
+                proto_version: RCP_PROTO_VERSION,
+                caps: RCP_CAPS,
+                eui,
+            }]
+        );
+        peer.dead = true;
+        drive(&mut peer, &Command::Reset { cold: false }, 4);
+        assert!(collect(&mut peer).is_empty(), "dead peer answers nothing");
+    }
+
+    #[test]
+    fn short_snoop_latches_assoc_short() {
+        let mut peer = EmulatedRcp::new();
+        drive(&mut peer, &Command::SetPanId { pan: 0x3761 }, 1);
+        drive(&mut peer, &Command::SetExtAddr { addr: SNOOP_EXT }, 2);
+        assert!(collect(&mut peer).is_empty());
+        assert_eq!(peer.short(), None);
+        // Wrong PAN: ignored.
+        let foreign = assoc_rsp_psdu(0x1234, SNOOP_EXT, 0x1204, 0x00);
+        assert!(peer.queue_rx(&foreign, -50, 200, false));
+        assert_eq!(peer.short(), None);
+        // Denied status: ignored.
+        let denied = assoc_rsp_psdu(0x3761, SNOOP_EXT, 0x1204, 0x01);
+        assert!(peer.queue_rx(&denied, -50, 200, false));
+        assert_eq!(peer.short(), None);
+        // Success: latched at queue time, before any poll.
+        let rsp = assoc_rsp_psdu(0x3761, SNOOP_EXT, 0x1204, 0x00);
+        assert!(peer.queue_rx(&rsp, -50, 200, false));
+        assert_eq!(peer.short(), Some(0x1204), "snooped pre-emit");
+        assert_eq!(peer.stats.short_snoops, 1);
+        // Still emitted as a normal RX event for the host.
+        peer.poll();
+        let evs = collect(&mut peer);
+        assert_eq!(evs.len(), 3, "all three queued frames emit");
+        assert!(matches!(evs[2], Event::RxFrame { len: 19, .. }));
     }
 
     #[test]

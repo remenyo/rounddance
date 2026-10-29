@@ -1,17 +1,20 @@
 //! RCP command/response classes over [`crate::frame`].
 //!
-//! Host (S3) → RCP (H2) commands (`0x01`–`0x08`): reset, channel,
-//! TX power, PAN/short/extended addressing, 15.4 TX, energy scan.
-//! RCP → host events (`0x80`–`0x84`): ready, TX confirm, received
-//! frame, energy result, error. Every class has a fixed minimal
-//! payload shape; oversize or unknown input is an error, never a
-//! truncation.
+//! Host (S3) → RCP (H2) commands (`0x01`–`0x0A`): reset, channel,
+//! TX power, PAN/short/extended addressing, 15.4 TX, energy scan,
+//! version query (`0x09`), promiscuous/filtered receive mode
+//! (`0x0A`). RCP → host events (`0x80`–`0x85`): ready, TX confirm,
+//! received frame, energy result, error, version (`0x85`). Every
+//! class has a fixed minimal payload shape; oversize or unknown
+//! input is an error, never a truncation.
 //!
 //! Wire IDs are rounddance constructions (no spec corpus covers the
 //! S3+H2 UART), documented in `docs/otbr/protocol.md`.
 //!
 //! Requirement traceability (repo-minted, MINTED-pending-confirm):
-//! `RD-RCP-03` (command classes), `RD-RCP-04` (event classes).
+//! `RD-RCP-03` (command classes), `RD-RCP-04` (event classes),
+//! `RD-RCP-12` (filtered/auto-ACK mode class), `RD-RCP-13`
+//! (version handshake classes).
 
 use crate::frame::{self, Frame, FrameError, MAX_RCP_PAYLOAD};
 use core::fmt;
@@ -28,6 +31,11 @@ pub const K_SET_SHORT_ADDR: u8 = 0x05;
 pub const K_SET_EXT_ADDR: u8 = 0x06;
 pub const K_TX_FRAME: u8 = 0x07;
 pub const K_ENERGY_SCAN: u8 = 0x08;
+/// Version query (empty payload; answered by [`K_VERSION`)].
+pub const K_GET_VERSION: u8 = 0x09;
+/// Receive mode: `0x00` = filtered + HW auto-ACK, `0x01` =
+/// promiscuous (all frames, no HW ACK).
+pub const K_SET_PROMISCUOUS: u8 = 0x0A;
 
 // RCP → host event classes.
 pub const K_READY: u8 = 0x80;
@@ -35,6 +43,13 @@ pub const K_TX_CONFIRM: u8 = 0x81;
 pub const K_RX_FRAME: u8 = 0x82;
 pub const K_ENERGY_RESULT: u8 = 0x83;
 pub const K_ERROR: u8 = 0x84;
+/// Version report: `[fw, proto, caps-LE, eui64]`.
+pub const K_VERSION: u8 = 0x85;
+
+/// `K_SET_PROMISCUOUS` payload selecting promiscuous receive.
+pub const PROMISCUOUS_ON: u8 = 0x01;
+/// `K_SET_PROMISCUOUS` payload selecting filtered + HW auto-ACK.
+pub const PROMISCUOUS_OFF_FILTERED: u8 = 0x00;
 
 /// TX-frame flags octet: bit 0 selects the inter-PAN path (same bit
 /// on RX events marks which queue the frame arrived on).
@@ -161,6 +176,17 @@ pub enum Command {
         /// Channel number.
         channel: u8,
     },
+    /// Query the firmware version/caps/EUI (answered by
+    /// [`Event::Version`]).
+    GetVersion,
+    /// Select the receive mode: `true` = promiscuous (all frames,
+    /// no HW ACK, for scanning); `false` = filtered + HW auto-ACK
+    /// (for association and everything after — the Trust Center
+    /// only transports after an ACKed association response).
+    SetPromiscuous {
+        /// True = promiscuous, false = filtered + HW auto-ACK.
+        promiscuous: bool,
+    },
 }
 
 impl Command {
@@ -176,6 +202,8 @@ impl Command {
             Self::SetExtAddr { .. } => K_SET_EXT_ADDR,
             Self::TxFrame { .. } => K_TX_FRAME,
             Self::EnergyScan { .. } => K_ENERGY_SCAN,
+            Self::GetVersion => K_GET_VERSION,
+            Self::SetPromiscuous { .. } => K_SET_PROMISCUOUS,
         }
     }
 
@@ -221,6 +249,15 @@ impl Command {
             }
             Self::EnergyScan { channel } => {
                 payload[0] = *channel;
+                1
+            }
+            Self::GetVersion => 0,
+            Self::SetPromiscuous { promiscuous } => {
+                payload[0] = if *promiscuous {
+                    PROMISCUOUS_ON
+                } else {
+                    PROMISCUOUS_OFF_FILTERED
+                };
                 1
             }
         };
@@ -300,6 +337,22 @@ impl Command {
                 }
                 Ok(Self::EnergyScan { channel: p[0] })
             }
+            K_GET_VERSION => {
+                if !p.is_empty() {
+                    return Err(CmdError::TooLong);
+                }
+                Ok(Self::GetVersion)
+            }
+            K_SET_PROMISCUOUS => {
+                if p.len() != 1 {
+                    return Err(CmdError::Truncated);
+                }
+                match p[0] {
+                    PROMISCUOUS_ON => Ok(Self::SetPromiscuous { promiscuous: true }),
+                    PROMISCUOUS_OFF_FILTERED => Ok(Self::SetPromiscuous { promiscuous: false }),
+                    _ => Err(CmdError::BadValue),
+                }
+            }
             k => Err(CmdError::UnknownKind(k)),
         }
     }
@@ -345,6 +398,17 @@ pub enum Event {
         /// Error code.
         code: u8,
     },
+    /// Firmware version report (answers [`Command::GetVersion`]).
+    Version {
+        /// Firmware version octet.
+        fw_version: u8,
+        /// Wire-protocol version octet.
+        proto_version: u8,
+        /// Capability bitmask (LE).
+        caps: u16,
+        /// 15.4 EUI-64 of the RCP radio.
+        eui: [u8; 8],
+    },
 }
 
 impl Event {
@@ -357,6 +421,7 @@ impl Event {
             Self::RxFrame { .. } => K_RX_FRAME,
             Self::EnergyResult { .. } => K_ENERGY_RESULT,
             Self::Error { .. } => K_ERROR,
+            Self::Version { .. } => K_VERSION,
         }
     }
 
@@ -397,6 +462,18 @@ impl Event {
             Self::Error { code } => {
                 payload[0] = *code;
                 1
+            }
+            Self::Version {
+                fw_version,
+                proto_version,
+                caps,
+                eui,
+            } => {
+                payload[0] = *fw_version;
+                payload[1] = *proto_version;
+                payload[2..4].copy_from_slice(&caps.to_le_bytes());
+                payload[4..12].copy_from_slice(eui);
+                12
             }
         };
         Ok(frame::encode(self.kind(), seq, &payload[..len], out)?)
@@ -452,6 +529,19 @@ impl Event {
                     return Err(CmdError::Truncated);
                 }
                 Ok(Self::Error { code: p[0] })
+            }
+            K_VERSION => {
+                if p.len() != 12 {
+                    return Err(CmdError::Truncated);
+                }
+                let mut eui = [0u8; 8];
+                eui.copy_from_slice(&p[4..12]);
+                Ok(Self::Version {
+                    fw_version: p[0],
+                    proto_version: p[1],
+                    caps: u16::from_le_bytes([p[2], p[3]]),
+                    eui,
+                })
             }
             k => Err(CmdError::UnknownKind(k)),
         }
@@ -525,6 +615,8 @@ mod tests {
             psdu: [0u8; MAX_PSDU],
         });
         roundtrip(&Command::EnergyScan { channel: 26 });
+        roundtrip(&Command::GetVersion);
+        roundtrip(&Command::SetPromiscuous { promiscuous: false });
     }
 
     #[test]
@@ -553,6 +645,21 @@ mod tests {
         });
         roundtrip_event(&Event::Error {
             code: E_POWER_CAPPED,
+        });
+    }
+
+    #[test]
+    fn w53_new_classes_round_trip() {
+        // Failing-first: filtered+auto-ACK mode (0x0A), version
+        // handshake (0x09/0x85) from the proven w53 RCP v1 firmware.
+        roundtrip(&Command::SetPromiscuous { promiscuous: true });
+        roundtrip(&Command::SetPromiscuous { promiscuous: false });
+        roundtrip(&Command::GetVersion);
+        roundtrip_event(&Event::Version {
+            fw_version: 0x02,
+            proto_version: 0x01,
+            caps: 0x00FF,
+            eui: [0x74, 0x4D, 0xBD, 0xFF, 0xFE, 0x61, 0x7A, 0xFA],
         });
     }
 

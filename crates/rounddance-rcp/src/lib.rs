@@ -46,7 +46,8 @@
 //!   (`SCOPE.md` §8).
 //!
 //! Requirement traceability (repo-minted, MINTED-pending-confirm):
-//! `RD-RCP-01`…`RD-RCP-11` (`REQUIREMENTS.md` wave-18 section).
+//! `RD-RCP-01`…`RD-RCP-16` (`REQUIREMENTS.md` wave-18 + wave-54
+//! sections).
 #![no_std]
 #![forbid(unsafe_code)]
 
@@ -62,7 +63,10 @@ pub mod peer;
 pub mod uart;
 
 pub use cmd::{CmdError, Command, Event, TxOutcome};
-pub use driver::{RcpDriver, RcpStats, TraceEvent, CMD_TIMEOUT_US, MAX_RETRIES, TX_SLOTS};
+pub use driver::{
+    RcpDriver, RcpStats, RecoveryState, TraceEvent, VersionInfo, CMD_TIMEOUT_US, MAX_RETRIES,
+    RECOVERY_ATTEMPTS, TX_SLOTS,
+};
 pub use frame::{Decoder, DropReason, Frame, FrameError, Outcome};
 pub use peer::EmulatedRcp;
 pub use uart::{HostSide, LoopPipe, Uart};
@@ -75,6 +79,14 @@ pub const MAX_TX_POWER_DBM: i8 = 10;
 
 /// H2 RCP firmware version the emulated peer reports.
 pub const RCP_FW_VERSION: u8 = 0x01;
+
+/// RCP wire-protocol version the emulated peer reports.
+pub const RCP_PROTO_VERSION: u8 = 0x01;
+
+/// Capability bitmask the emulated peer reports: TX, promiscuous
+/// RX, energy scan, +10 dBm cap, 4-deep TX queue, extended
+/// addressing, version command, filtered mode.
+pub const RCP_CAPS: u16 = 0x00FF;
 
 /// S3-side UART wiring (documented topology; board code owns these).
 pub const S3_UART_TX_GPIO: u8 = 18;

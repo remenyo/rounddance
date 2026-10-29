@@ -539,6 +539,34 @@ never spec text (D1).
 | RD-RCP-10 | implemented + verified | Full OTBR stack over scripted RCP UART: form → install-code join + DeviceAnnce → APS-secured ZCL On applied to a live server + replay rejection; disturbed runs replay exactly | sim `rcp_otbr_path.rs` all 6 tests (form, join, secured On, loss, timeout, desync+replay) |
 | RD-RCP-11 | implemented + verified | `docs/otbr/topology.md` (S3-GPIO18/17/7/8 ↔ H2-GPIO23/24/EN/GPIO9, 460800 8N1, roles, bring-up) + `docs/otbr/protocol.md` (framing/classes/discipline/v0 non-goals); pin constants in `lib.rs` | doc review (constants `S3_UART_TX_GPIO`…`RCP_UART_BAUD` compile-checked) |
 
+## Wave-54 traceability — RCP findings consolidation (`rounddance-rcp`, `rounddance-sim`)
+
+All IDs below are repo-minted (`RD-RCP-<seq>`), MINTED-pending-confirm:
+they consolidate the five wave-53 lane-1 mechanisms (filtered+auto-ACK
+assoc mode, SHORT-SNOOP race guard, drain-vs-join RX ownership,
+host-side recovery, GPIO7-EN-unverified documentation) into the
+in-repo RCP contract. No spec corpus covers the S3+H2 UART; wire
+classes stay rounddance constructions documented in
+`docs/otbr/protocol.md`; wording in code/tests is paraphrase only,
+never spec text (D1). Wave-53 firmware (`~/hwscratch/w53/`) is
+evidence-only: the H2 `vTaskDelay` IDLE-starve fix is firmware-side
+with no in-repo surface and is not minted here.
+
+| Requirement ID | State | Implementing code | Verifying test |
+|----------------|-------|-------------------|----------------|
+| RD-RCP-12 | implemented + verified | `cmd.rs`: `Command::SetPromiscuous` (`0x0A`, mode octet) replayed from the driver provision cache; `peer.rs`: `EmulatedRcp` promiscuous/filtered mirror (boots promiscuous); `driver.rs::set_promiscuous_mode` + `Reprovisioned` replay | `cmd.rs::w53_new_classes_round_trip` + fuzzer class arm, `vectors.rs::golden_set_promiscuous_and_version`, `peer.rs::version_promiscuous_and_dead_fault`, `driver.rs::w53_promiscuous_mode_replayed_after_reset`, sim `rcp_recovery.rs` formed-filtered legs |
+| RD-RCP-13 | implemented + verified | `cmd.rs`: `Command::GetVersion` (`0x09`, empty) + `Event::Version` (`0x85`, fw/proto/caps-LE/eui64); `peer.rs`: answers from `RCP_FW_VERSION`/`RCP_PROTO_VERSION`/`RCP_CAPS` + programmed EUI; `driver.rs::query_version` + `last_version` latch | `cmd.rs::w53_new_classes_round_trip` + fuzzer arms, `vectors.rs::golden_set_promiscuous_and_version`, `peer.rs::version_promiscuous_and_dead_fault`, `driver.rs::w53_version_handshake_latches`, sim `rcp_recovery.rs` version-ok legs |
+| RD-RCP-14 | implemented + verified | `peer.rs`: SHORT-SNOOP latches the assigned short from the peer's own association response at queue time (before any slow path; wrong-PAN/denied ignored, counted in `PeerStats::short_snoops`); `driver.rs::note_assoc_response` confirms success shorts immediately (idempotent second copy) | `peer.rs::short_snoop_latches_assoc_short` (wrong-PAN + denied + latch + emit legs), `driver.rs::w53_assoc_response_confirms_short` |
+| RD-RCP-15 | implemented + verified | `driver.rs`: `start_recovery` (warm reset, TX queue preserved) + `recovery_state` (`Recovering`/`Recovered`/`Failed`); provision cache replayed on `Ready`; `RECOVERY_ATTEMPTS` (3) unanswered reset writes declare the peer dead: handshake stays open so new frames refuse `NotReady` (clean fail, no hang); `peer.rs`: scripted `dead` fault | `driver.rs::w53_recovery_recovers_live_peer` + `w53_recovery_dead_peer_fails_clean`, sim `rcp_recovery.rs::rcp_reboot_recovers_and_replays_j9` + `rcp_dead_peer_fails_clean_then_heals_j8` (decision-for-decision + replay legs) |
+| RD-RCP-16 | implemented + verified | sim `rcp_recovery.rs`: the join ladder owns RX while it runs (`ladder_running` gates `idle_drain` to zero); with no ladder running the idle path still consumes ambient frames | sim `rcp_recovery.rs::rcp_idle_drain_parks_during_ladder` (parked-during-ladder + still-consumes-idle legs) |
+
+`RD-RCP-11` amendment (same wave): `docs/otbr/topology.md` now marks
+the S3-GPIO7→H2-EN / S3-GPIO8→H2-GPIO9 rows verification status —
+UART verified, EN/BOOT unverified on this pair (150 ms EN-low left
+uptime continuous) — with USB DTR / esptool as the proven reset
+path. Row state stays implemented + verified (doc correction, no
+new behavior).
+
 ## Wave-19 traceability — browser path (`rounddance-browser`)
 
 All IDs below are repo-minted (`RD-BROWSER-<seq>`), MINTED-pending-confirm:

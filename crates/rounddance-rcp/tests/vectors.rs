@@ -11,8 +11,8 @@
 
 use rounddance_mac_sap::{Channel, MacDataSap as _, MacMgmtSap as _, TxStatus};
 use rounddance_rcp::cmd::{
-    Command, Event, TxOutcome, E_POWER_CAPPED, K_ENERGY_SCAN, K_READY, K_RESET, K_SET_CHANNEL,
-    K_TX_CONFIRM, MAX_PSDU,
+    Command, Event, TxOutcome, E_POWER_CAPPED, K_ENERGY_SCAN, K_GET_VERSION, K_READY, K_RESET,
+    K_SET_CHANNEL, K_SET_PROMISCUOUS, K_TX_CONFIRM, K_VERSION, MAX_PSDU,
 };
 use rounddance_rcp::frame::{Decoder, Outcome, MAX_RCP_PAYLOAD, SYNC};
 use rounddance_rcp::{EmulatedRcp, HostSide, RcpDriver};
@@ -156,6 +156,85 @@ fn golden_tx_confirm_and_max_psdu_reject() {
     .is_err());
     // The frame layer itself refuses >128-octet payloads.
     assert!(rounddance_rcp::frame::encode(1, 0, &[0u8; MAX_RCP_PAYLOAD + 1], &mut out).is_err());
+}
+
+#[test]
+fn golden_set_promiscuous_and_version() {
+    // SetPromiscuous(false) = filtered + HW auto-ACK, seq 0x0A:
+    // SYNC | LEN=5 | KIND | SEQ | 0x00 | CRC16-LE.
+    let mut wire = [0u8; 16];
+    let n = Command::SetPromiscuous { promiscuous: false }
+        .encode(0x0A, &mut wire)
+        .unwrap();
+    assert_eq!(n, 7);
+    let body = [K_SET_PROMISCUOUS, 0x0A, 0x00];
+    let crc = reference_crc16(&body);
+    assert_eq!(
+        wire[..n],
+        [
+            SYNC,
+            5,
+            K_SET_PROMISCUOUS,
+            0x0A,
+            0x00,
+            (crc & 0xFF) as u8,
+            (crc >> 8) as u8
+        ]
+    );
+    let f = decode_one(&wire[..n]);
+    assert_eq!(
+        Command::decode(&f).unwrap(),
+        Command::SetPromiscuous { promiscuous: false }
+    );
+    // GetVersion carries an empty payload.
+    let n = Command::GetVersion.encode(0x0B, &mut wire).unwrap();
+    assert_eq!(n, 6);
+    let gbody = [K_GET_VERSION, 0x0B];
+    let gcrc = reference_crc16(&gbody);
+    assert_eq!(
+        wire[..n],
+        [
+            SYNC,
+            4,
+            K_GET_VERSION,
+            0x0B,
+            (gcrc & 0xFF) as u8,
+            (gcrc >> 8) as u8
+        ]
+    );
+    // Version event: [fw, proto, caps-LE, eui64].
+    let eui = [0x74, 0x4D, 0xBD, 0xFF, 0xFE, 0x61, 0x7A, 0xFA];
+    let mut vwire = [0u8; 32];
+    let n = Event::Version {
+        fw_version: 1,
+        proto_version: 1,
+        caps: 0x00FF,
+        eui,
+    }
+    .encode(0x0C, &mut vwire)
+    .unwrap();
+    let mut vbody = [0u8; 15];
+    vbody[0] = K_VERSION;
+    vbody[1] = 0x0C;
+    vbody[2] = 1;
+    vbody[3] = 1;
+    vbody[4] = 0xFF;
+    vbody[5] = 0x00;
+    vbody[6..14].copy_from_slice(&eui);
+    let vcrc = reference_crc16(&vbody[..14]);
+    assert_eq!(n, 18);
+    assert_eq!(vwire[2], K_VERSION);
+    assert_eq!(&vwire[n - 2..n], [(vcrc & 0xFF) as u8, (vcrc >> 8) as u8]);
+    let f = decode_one(&vwire[..n]);
+    assert_eq!(
+        Event::decode(&f).unwrap(),
+        Event::Version {
+            fw_version: 1,
+            proto_version: 1,
+            caps: 0x00FF,
+            eui,
+        }
+    );
 }
 
 #[test]

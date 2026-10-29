@@ -40,7 +40,10 @@
 //!
 //! Requirement traceability (repo-minted, MINTED-pending-confirm):
 //! `RD-RCP-05` (SAP mapping), `RD-RCP-06` (timeout/retry),
-//! `RD-RCP-07` (desync→resync), `RD-RCP-08` (reset handshake).
+//! `RD-RCP-07` (desync→resync), `RD-RCP-08` (reset handshake),
+//! `RD-RCP-12` (filtered mode cache + replay), `RD-RCP-13`
+//! (version query + latch), `RD-RCP-14` (assoc-short confirm),
+//! `RD-RCP-15` (recovery state machine).
 
 use crate::cmd::{Command, Event, TxOutcome, MAX_PSDU};
 use crate::frame::{Decoder, Outcome};
@@ -58,6 +61,9 @@ use rounddance_mac_sap::{
 pub const CMD_TIMEOUT_US: u64 = 20_000;
 /// TX resends after the first attempt before confirming `NoAck`.
 pub const MAX_RETRIES: u8 = 3;
+/// Reset writes per recovery before a dead peer is declared failed
+/// (the opening write plus re-arms, one per [`CMD_TIMEOUT_US`]).
+pub const RECOVERY_ATTEMPTS: u32 = 3;
 /// Consecutive dropped UART runs that open a reset handshake.
 pub const DESYNC_THRESHOLD: u32 = 4;
 /// Shared outstanding-TX pool (PAN + inter-PAN).
@@ -104,6 +110,16 @@ pub enum TraceEvent {
     ScanResult(u8),
     /// Pending scan timed out.
     ScanTimeout,
+    /// Version report latched (firmware version).
+    VersionSeen(u8),
+    /// Association-response short confirmed to the RCP (short).
+    AssocConfirmed(u16),
+    /// Host-side recovery opened (warm reset, queue preserved).
+    RecoveryStarted,
+    /// Recovery handshake completed (`Ready` + reprovision replay).
+    Recovered,
+    /// Recovery budget exhausted; the peer is declared dead.
+    RecoveryFailed,
 }
 
 /// Driver diagnostics (all counters saturate, never wrap).
@@ -143,6 +159,10 @@ pub struct RcpStats {
     pub uart_drops: u32,
     /// Trace events lost after [`TRACE_DEPTH`].
     pub trace_overflows: u32,
+    /// Host-side recoveries opened.
+    pub recoveries: u32,
+    /// Recoveries that exhausted the budget (peer declared dead).
+    pub recovery_failures: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -159,6 +179,35 @@ struct Slot {
     len: u8,
     psdu: [u8; MAX_PSDU],
     state: SlotState,
+}
+
+/// Host-side recovery state: reboot → `Recovered`, dead peer →
+/// `Failed` (clean, no hang — new frames refuse `NotReady` and the
+/// preserved queue waits for the next recovery or reset).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RecoveryState {
+    /// No recovery open (or cleared by `reset`).
+    #[default]
+    Idle,
+    /// Warm reset handshake open, queue preserved.
+    Recovering,
+    /// Handshake completed; provision cache replayed.
+    Recovered,
+    /// Budget ([`RECOVERY_ATTEMPTS`] reset writes) exhausted.
+    Failed,
+}
+
+/// Firmware version report latched by [`RcpDriver::query_version`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct VersionInfo {
+    /// Firmware version octet.
+    pub fw_version: u8,
+    /// Wire-protocol version octet.
+    pub proto_version: u8,
+    /// Capability bitmask.
+    pub caps: u16,
+    /// 15.4 EUI-64 of the RCP radio.
+    pub eui: [u8; 8],
 }
 
 /// Host-side RCP driver over any [`Uart`].
@@ -186,6 +235,11 @@ pub struct RcpDriver<U: Uart> {
     pan: Option<PanId>,
     short: Option<ShortAddr>,
     ext: Option<ExtAddr>,
+    promiscuous: Option<bool>,
+    last_version: Option<VersionInfo>,
+    recovery: RecoveryState,
+    recovery_baseline: u32,
+    recovery_gave_up: bool,
     pending_scan: Option<PendingScan>,
     cached_energy: Option<CachedEnergy>,
     trace: [Option<TraceEvent>; TRACE_DEPTH],
@@ -234,6 +288,11 @@ impl<U: Uart> RcpDriver<U> {
             pan: None,
             short: None,
             ext: None,
+            promiscuous: None,
+            last_version: None,
+            recovery: RecoveryState::Idle,
+            recovery_baseline: 0,
+            recovery_gave_up: false,
             pending_scan: None,
             cached_energy: None,
             trace: [None; TRACE_DEPTH],
@@ -256,6 +315,8 @@ impl<U: Uart> RcpDriver<U> {
                 confirm_overruns: 0,
                 uart_drops: 0,
                 trace_overflows: 0,
+                recoveries: 0,
+                recovery_failures: 0,
             },
         }
     }
@@ -371,6 +432,9 @@ impl<U: Uart> RcpDriver<U> {
         if let Some(addr) = self.ext {
             self.send_cmd(&Command::SetExtAddr { addr });
         }
+        if let Some(promiscuous) = self.promiscuous {
+            self.send_cmd(&Command::SetPromiscuous { promiscuous });
+        }
         self.trace(TraceEvent::Reprovisioned);
     }
 
@@ -433,6 +497,25 @@ impl<U: Uart> RcpDriver<U> {
                     self.resetting = false;
                     self.reprovision();
                 }
+                if self.recovery == RecoveryState::Recovering {
+                    self.recovery = RecoveryState::Recovered;
+                    self.recovery_gave_up = false;
+                    self.trace(TraceEvent::Recovered);
+                }
+            }
+            Event::Version {
+                fw_version,
+                proto_version,
+                caps,
+                eui,
+            } => {
+                self.last_version = Some(VersionInfo {
+                    fw_version,
+                    proto_version,
+                    caps,
+                    eui,
+                });
+                self.trace(TraceEvent::VersionSeen(fw_version));
             }
             Event::TxConfirm { seq, status } => {
                 let mut found = None;
@@ -581,6 +664,25 @@ impl<U: Uart> RcpDriver<U> {
 
     fn check_timeouts(&mut self) {
         if self.resetting && self.now_us >= self.reset_deadline {
+            if self.recovery == RecoveryState::Recovering {
+                let used = self
+                    .stats
+                    .reset_retries
+                    .saturating_sub(self.recovery_baseline);
+                if used >= RECOVERY_ATTEMPTS {
+                    // Dead peer: stop the retry storm (the handshake
+                    // stays open, so new frames refuse `NotReady` —
+                    // a clean fail with the queue preserved).
+                    self.recovery = RecoveryState::Failed;
+                    self.recovery_gave_up = true;
+                    Self::bump(&mut self.stats.recovery_failures);
+                    self.trace(TraceEvent::RecoveryFailed);
+                    return;
+                }
+            }
+            if self.recovery_gave_up {
+                return;
+            }
             self.reset_deadline = self.now_us.saturating_add(CMD_TIMEOUT_US);
             Self::bump(&mut self.stats.reset_retries);
             self.trace(TraceEvent::ResetSent);
@@ -676,6 +778,65 @@ impl<U: Uart> RcpDriver<U> {
         self.power_dbm = Some(dbm);
         self.send_cmd(&Command::SetTxPower { dbm });
         Ok(())
+    }
+
+    /// Select the RCP receive mode and cache it for replay after
+    /// every reset handshake: `false` = filtered + HW auto-ACK
+    /// (engage before association — the Trust Center only
+    /// transports after an ACKed association response), `true` =
+    /// promiscuous scanning.
+    pub fn set_promiscuous_mode(&mut self, promiscuous: bool) {
+        self.promiscuous = Some(promiscuous);
+        self.send_cmd(&Command::SetPromiscuous { promiscuous });
+    }
+
+    /// Ask the firmware for its version/caps/EUI; the report lands
+    /// in [`RcpDriver::last_version`] on the next [`RcpDriver::poll`].
+    pub fn query_version(&mut self) {
+        self.send_cmd(&Command::GetVersion);
+    }
+
+    /// Latest version report, if any has arrived.
+    #[must_use]
+    pub const fn last_version(&self) -> Option<VersionInfo> {
+        self.last_version
+    }
+
+    /// Confirm an association-response short to the RCP
+    /// immediately, before any slower path runs. Call with the
+    /// status from the parsed response: only `0x00` (success)
+    /// sends. Returns true when a confirm was written. The RCP's
+    /// own SHORT-SNOOP is the first copy; this is the idempotent
+    /// second one.
+    pub fn note_assoc_response(&mut self, short: ShortAddr, status: u8) -> bool {
+        if status != 0x00 {
+            return false;
+        }
+        self.short = Some(short);
+        self.send_cmd(&Command::SetShortAddr { addr: short });
+        self.trace(TraceEvent::AssocConfirmed(short));
+        true
+    }
+
+    /// Open a host-side recovery: warm reset handshake with the TX
+    /// queue preserved, provision cache replayed on `Ready`. Poll
+    /// (and the byte pump) to advance it; read
+    /// [`RcpDriver::recovery_state`]. A rebooted peer lands
+    /// `Recovered`; a dead one lands `Failed` after
+    /// [`RECOVERY_ATTEMPTS`] unanswered reset writes.
+    pub fn start_recovery(&mut self) {
+        self.recovery = RecoveryState::Recovering;
+        self.recovery_gave_up = false;
+        self.recovery_baseline = self.stats.reset_retries;
+        Self::bump(&mut self.stats.recoveries);
+        self.trace(TraceEvent::RecoveryStarted);
+        self.start_reset(false);
+    }
+
+    /// Current host-side recovery state.
+    #[must_use]
+    pub const fn recovery_state(&self) -> RecoveryState {
+        self.recovery
     }
 
     fn queue_tx(&mut self, inter_pan: bool, msdu: &FramePayload) -> Result<TxHandle, MacError> {
@@ -776,7 +937,10 @@ impl<U: Uart> HasCapabilities for RcpDriver<U> {
             energy_scan: true,
             // v0 carries no timestamps yet.
             frame_timestamping: false,
-            promiscuous_mode: false,
+            // Filtered + HW auto-ACK is the default associated mode
+            // (see `set_promiscuous_mode`); promiscuous scanning is
+            // one command away.
+            promiscuous_mode: true,
         }
     }
 }
@@ -850,12 +1014,16 @@ impl<U: Uart> MacMgmtSap for RcpDriver<U> {
         self.interpan_indications = core::array::from_fn(|_| None);
         self.interpan_indications_len = 0;
         self.pending_scan = None;
+        self.recovery = RecoveryState::Idle;
+        self.recovery_gave_up = false;
         if cold {
             self.channel = None;
             self.power_dbm = None;
             self.pan = None;
             self.short = None;
             self.ext = None;
+            self.promiscuous = None;
+            self.last_version = None;
             self.cached_energy = None;
         }
         self.start_reset(cold);
@@ -1101,6 +1269,116 @@ mod tests {
         assert!(driver.ready(), "handshake re-completes after heal");
         assert_eq!(peer.channel(), Some(15), "provision cache replayed");
         assert_eq!(peer.pan(), Some(0x1a2b));
+    }
+
+    #[test]
+    fn w53_promiscuous_mode_replayed_after_reset() {
+        // Failing-first: filtered+auto-ACK engagement (w53 §4a) is
+        // part of the provision cache and survives a re-handshake.
+        let (mut driver, mut peer) = pair();
+        form(&mut driver, &mut peer);
+        driver.set_promiscuous_mode(false);
+        pump(&mut driver, &mut peer);
+        assert!(!peer.promiscuous(), "filtered + HW auto-ACK engaged");
+        driver.reset(false);
+        pump(&mut driver, &mut peer);
+        assert!(driver.ready());
+        assert!(!peer.promiscuous(), "mode replayed after handshake");
+    }
+
+    #[test]
+    fn w53_version_handshake_latches() {
+        // Failing-first: bring-up version/caps handshake (w53 step 1).
+        let (mut driver, mut peer) = pair();
+        form(&mut driver, &mut peer);
+        assert_eq!(driver.last_version(), None);
+        driver.query_version();
+        pump(&mut driver, &mut peer);
+        let v = driver.last_version().expect("version latched");
+        assert_eq!(v.fw_version, crate::RCP_FW_VERSION);
+        assert_eq!(v.proto_version, crate::RCP_PROTO_VERSION);
+        assert_eq!(v.caps, crate::RCP_CAPS);
+        assert_eq!(v.eui, peer.eui());
+    }
+
+    #[test]
+    fn w53_assoc_response_confirms_short() {
+        // Failing-first: SHORT-SNOOP host half (w53 §4b) — the short
+        // is confirmed to the H2 immediately, before any slow path.
+        let (mut driver, mut peer) = pair();
+        form(&mut driver, &mut peer);
+        assert!(!driver.note_assoc_response(0x1234, 0x01));
+        assert_eq!(peer.short(), Some(0x0000), "denied rsp changes nothing");
+        assert!(driver.note_assoc_response(0x1234, 0x00));
+        pump(&mut driver, &mut peer);
+        assert_eq!(peer.short(), Some(0x1234), "confirmed pre-log");
+        assert!((0..driver.trace_len())
+            .filter_map(|i| driver.trace_at(i))
+            .any(|e| e == TraceEvent::AssocConfirmed(0x1234)));
+    }
+
+    #[test]
+    fn w53_recovery_recovers_live_peer() {
+        // Failing-first: mid-session reboot → RECOVERED (w53 j9).
+        let (mut driver, mut peer) = pair();
+        form(&mut driver, &mut peer);
+        driver.set_promiscuous_mode(false);
+        pump(&mut driver, &mut peer);
+        let h = driver
+            .data_request(TxRequest {
+                dst: MacAddress::short(0x1a2b, 0x0002),
+                msdu: FramePayload::from_slice(&[7]).unwrap(),
+                options: TxOptions::ACK,
+            })
+            .unwrap();
+        peer = EmulatedRcp::new(); // the H2 rebooted: unprovisioned
+        driver.start_recovery();
+        assert_eq!(driver.recovery_state(), RecoveryState::Recovering);
+        assert_eq!(
+            driver.data_request(TxRequest {
+                dst: MacAddress::short(0x1a2b, 0x0002),
+                msdu: FramePayload::from_slice(&[8]).unwrap(),
+                options: TxOptions::ACK,
+            }),
+            Err(MacError::NotReady),
+            "new frames wait out the handshake, never lost"
+        );
+        pump(&mut driver, &mut peer); // Reset → Ready, reprovision queued
+        pump(&mut driver, &mut peer); // reprovision lands on the firmware
+        assert_eq!(driver.recovery_state(), RecoveryState::Recovered);
+        assert!(driver.ready());
+        assert_eq!(peer.channel(), Some(15), "provision cache replayed");
+        assert_eq!(peer.short(), Some(0x0000));
+        assert!(!peer.promiscuous(), "mode replayed");
+        let c = driver.poll_confirm().unwrap();
+        assert_eq!((c.handle, c.status), (h, TxStatus::Delivered));
+        assert_eq!(driver.stats().recoveries, 1);
+    }
+
+    #[test]
+    fn w53_recovery_dead_peer_fails_clean() {
+        // Failing-first: dead H2 → clean driver-fail (w53 j8), no hang.
+        let (mut driver, mut peer) = pair();
+        form(&mut driver, &mut peer);
+        let free_before = driver.tx_queue_free();
+        peer.dead = true;
+        driver.start_recovery();
+        for _ in 0..4 {
+            driver.advance(CMD_TIMEOUT_US);
+            pump(&mut driver, &mut peer);
+        }
+        assert_eq!(driver.recovery_state(), RecoveryState::Failed);
+        assert_eq!(
+            driver.data_request(TxRequest {
+                dst: MacAddress::short(0x1a2b, 0x0002),
+                msdu: FramePayload::from_slice(&[9]).unwrap(),
+                options: TxOptions::ACK,
+            }),
+            Err(MacError::NotReady),
+            "clean fail, session aborts without hang"
+        );
+        assert_eq!(driver.tx_queue_free(), free_before, "queue preserved");
+        assert_eq!(driver.stats().recovery_failures, 1);
     }
 
     #[test]

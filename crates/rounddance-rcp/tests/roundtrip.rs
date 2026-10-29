@@ -125,7 +125,7 @@ fn command_event_round_trip_all_classes() {
     let mut rng = Fuzz(0xC0DE);
     let mut wire = [0u8; 256];
     for _ in 0..CASES {
-        let cmd = match rng.below(8) {
+        let cmd = match rng.below(10) {
             0 => Command::Reset {
                 cold: rng.below(2) == 0,
             },
@@ -154,8 +154,12 @@ fn command_event_round_trip_all_classes() {
                     psdu,
                 }
             }
-            _ => Command::EnergyScan {
+            7 => Command::EnergyScan {
                 channel: rng.below(256) as u8,
+            },
+            8 => Command::GetVersion,
+            _ => Command::SetPromiscuous {
+                promiscuous: rng.below(2) == 0,
             },
         };
         let seq = rng.below(256) as u8;
@@ -192,5 +196,24 @@ fn command_event_round_trip_all_classes() {
             Some(Outcome::Frame(f)) => assert_eq!(&Event::decode(&f).unwrap(), &ev),
             other => panic!("event encode must decode, got {other:?}"),
         }
+    }
+    // Version event round-trips through the same streaming decoder.
+    let ev = Event::Version {
+        fw_version: 1,
+        proto_version: 1,
+        caps: 0x00FF,
+        eui: [1, 2, 3, 4, 5, 6, 7, 8],
+    };
+    let n = ev.encode(0xCC, &mut wire).unwrap();
+    let mut dec = Decoder::new();
+    let mut got = None;
+    for b in &wire[..n] {
+        if let Some(o) = dec.push_byte(*b) {
+            got = Some(o);
+        }
+    }
+    match got {
+        Some(Outcome::Frame(f)) => assert_eq!(&Event::decode(&f).unwrap(), &ev),
+        other => panic!("version event must decode, got {other:?}"),
     }
 }

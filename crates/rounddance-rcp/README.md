@@ -6,10 +6,10 @@ across a UART. This crate owns the host side of that split:
 | Module | Owns |
 |--------|------|
 | `frame` | UART transport framing (`SYNC/LEN/KIND/SEQ/payload/CRC16`), streaming resync decoder |
-| `cmd` | RCP command classes (reset/channel/power/PAN/addr/TX/scan) + event classes (ready/confirm/RX/energy/error) |
+| `cmd` | RCP command classes (reset/channel/power/PAN/addr/TX/scan/version/mode) + event classes (ready/confirm/RX/energy/error/version) |
 | `uart` | `Uart` seam + scripted FIFOs (the only hardware boundary) |
-| `driver` | `RcpDriver`: `MacDataSap` + `MacMgmtSap` + `MacInterPanSap` over any `Uart`, timeout/retry on an injected clock, desync→reset recovery |
-| `peer` | `EmulatedRcp`: scripted H2-firmware model (faults included) for host/sim tests |
+| `driver` | `RcpDriver`: `MacDataSap` + `MacMgmtSap` + `MacInterPanSap` over any `Uart`, timeout/retry on an injected clock, desync→reset recovery, version latch, assoc-short confirm, recovery state machine |
+| `peer` | `EmulatedRcp`: scripted H2-firmware model (faults included: drops, corruption, dead peer) with filtered/promiscuous modes + assoc-short snoop for host/sim tests |
 
 Why a new crate instead of an `otbr` submodule: no OpenThread/OTBR
 stack is ported — the S3 runs the rounddance stack and the H2
