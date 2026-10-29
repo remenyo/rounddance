@@ -36,6 +36,7 @@ pub mod nwk;
 pub mod nwkcmd;
 pub mod sender;
 pub mod session;
+pub mod stream;
 pub mod touchlink;
 pub mod tree;
 pub mod zcl;

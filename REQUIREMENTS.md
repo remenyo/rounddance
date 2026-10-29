@@ -1610,7 +1610,8 @@ decision-matched to the air model. Reproduce-then-fix per behavior
 a CCM* test-sealer error and a translation-precedence assertion
 were fixed against the shared wire math, corroborated by the
 known-good inspector opener). 6 repo-minted IDs (`RD-GP-01..06`),
-MINTED-pending-confirm. Paraphrase only (D1).
+MINTED at mint; CONFIRMED via corpus sweep-45 (0 corrections / 0
+REJECT). Paraphrase only (D1).
 
 Captured-air vectors: no new verbatim octets — the legs reuse the
 committed w51 goldens (MAC-outer-stripped MSDUs first pinned in
@@ -1628,9 +1629,57 @@ rounddance-sim --test gp_sink` (no lab use, no corpus writes).
 
 | Requirement ID | State | Implementing code | Verifying test |
 |----------------|-------|-------------------|----------------|
-| RD-GP-01 | implemented + verified | `receive::{GpKeySlots, GpKeySlot, open_secured}` (strict wire key-bit slot match, counter-plus-MIC verify + encrypted decrypt-then-verify, GP nonce + header AAD; `None`-class failures surface as typed `GpError`, never decrypts without a slotted key) | `gp/tests/sink_golden.rs::repro_secured_open_hands_off_with_slotted_key` (no-key / wrong-bit / wrong-level / mutated-MIC legs) + `::encrypted_open_decrypts_then_checks` (ciphertext names no command, open reveals it; sealer corroborated against the inspector opener) |
-| RD-GP-02 | implemented + verified | `receive::receive` (decode → ingress filter → secured open → counter-window dedup → Success completion → sink-table admission → translation/group fan-out; every path a typed `SinkDecision`, bounded + fallible + no-alloc) + `MAX_GP_OPEN` scratch contract | `gp/tests/sink_golden.rs::repro_sink_intake_hands_off_verbatim_data` (failing-first: intake did not exist) + `::air_model_unsecured_shapes_replay_with_pairing_decision` + `::repro_replayed_counter_drops_second_delivery` (dup drops, advance accepts) + `::foreign_shapes_drop_with_classifier_reason` (LPED / proxy-originated / maintenance / truncated) |
-| RD-GP-03 | implemented + verified | `receive::admits_for_commissioning` (announcement `0xE0` + `0xF0..=0xFF` reply-path range; SrcId endpoint-agnostic pairing, IEEE endpoint-scoped pairing; closed mode → `NoTableEntry`) | `gp/tests/sink_golden.rs::repro_commissioning_admits_only_with_mode_open` (closed drops, open admits, replayed counter still drops, secured `0xF3` admits, unsecured `0xF3` refused by the ingress gate) + `::ieee_admission_is_endpoint_scoped` (matching endpoint hands off, other endpoint unknown) |
-| RD-GP-04 | implemented + verified | `receive::{NwkHandoff, NwkRoute}` (group-bound entries hand `Groupcast(group)` with the raw GPD command, translated entries hand `PairedEndpoints` with profile/cluster/command + payload) | `gp/tests/sink_golden.rs::group_forward_hands_groupcast_route` + `::repro_sink_intake_hands_off_verbatim_data` (paired-endpoints triple) |
-| RD-GP-05 | implemented + verified | `receive` Success arm (`CMD_SUCCESS` + parked `AwaitingReply` session → `note_success`, sink-table entry + default translation install, `Commissioned`; `TransactionMismatch` refuses foreign frames) | `gp/tests/sink_golden.rs::repro_success_completes_parked_session` (failing-first: intake did not exist; foreign Success refused, matching Success pairs, paired data hands off after) |
-| RD-GP-06 | implemented + verified | census pins (`sink_golden.rs` shape constants sum to 519) + `rounddance-sim/tests/gp_sink.rs` scenario (commission → data → dedup-drop → reply: admit, handoff, replay-drop, advanced handoff, ask-admit, reply served in the 20–25 ms window, Success commissions, paired data hands off; trace + decision-log replay determinism) | `gp/tests/sink_golden.rs::census_pins_sum_to_oracle_total` + `sim/tests/gp_sink.rs::census_pins_sum_to_oracle_total` + `::gp_sink_commission_data_dedup_reply` (8-decision log, decision-for-decision) + `::gp_sink_replay_is_deterministic` |
+| RD-GP-01 | implemented + verified, CONFIRMED (sweep-45) | `receive::{GpKeySlots, GpKeySlot, open_secured}` (strict wire key-bit slot match, counter-plus-MIC verify + encrypted decrypt-then-verify, GP nonce + header AAD; `None`-class failures surface as typed `GpError`, never decrypts without a slotted key) | `gp/tests/sink_golden.rs::repro_secured_open_hands_off_with_slotted_key` (no-key / wrong-bit / wrong-level / mutated-MIC legs) + `::encrypted_open_decrypts_then_checks` (ciphertext names no command, open reveals it; sealer corroborated against the inspector opener) |
+| RD-GP-02 | implemented + verified, CONFIRMED (sweep-45) | `receive::receive` (decode → ingress filter → secured open → counter-window dedup → Success completion → sink-table admission → translation/group fan-out; every path a typed `SinkDecision`, bounded + fallible + no-alloc) + `MAX_GP_OPEN` scratch contract | `gp/tests/sink_golden.rs::repro_sink_intake_hands_off_verbatim_data` (failing-first: intake did not exist) + `::air_model_unsecured_shapes_replay_with_pairing_decision` + `::repro_replayed_counter_drops_second_delivery` (dup drops, advance accepts) + `::foreign_shapes_drop_with_classifier_reason` (LPED / proxy-originated / maintenance / truncated) |
+| RD-GP-03 | implemented + verified, CONFIRMED (sweep-45) | `receive::admits_for_commissioning` (announcement `0xE0` + `0xF0..=0xFF` reply-path range; SrcId endpoint-agnostic pairing, IEEE endpoint-scoped pairing; closed mode → `NoTableEntry`) | `gp/tests/sink_golden.rs::repro_commissioning_admits_only_with_mode_open` (closed drops, open admits, replayed counter still drops, secured `0xF3` admits, unsecured `0xF3` refused by the ingress gate) + `::ieee_admission_is_endpoint_scoped` (matching endpoint hands off, other endpoint unknown) |
+| RD-GP-04 | implemented + verified, CONFIRMED (sweep-45) | `receive::{NwkHandoff, NwkRoute}` (group-bound entries hand `Groupcast(group)` with the raw GPD command, translated entries hand `PairedEndpoints` with profile/cluster/command + payload) | `gp/tests/sink_golden.rs::group_forward_hands_groupcast_route` + `::repro_sink_intake_hands_off_verbatim_data` (paired-endpoints triple) |
+| RD-GP-05 | implemented + verified, CONFIRMED (sweep-45) | `receive` Success arm (`CMD_SUCCESS` + parked `AwaitingReply` session → `note_success`, sink-table entry + default translation install, `Commissioned`; `TransactionMismatch` refuses foreign frames) | `gp/tests/sink_golden.rs::repro_success_completes_parked_session` (failing-first: intake did not exist; foreign Success refused, matching Success pairs, paired data hands off after) |
+| RD-GP-06 | implemented + verified, CONFIRMED (sweep-45) | census pins (`sink_golden.rs` shape constants sum to 519) + `rounddance-sim/tests/gp_sink.rs` scenario (commission → data → dedup-drop → reply: admit, handoff, replay-drop, advanced handoff, ask-admit, reply served in the 20–25 ms window, Success commissions, paired data hands off; trace + decision-log replay determinism) | `gp/tests/sink_golden.rs::census_pins_sum_to_oracle_total` + `sim/tests/gp_sink.rs::census_pins_sum_to_oracle_total` + `::gp_sink_commission_data_dedup_reply` (8-decision log, decision-for-decision) + `::gp_sink_replay_is_deterministic` |
+
+## Wave-65 traceability — live-stream ingest (lane 2)
+
+The inspector "listeners" requirement stood half-met: offline
+pcap/capture replay plus the census exist, but no live-streaming
+ingest (attach to a running sniffer byte stream and dissect with
+the session engine in real time). This wave lands the streaming
+byte-pipe reader in `rounddance-inspect` (core `no_std` +
+`forbid(unsafe_code)` with no allocator): framing with resync on
+noise, bounded buffering, and incremental legs + session-engine
+folds with snapshots at frame boundaries. Goldens replay recorded
+streams (the w50 c25 excerpt verbatim in-repo, plus the full w50/w51
+feed set locally) through the streaming path proving byte-identical
+timelines vs batch replay. The live `inspect-live` serial backend
+now frames through the same path (replay output byte-identical
+before/after over 1486 frames). Reproduce-then-fix per behavior
+(HEAD-API repros failed first: no `stream` module existed; a
+framer overflow-discard bug and a decryptable-count expectation
+were fixed against the shared wire math). 2 repo-minted IDs
+(`RD-INSPECT-39..40`), MINTED-pending-confirm. Also carried from
+wave-64: `RD-GP-01..06` flipped MINTED-pending-confirm →
+CONFIRMED via corpus sweep-45 (0 corrections / 0 REJECT), rows and
+preamble updated in place. No lab use, no corpus writes; wording
+in code/tests is paraphrase only (D1).
+
+Captured-air vectors: the 14 line bodies pinned in
+`inspect/tests/stream_ingest.rs` are verbatim `received:` lines
+from the wave-50 live run (`~/hwscratch/w50/sniff_c25.txt`,
+channel 25: beacon-request noise with the positive-RSSI quirk, TC
+beacons, one lab-sealed secured frame, three Touchlink
+scan-req/scan-rsp pairs, shell noise) wrapped in-test in the exact
+wire framing (`\x1b[J` prefix + `\r\n` terminator); the one frame
+that opens is sealed in-test under a synthetic test-only key, never
+a lab key. Full-set parity is a local-only procedure (temporary
+`replay65` example, run, recorded, then removed — evidence
+`~/hwscratch/w65/replay65.log`): every w50/w51 recorded feed
+(1672 + 13705 = 15377 frames) streamed in odd byte chunks vs batch
+replay with byte-identical per-frame snapshot sequences
+(session text/JSON + timelines text/JSON after every frame),
+zero dissect-error divergence, zero oversize. `inspect-live`
+`--replay` over the w50 set + one w51 feed re-renders
+byte-identically before/after the rewire (`/tmp/w65base` vs
+`/tmp/w65new`, 2212 frames).
+
+| Requirement ID | State | Implementing code | Verifying test |
+|----------------|-------|-------------------|----------------|
+| RD-INSPECT-39 | implemented + verified | `stream::{Framer, parse_line, Parse, LineFrame}` (512-octet bounded line buffer, overlong resync with drop counting, shed-only-straddler backpressure with delivered+dropped accounting identity, CR strip, held tails; no-alloc hex decode with FCS strip + `power:`/`lqi:` defaults matching the shared parser field-for-field; `TooLong` instead of silent truncation) + `Default` + `no_std`/`forbid(unsafe_code)` core | `inspect/tests/stream_ingest.rs::repro_no_streaming_framer` (failing-first) + `::framer_reassembles_split_lines_identically` (byte-at-a-time + prime-chunk splits vs drained baseline, bulk-shed accounting identity) + `::framer_strips_cr_and_holds_partial_tails` + `::framer_resyncs_after_overlong_noise` + `::line_parser_matches_shared_parser_on_recorded_lines` (recorded-line parity vs `sniffer::parse_received` incl. FCS strip, quirk power, defaults, skip legs, `TooLong`) + `stream::tests` unit legs (wire shape, shed-preserves-framed, int-token edges) |
+| RD-INSPECT-40 | implemented + verified | `stream::{Ingest, Step}` (byte pushes, per-complete-line drain: parse → `dissect_with_keys` → `set_radio` → `note_tree`; `Ignored`/`Oversize`/`Frame` steps with frame/error/ignored/oversize counters; snapshots valid after any step) + `inspect-live` `NrfListener` rewire onto `Framer` + `parse_line` (same listener errors, live == replay == stream by shared semantics) | `inspect/tests/stream_ingest.rs::repro_no_incremental_session_ingest` (failing-first) + `::stream_ingest_matches_batch_frame_for_frame` (recorded excerpt + synthetic sealed leg under a slotted test key: identical trees in order + identical snapshot after every frame across 3 chunk schedules; decryptable 2 / orphan 0 on both arms) + `::stream_ingest_isolates_noise_from_the_session` (shell noise, overlong burst, split frame) + local full-set parity (`replay65.log`, 15377 frames ALL PASS) + binary replay byte-identical pre/post rewire (1486 frames) |

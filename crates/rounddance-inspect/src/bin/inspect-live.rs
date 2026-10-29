@@ -4,8 +4,9 @@
 //! inspector's [`Listener`](rounddance_inspect::capture::Listener)
 //! seam: [`NrfListener`] opens the sniffer shell port at 115200 8N1
 //! raw, sends `sleep` / `shell echo off` / `channel N` / `receive`,
-//! and parses each `received:` line with the shared
-//! [`sniffer`](rounddance_inspect::sniffer) parser (FCS stripped).
+//! and frames the byte stream with the streaming
+//! [`stream`](rounddance_inspect::stream) line parser (FCS stripped,
+//! same field semantics as the replay path's shared parser).
 //! Every frame goes through [`chain::dissect`](rounddance_inspect::chain::dissect)
 //! plus [`SessionEngine::note_tree`](rounddance_inspect::session::SessionEngine::note_tree)
 //! with its radio metadata attached, exactly like the offline
@@ -37,7 +38,8 @@ use std::io::Write;
 use std::time::{Duration, Instant};
 
 use rounddance_inspect::capture::{Captured, Listener};
-use rounddance_inspect::sniffer::{self, ReplayListener};
+use rounddance_inspect::sniffer::ReplayListener;
+use rounddance_inspect::stream::{Framer, Parse};
 use rounddance_inspect::{chain, report, session::SessionEngine, tree::Layer};
 
 /// Minimal raw serial port over `libc` termios (115200 8N1, raw,
@@ -128,11 +130,15 @@ impl Drop for RawSerial {
 }
 
 /// Live nRF-sniffer backend implementing the inspector `Listener`
-/// trait over the shared [`sniffer::parse_received`] line parser.
+/// trait over the streaming [`Framer`] byte pipe and the no-alloc
+/// [`stream`](rounddance_inspect::stream) line parser (same field
+/// semantics as the replay path's shared parser, proven byte-identical
+/// by the `stream_ingest` goldens).
 struct NrfListener {
     port: RawSerial,
     channel: u8,
-    line: String,
+    framer: Framer,
+    line: [u8; rounddance_inspect::stream::LINE_CAP],
 }
 
 impl NrfListener {
@@ -150,30 +156,21 @@ impl NrfListener {
         Ok(Self {
             port,
             channel,
-            line: String::new(),
+            framer: Framer::new(),
+            line: [0u8; rounddance_inspect::stream::LINE_CAP],
         })
     }
 
-    /// Read one line; `Ok(None)` = idle tick with no bytes yet.
-    fn read_line(&mut self) -> Result<Option<String>, String> {
-        self.line.clear();
+    /// Read serial bytes into the framer; `Ok(None)` = idle tick with
+    /// no complete line yet (a held tail is not a line).
+    fn read_line(&mut self) -> Result<Option<usize>, String> {
         loop {
+            if let Some(n) = self.framer.pop_line(&mut self.line) {
+                return Ok(Some(n));
+            }
             match self.port.read_byte()? {
-                Some(b) => {
-                    if b == b'\n' {
-                        return Ok(Some(std::mem::take(&mut self.line)));
-                    }
-                    self.line.push(b as char);
-                    if self.line.len() > 4096 {
-                        return Ok(Some(std::mem::take(&mut self.line)));
-                    }
-                }
-                None => {
-                    if self.line.is_empty() {
-                        return Ok(None);
-                    }
-                    return Ok(Some(std::mem::take(&mut self.line)));
-                }
+                Some(b) => self.framer.push(std::slice::from_ref(&b)),
+                None => return Ok(None),
             }
         }
     }
@@ -183,23 +180,28 @@ impl Listener for NrfListener {
     type Error = String;
     fn next_frame<'b>(&mut self, buf: &'b mut [u8]) -> Result<Option<Captured<'b>>, Self::Error> {
         loop {
-            let line = match self.read_line()? {
-                Some(l) => l,
+            let n = match self.read_line()? {
+                Some(n) => n,
                 None => return Ok(None), // timeout tick, no frame now
             };
-            if let Some((raw, rssi, lqi)) = sniffer::parse_received(&line) {
-                if raw.len() > buf.len() {
-                    return Err(format!("frame {}B > buf {}B", raw.len(), buf.len()));
+            // Copy the line out of the framer scratch before parsing
+            // into the frame buffer (both borrows are disjoint).
+            let mut wire = [0u8; rounddance_inspect::stream::LINE_CAP];
+            wire[..n].copy_from_slice(&self.line[..n]);
+            match rounddance_inspect::stream::parse_line(&wire[..n], buf) {
+                Parse::Frame(m) => {
+                    return Ok(Some(Captured {
+                        channel: self.channel,
+                        rssi: m.rssi,
+                        lqi: m.lqi,
+                        payload: &buf[..m.len],
+                    }));
                 }
-                buf[..raw.len()].copy_from_slice(&raw);
-                return Ok(Some(Captured {
-                    channel: self.channel,
-                    rssi,
-                    lqi,
-                    payload: &buf[..raw.len()],
-                }));
+                Parse::TooLong { need } => {
+                    return Err(format!("frame {need}B > buf {}B", buf.len()));
+                }
+                Parse::Skip => {} // Non-frame shell line: keep polling.
             }
-            // Non-frame shell line: keep polling within this call.
         }
     }
 }
