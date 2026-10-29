@@ -448,6 +448,72 @@ fn nwk_route_record_leg_names_relay_list() {
 }
 
 // ---------------------------------------------------------------------------
+// Wave-74 lane 2: NWK network report (0x09) named. Options count
+// (bits 0-4) + 8-octet EPID + LE PAN-ID conflict list; the declared
+// count must exactly cover the trailing octets past the EPID, and
+// only report-id 0 (PAN-ID conflict) names the leg (no repo codec
+// covers it) — the wave-73 route-record count-gate discipline, with
+// reserved report ids staying `Unknown`, never a guess.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn nwk_network_report_leg_names_conflict_list() {
+    use tree::NwkCmdKind as K;
+    // EPID 01..08, two conflicting PAN IDs: 0x1234 then 0x5678.
+    let pt = [
+        0x09u8, 0x02, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x34, 0x12, 0x78, 0x56,
+    ];
+    let tree = chain::dissect(&wrap_nwk_command(&pt, 0x0000, 0x56cb)).unwrap();
+    let c = tree.nwkcmd().expect("network-report leg");
+    assert_eq!(c.command_id, 0x09);
+    assert_eq!(
+        c.kind,
+        K::NetworkReport {
+            reports: 2,
+            first_pan: 0x1234
+        }
+    );
+    assert_eq!(c.payload_len, 14);
+    // Stop taxonomy never moves for a named leg.
+    assert_eq!(note_reasons(&tree), vec!["trailing"]);
+    assert!(tree.aps().is_none());
+    let text = report::to_text(&tree);
+    assert!(text.contains("nwkcmd:"), "named leg renders: {text}");
+    assert!(text.contains("net-report"), "leg kind renders: {text}");
+    let json = report::to_json(&tree);
+    assert!(json.contains("\"nwkcmd\""), "json leg renders");
+    assert!(
+        json.contains("\"kind\":\"net-report\""),
+        "json kind renders: {json}"
+    );
+    // Route chatter never opens a session timeline.
+    assert!(session::classify_tree(&tree).is_none());
+    // Empty conflict list names the leg with no first PAN ID.
+    let empty = [0x09u8, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
+    let empty = chain::dissect(&wrap_nwk_command(&empty, 0x0000, 0x56cb)).unwrap();
+    assert_eq!(
+        empty.nwkcmd().expect("empty network-report leg").kind,
+        K::NetworkReport {
+            reports: 0,
+            first_pan: 0xffff
+        }
+    );
+    assert_eq!(note_reasons(&empty), vec!["trailing"]);
+    // Count/length mismatches, short frames, and reserved report
+    // ids stay `Unknown` under the same stop.
+    let short = [0x09u8, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07];
+    let over = [
+        0x09u8, 0x01, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x34, 0x12, 0x78, 0x56,
+    ];
+    let reserved = [0x09u8, 0x20, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
+    for bad in [&[0x09u8][..], &short[..], &over[..], &reserved[..]] {
+        let t = chain::dissect(&wrap_nwk_command(bad, 0x0000, 0x56cb)).unwrap();
+        assert_eq!(t.nwkcmd().expect("unknown leg").kind, K::Unknown);
+        assert_eq!(note_reasons(&t), vec!["trailing"]);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // RD-INSPECT-25: MAC command payloads named (gap-4b).
 // ---------------------------------------------------------------------------
 

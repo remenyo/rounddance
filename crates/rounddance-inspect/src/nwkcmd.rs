@@ -3,12 +3,13 @@
 //!
 //! Routing and leave shapes reuse the `rounddance-nwk` codecs (the
 //! same parsers the stack decodes with). Network-status,
-//! route-record, rejoin-request / rejoin-response, and
-//! timeout-request / timeout-response have no repo codec, so they
-//! are length-gated names over the live shapes (status +
-//! destination; count-consistent relay list; capability octet;
-//! short + status; two preserved octets). Any other identifier — or
-//! a named shape at an unexpected length — files as
+//! route-record, network-report, rejoin-request / rejoin-response,
+//! and timeout-request / timeout-response have no repo codec, so
+//! they are length-gated names over the live shapes (status +
+//! destination; count-consistent relay list; count-consistent
+//! PAN-ID conflict list past the EPID; capability octet; short +
+//! status; two preserved octets). Any other identifier — or a named
+//! shape at an unexpected length — files as
 //! [`NwkCmdKind::Unknown`] with its identifier, never a guess. Only
 //! an empty payload refuses outright.
 
@@ -88,6 +89,27 @@ pub fn decode(buf: &[u8]) -> Result<(NwkCmdNode, usize), NwkCmdError> {
             },
             len,
         ),
+        // Network report: identifier + options + 8-octet EPID +
+        // PAN-ID conflict list (report-id 0 only; no repo codec
+        // covers it). The count (options bits 0-4) must exactly
+        // cover the trailing octets past the EPID, and a reserved
+        // report id is never guessed.
+        0x09 if len >= 10
+            && (buf[1] >> 5) == 0x00
+            && usize::from(buf[1] & 0x1f) * 2 == len - 10 =>
+        {
+            (
+                NwkCmdKind::NetworkReport {
+                    reports: buf[1] & 0x1f,
+                    first_pan: if (buf[1] & 0x1f) > 0 {
+                        u16::from_le_bytes([buf[10], buf[11]])
+                    } else {
+                        0xffff
+                    },
+                },
+                len,
+            )
+        }
         // Network status: identifier + status code + destination
         // (the fixed route-error shape; status meaning is the
         // stack's, never validated here).
