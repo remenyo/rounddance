@@ -1018,6 +1018,9 @@ fn nwkcmd_text(k: &NwkCmdKind) -> String {
             hex16(first_neighbor)
         ),
         NwkCmdKind::Leave { options } => format!("leave opts={options:#04x}"),
+        NwkCmdKind::NetworkStatus { status, dst_addr } => {
+            format!("net-status status={status:#04x} dst={}", hex16(dst_addr))
+        }
         NwkCmdKind::RejoinRequest { capabilities } => {
             format!("rejoin-req caps={capabilities:#04x}")
         }
@@ -1168,6 +1171,10 @@ fn nwkcmd_json(n: &NwkCmdNode) -> String {
             format!(",\"entries\":{entries},\"first\":{first_neighbor}"),
         ),
         NwkCmdKind::Leave { options } => ("leave", format!(",\"opts\":{options}")),
+        NwkCmdKind::NetworkStatus { status, dst_addr } => (
+            "net-status",
+            format!(",\"status\":{status},\"dst\":{dst_addr}"),
+        ),
         NwkCmdKind::RejoinRequest { capabilities } => {
             ("rejoin-req", format!(",\"caps\":{capabilities}"))
         }

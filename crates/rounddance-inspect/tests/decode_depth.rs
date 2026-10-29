@@ -340,6 +340,54 @@ fn nwk_command_legs_name_every_live_shape() {
 }
 
 // ---------------------------------------------------------------------------
+// Wave-70 lane 1: NWK network-status (0x03) named. Fixed 4-octet shape
+// (status code + LE destination short), length-gated like the
+// rejoin/timeout names: no repo codec covers it, so any other length
+// stays `Unknown`.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn nwk_network_status_leg_names_fixed_shape() {
+    use tree::NwkCmdKind as K;
+    // Status 0x0d (address conflict) against 0x1234.
+    let pt = [0x03u8, 0x0d, 0x34, 0x12];
+    let tree = chain::dissect(&wrap_nwk_command(&pt, 0x0000, 0x56cb)).unwrap();
+    let c = tree.nwkcmd().expect("network-status leg");
+    assert_eq!(c.command_id, 0x03);
+    assert_eq!(
+        c.kind,
+        K::NetworkStatus {
+            status: 0x0d,
+            dst_addr: 0x1234
+        }
+    );
+    assert_eq!(c.payload_len, 4);
+    // Stop taxonomy never moves for a named leg.
+    assert_eq!(note_reasons(&tree), vec!["trailing"]);
+    assert!(tree.aps().is_none());
+    let text = report::to_text(&tree);
+    assert!(text.contains("nwkcmd:"), "named leg renders: {text}");
+    assert!(text.contains("net-status"), "leg kind renders: {text}");
+    let json = report::to_json(&tree);
+    assert!(json.contains("\"nwkcmd\""), "json leg renders");
+    assert!(
+        json.contains("\"kind\":\"net-status\""),
+        "json kind renders: {json}"
+    );
+    // Route chatter never opens a session timeline.
+    assert!(session::classify_tree(&tree).is_none());
+    // Wrong lengths stay `Unknown` under the same stop.
+    for bad in [
+        &[0x03u8, 0x0d, 0x34][..],
+        &[0x03u8, 0x0d, 0x34, 0x12, 0x00][..],
+    ] {
+        let t = chain::dissect(&wrap_nwk_command(bad, 0x0000, 0x56cb)).unwrap();
+        assert_eq!(t.nwkcmd().expect("unknown leg").kind, K::Unknown);
+        assert_eq!(note_reasons(&t), vec!["trailing"]);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // RD-INSPECT-25: MAC command payloads named (gap-4b).
 // ---------------------------------------------------------------------------
 
