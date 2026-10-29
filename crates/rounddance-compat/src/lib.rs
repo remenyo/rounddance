@@ -70,6 +70,7 @@
 pub mod ember;
 pub mod negotiate;
 pub mod profile;
+pub mod ti;
 
 /// Crate identifier.
 #[must_use]

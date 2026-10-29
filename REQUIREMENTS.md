@@ -712,14 +712,35 @@ adapter-local skeleton namespace (`CMD_DATA_SEND`, `EVT_TX_CONFIRM`,
 `EVT_DATA_RECEIVE`), not the NCP command set — pinning real NCP
 values waits for the transport decision. Corpus IDs below are reused
 from the RCP framing discipline; `RD-COMPAT-*` rows are repo-minted,
-MINTED-pending-confirm. Wording in code/tests is paraphrase only,
-never spec text (D1).
+MINTED-pending-confirm at mint time. `RD-COMPAT-05..07` stand
+CONFIRMED via corpus sweep-41 (0 corrections / 0 REJECT). Wording in
+code/tests is paraphrase only, never spec text (D1).
 
 | Requirement ID | State | Implementing code | Verifying test |
 |----------------|-------|-------------------|----------------|
-| RD-COMPAT-05 | implemented + verified | `ember::{encode, decode, next_seq, crc16}`: FLAG-delimited frames, LEN discipline, FLAG/ESC stuffing, 3-bit sequencing, CRC-16/CCITT; `MockEzspTransport` record/replay double | `compat/tests/ember_vectors.rs::ezsp_known_vector_byte_pinned`, `ezsp_escapes_flag_and_escape_bytes`, `ezsp_crc_mismatch_refused`, `ezsp_truncated_refused`, `ezsp_seq_wraps_at_eight`, `ezsp_oversize_refused`, `ezsp_callback_flag_surfaced` |
-| RD-COMPAT-06 | implemented + verified | `ember::EmberAdapter`: `MacDataSap` + `MacMgmtSap` + `HasCapabilities` over the mock transport (short-only mapping, 4-slot backpressure, cancel-as-`Cancelled`, NCP confirm/receive callback mapping, typed `rx_dropped` accounting) | `compat/tests/ember_vectors.rs::ember_data_request_encodes_ezsp_frame`, `ember_confirm_mapping_delivered`, `ember_confirm_mapping_no_ack`, `ember_indication_mapping`, `ember_backpressure_and_cancel` |
-| RD-COMPAT-07 | implemented + verified | join-transaction frame flow takes identical SAP decisions on the Ember path and the existing short-short MAC codec (`EspAdapter` + `MockDriver`): request handles, confirm statuses, indication source/LQI/MSDU, error mapping, queue-full backpressure | `compat/tests/ember_vectors.rs::ember_join_flow_parity_with_esp_codec`, `ember_error_mapping_parity_with_esp_codec` |
+| RD-COMPAT-05 | implemented + verified, CONFIRMED (sweep-41) | `ember::{encode, decode, next_seq, crc16}`: FLAG-delimited frames, LEN discipline, FLAG/ESC stuffing, 3-bit sequencing, CRC-16/CCITT; `MockEzspTransport` record/replay double | `compat/tests/ember_vectors.rs::ezsp_known_vector_byte_pinned`, `ezsp_escapes_flag_and_escape_bytes`, `ezsp_crc_mismatch_refused`, `ezsp_truncated_refused`, `ezsp_seq_wraps_at_eight`, `ezsp_oversize_refused`, `ezsp_callback_flag_surfaced` |
+| RD-COMPAT-06 | implemented + verified, CONFIRMED (sweep-41) | `ember::EmberAdapter`: `MacDataSap` + `MacMgmtSap` + `HasCapabilities` over the mock transport (short-only mapping, 4-slot backpressure, cancel-as-`Cancelled`, NCP confirm/receive callback mapping, typed `rx_dropped` accounting) | `compat/tests/ember_vectors.rs::ember_data_request_encodes_ezsp_frame`, `ember_confirm_mapping_delivered`, `ember_confirm_mapping_no_ack`, `ember_indication_mapping`, `ember_backpressure_and_cancel` |
+| RD-COMPAT-07 | implemented + verified, CONFIRMED (sweep-41) | join-transaction frame flow takes identical SAP decisions on the Ember path and the existing short-short MAC codec (`EspAdapter` + `MockDriver`): request handles, confirm statuses, indication source/LQI/MSDU, error mapping, queue-full backpressure | `compat/tests/ember_vectors.rs::ember_join_flow_parity_with_esp_codec`, `ember_error_mapping_parity_with_esp_codec` |
+
+## Wave-61 traceability — TI/Z-Stack-MT adapter skeleton (`rounddance-compat::ti`)
+
+Offline only (mock transport, no serial, no lab): the TI side of the
+consolidated-goal extension starts as a skeleton mirroring the
+wave-60 Ember lane, so the parked CC2652 lab unit stays untouched.
+Command octets are an adapter-local skeleton namespace
+(`CMD_DATA_SEND`, `EVT_TX_CONFIRM`, `EVT_DATA_RECEIVE` with SREQ vs
+AREQ type bits in `CMD0`), not the NCP command set — pinning real
+NCP values waits for the transport decision. No corpus IDs are
+reused on this path; the `RD-COMPAT-*` rows below are repo-minted
+(MINTED-pending-confirm) and cover only the TI half's genuinely new
+required behaviors. Wording in code/tests is paraphrase only, never
+spec text (D1).
+
+| Requirement ID | State | Implementing code | Verifying test |
+|----------------|-------|-------------------|----------------|
+| RD-COMPAT-08 | implemented + verified | `ti::{encode, decode, fcs}`: SOF-led frames, LEN-as-DATA-count discipline, SREQ/AREQ type bits in `CMD0`, XOR-fold FCS; `MockMtTransport` record/replay double | `compat/tests/ti_vectors.rs::mt_known_vector_byte_pinned`, `mt_fcs_mismatch_refused`, `mt_bad_sof_refused`, `mt_truncated_refused`, `mt_bad_length_refused`, `mt_oversize_refused`, `mt_type_flags_surfaced` |
+| RD-COMPAT-09 | implemented + verified | `ti::TiAdapter`: `MacDataSap` + `MacMgmtSap` + `HasCapabilities` over the mock transport (short-only mapping, adapter-local token echo for confirm-to-slot matching, 4-slot backpressure, cancel-as-`Cancelled`, NCP confirm/receive callback mapping, typed `rx_dropped` accounting) | `compat/tests/ti_vectors.rs::ti_data_request_encodes_mt_frame`, `ti_confirm_mapping_delivered`, `ti_confirm_mapping_no_ack`, `ti_indication_mapping`, `ti_backpressure_and_cancel` |
+| RD-COMPAT-10 | implemented + verified | join-transaction frame flow takes identical SAP decisions on the TI path and the existing short-short MAC codec (`EspAdapter` + `MockDriver`): request handles, confirm statuses, indication source/LQI/MSDU, error mapping, queue-full backpressure | `compat/tests/ti_vectors.rs::ti_join_flow_parity_with_esp_codec`, `ti_error_mapping_parity_with_esp_codec` |
 
 ## Wave-25 traceability — C6-standalone full-stack app (`rounddance-hal-esp::app`)
 
