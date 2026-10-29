@@ -67,6 +67,7 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
+pub mod ash;
 pub mod ember;
 pub mod negotiate;
 pub mod profile;

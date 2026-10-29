@@ -1783,3 +1783,24 @@ paraphrase only (D1).
 | Requirement ID | State | Implementing code | Verifying test |
 |----------------|-------|-------------------|----------------|
 | RD-GP-07 | implemented + verified, CONFIRMED (sweep-49) | `commissioning::CommissioningSession::reset` (reset restores the full idle invariant: staged reply dropped, reply-window deadline cleared, parked exchange identity cleared) + `note_success` / `tick`-timeout arms (reply-window deadline cleared alongside the staged reply) | `gp/tests/session_stages.rs::repro_reset_clears_staged_reply_and_window` (failing-first: parked exchange with staged reply → `reset` → `Idle` with no reply owed, no window running; a fresh park with nothing staged reports pending rather than stale bytes) + `::timeout_clears_staged_reply_and_window` (lapsed window → `Idle` with no reply owed) |
+
+## Wave-70 traceability — ASH link-control codec (lane 2)
+
+Offline only (no serial, no lab hardware): the Ember path gains the
+link-control layer that wraps EZSP frames on the wire — one codec
+step on top of the wave-60 skeleton. `rounddance-compat::ash` pins
+the DATA control octet (3-bit frame number, 3-bit piggybacked
+acknowledge number, retransmit flag) plus the ACK-only / NAK / RST /
+RSTACK / ERROR control shapes, with FLAG-delimited framing (LEN
+discipline, FLAG/ESC stuffing, CRC-16/CCITT via the shared `29B1`
+check reused from `ember::crc16`). Like the wave-60/61 layers, all
+control values are an adapter-local skeleton namespace, not the NCP
+command set — pinning real NCP values waits for the transport
+decision. Codec-only (no link state machine: retransmit/ack-window
+bookkeeping is follow-up). One repo-minted ID (`RD-COMPAT-11`),
+MINTED-pending-confirm at mint. No lab use, no corpus writes;
+wording in code/tests is paraphrase only (D1).
+
+| Requirement ID | State | Implementing code | Verifying test |
+|----------------|-------|-------------------|----------------|
+| RD-COMPAT-11 | implemented + verified | `ash::{encode_data, encode_ack, encode_nak, encode_rst, encode_rstack, encode_error, decode, decode_control, pack_data_header, next_num}`: DATA header codec (frm/ack/reTx), 5 control-frame shapes with body-length contracts, FLAG/LEN/stuffing/CRC framing over a bounded stack temp (all-or-nothing, panic-free by construction), 3-bit wrap + overflow refusal | `compat/tests/ash_vectors.rs` 12 tests: 4 byte-pinned full-frame vectors (DATA / ACK+NAK+RST / RSTACK+ERROR / reTx+stuffing), control-octet shape + refusal matrix, number wrap + `BadNumber`, CRC/truncation/oversize/short-output refusals, control body-length policing, max-stuffed-payload round-trip + all-or-nothing, EZSP-frame-body layering leg |
