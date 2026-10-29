@@ -36,6 +36,7 @@
 pub mod commissioning;
 pub mod frame;
 pub mod proxy;
+pub mod receive;
 pub mod reply;
 pub mod security;
 pub mod sink;
@@ -56,6 +57,10 @@ pub use proxy::{
     ProxyTableEntry, SinkTarget, BASIC_PROXY_FUNCTIONALITY, BASIC_TX_QUEUE_LEN, FULL_TX_QUEUE_LEN,
     MAX_BLOCKED_IDS, MAX_NOTIFICATION_PAYLOAD, MAX_PROXY_SINKS, MIN_BASIC_TX_QUEUE,
     MIN_BLOCKLIST_LEN, MIN_FULL_TX_QUEUE, TX_DURATION_MS, TX_OFFSET_MAX_MS, TX_OFFSET_MS,
+};
+pub use receive::{
+    open_secured, receive, GpKeySlot, GpKeySlots, NwkHandoff, NwkRoute, SinkDecision, MAX_GP_OPEN,
+    MAX_GP_SLOTS,
 };
 pub use reply::{
     is_payloadless_commissioning, ChannelConfig, ChannelRequest, CommissioningReply, ReplyOptions,

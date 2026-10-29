@@ -1590,3 +1590,47 @@ justification; corpus untouched throughout.
 |----------------|-------|-------------------|----------------|
 | RD-INSPECT-37 | implemented + verified, CONFIRMED (sweep-39) | `session::{SessionTimeline, TimelineStage, TimelineEvent, classify_tree}` + `SessionEngine` timeline table (16 rows, 8-event ring log; accepts/transports key on the joiner destination short, broadcast destinations fall back to source; `DATA_BEFORE_JOIN` / `REJOIN_WITHOUT_LEAVE` / `DATA_AFTER_LEAVE` / `GAP_OBSERVED` flags; short-keyed by design, IEEE rejoin-across-shorts stays two rows with the tie in reports) + `report::{timelines_to_text, timelines_to_json}` (standalone shapes, v1 snapshot byte-identical) | `inspect/tests/timeline.rs::repro_join_accept_data_has_no_session_timeline` (failing-first) + `::timeline_links_nwk_join_transport_announce_data` (MAC + NWK join legs, coordinator legs key on joiner, no coordinator row) + `::timeline_flags_data_before_join` + `::timeline_flags_rejoin_without_leave_and_data_after_leave` + `::timeline_denied_join_never_advances` + `::timeline_marks_sequence_gaps` + `::timeline_report_names_stage_and_anomalies` (v1 snapshot has no timeline key) + `::timeline_ignores_non_session_frames` + `::captured_corpus_pins_timeline_w58` (w50/w51/t1t2 census + c25-drift finding, metadata only) |
 | RD-INSPECT-38 | implemented + verified, CONFIRMED (sweep-39) | `sender::LoopbackSender` (core, no-alloc, 8×256B: `Sender` record + `Listener` FIFO replay with `TooLong`/`Full`+drops/`SmallBuffer` typed errors) + pcap-out via `pcap::write_pcap` (linktype 195; artifact `~/hwscratch/w58/sender_roundtrip.pcap`) | `inspect/tests/sender.rs::repro_no_loopback_sender` (failing-first: crafted→sent→received→dissected tree equals the direct tree) + `::roundtrip_names_every_leg_class` (ZCL data, ZDO annce, NWK leave, APS transport-key, MAC beacon-req/assoc-req, Touchlink scan-req — every leg decision-for-decision) + `::loopback_fifo_order_and_bounds` + `::pcap_out_roundtrip_is_wireshark_readable` (write→read byte-identical, every packet re-dissects to the crafted decision) |
+
+## Wave-64 traceability — GP sink library (lane 2)
+
+The GP gap "sink lib absent": `rounddance-gp` modeled the GPDF
+codec plus commissioning plus the reply path, and the inspector
+decoded GPDFs, but no sink-side library consumed them (sink = the
+mains-powered device that receives GPDFs, decrypts with slotted
+keys, dedups via counter, and routes to the network). This wave
+lands the sink library in `rounddance-gp` (`receive.rs`): slotted-key
+decrypt reusing the `decrypt::open_gp` wire semantics inside the
+`no_std` crate, counter-window dedup, sink-table admission (SrcId/IEEE
+pairing plus commissioning-mode handling), route-to-NWK handoff
+records, golden tests replaying the 519-GPDF w51 corpus shapes
+through the sink (census match), and a `rounddance-sim` GP sink
+scenario (commission → data → dedup-drop → reply)
+decision-matched to the air model. Reproduce-then-fix per behavior
+(HEAD-API repros failed first: intake/slots/handoff did not exist;
+a CCM* test-sealer error and a translation-precedence assertion
+were fixed against the shared wire math, corroborated by the
+known-good inspector opener). 6 repo-minted IDs (`RD-GP-01..06`),
+MINTED-pending-confirm. Paraphrase only (D1).
+
+Captured-air vectors: no new verbatim octets — the legs reuse the
+committed w51 goldens (MAC-outer-stripped MSDUs first pinned in
+`rounddance-inspect/tests/decode_depth.rs`; ciphertext/MIC class
+only). Sealed legs re-seal under a synthetic test-only key (same
+class as the wave-52 precedent). Replay census is metadata only:
+the w51 lane-1 per-shape pins (unsecured data 46 /
+commissioning-long 162 / compact 20 / counter-protected data 193 /
+decommissioning 42 / commissioning 10 / reply-window ask 10 /
+sealed encrypted 36 = 519 GPDFs across the 10 pcaps) match
+`~/hwscratch/w52/gp_census.log` (`analyze52_gp.py` CENSUS PASS
+519/519). Offline reproduction procedure: `cargo test -p
+rounddance-gp --test sink_golden` + `cargo test -p
+rounddance-sim --test gp_sink` (no lab use, no corpus writes).
+
+| Requirement ID | State | Implementing code | Verifying test |
+|----------------|-------|-------------------|----------------|
+| RD-GP-01 | implemented + verified | `receive::{GpKeySlots, GpKeySlot, open_secured}` (strict wire key-bit slot match, counter-plus-MIC verify + encrypted decrypt-then-verify, GP nonce + header AAD; `None`-class failures surface as typed `GpError`, never decrypts without a slotted key) | `gp/tests/sink_golden.rs::repro_secured_open_hands_off_with_slotted_key` (no-key / wrong-bit / wrong-level / mutated-MIC legs) + `::encrypted_open_decrypts_then_checks` (ciphertext names no command, open reveals it; sealer corroborated against the inspector opener) |
+| RD-GP-02 | implemented + verified | `receive::receive` (decode → ingress filter → secured open → counter-window dedup → Success completion → sink-table admission → translation/group fan-out; every path a typed `SinkDecision`, bounded + fallible + no-alloc) + `MAX_GP_OPEN` scratch contract | `gp/tests/sink_golden.rs::repro_sink_intake_hands_off_verbatim_data` (failing-first: intake did not exist) + `::air_model_unsecured_shapes_replay_with_pairing_decision` + `::repro_replayed_counter_drops_second_delivery` (dup drops, advance accepts) + `::foreign_shapes_drop_with_classifier_reason` (LPED / proxy-originated / maintenance / truncated) |
+| RD-GP-03 | implemented + verified | `receive::admits_for_commissioning` (announcement `0xE0` + `0xF0..=0xFF` reply-path range; SrcId endpoint-agnostic pairing, IEEE endpoint-scoped pairing; closed mode → `NoTableEntry`) | `gp/tests/sink_golden.rs::repro_commissioning_admits_only_with_mode_open` (closed drops, open admits, replayed counter still drops, secured `0xF3` admits, unsecured `0xF3` refused by the ingress gate) + `::ieee_admission_is_endpoint_scoped` (matching endpoint hands off, other endpoint unknown) |
+| RD-GP-04 | implemented + verified | `receive::{NwkHandoff, NwkRoute}` (group-bound entries hand `Groupcast(group)` with the raw GPD command, translated entries hand `PairedEndpoints` with profile/cluster/command + payload) | `gp/tests/sink_golden.rs::group_forward_hands_groupcast_route` + `::repro_sink_intake_hands_off_verbatim_data` (paired-endpoints triple) |
+| RD-GP-05 | implemented + verified | `receive` Success arm (`CMD_SUCCESS` + parked `AwaitingReply` session → `note_success`, sink-table entry + default translation install, `Commissioned`; `TransactionMismatch` refuses foreign frames) | `gp/tests/sink_golden.rs::repro_success_completes_parked_session` (failing-first: intake did not exist; foreign Success refused, matching Success pairs, paired data hands off after) |
+| RD-GP-06 | implemented + verified | census pins (`sink_golden.rs` shape constants sum to 519) + `rounddance-sim/tests/gp_sink.rs` scenario (commission → data → dedup-drop → reply: admit, handoff, replay-drop, advanced handoff, ask-admit, reply served in the 20–25 ms window, Success commissions, paired data hands off; trace + decision-log replay determinism) | `gp/tests/sink_golden.rs::census_pins_sum_to_oracle_total` + `sim/tests/gp_sink.rs::census_pins_sum_to_oracle_total` + `::gp_sink_commission_data_dedup_reply` (8-decision log, decision-for-decision) + `::gp_sink_replay_is_deterministic` |
