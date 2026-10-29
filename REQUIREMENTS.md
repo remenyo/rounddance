@@ -732,15 +732,17 @@ Command octets are an adapter-local skeleton namespace
 AREQ type bits in `CMD0`), not the NCP command set — pinning real
 NCP values waits for the transport decision. No corpus IDs are
 reused on this path; the `RD-COMPAT-*` rows below are repo-minted
-(MINTED-pending-confirm) and cover only the TI half's genuinely new
+(MINTED-pending-confirm at mint time; `RD-COMPAT-08..10` stand
+CONFIRMED via corpus sweep-42 with 0 corrections / 0 REJECT)
+and cover only the TI half's genuinely new
 required behaviors. Wording in code/tests is paraphrase only, never
 spec text (D1).
 
 | Requirement ID | State | Implementing code | Verifying test |
 |----------------|-------|-------------------|----------------|
-| RD-COMPAT-08 | implemented + verified | `ti::{encode, decode, fcs}`: SOF-led frames, LEN-as-DATA-count discipline, SREQ/AREQ type bits in `CMD0`, XOR-fold FCS; `MockMtTransport` record/replay double | `compat/tests/ti_vectors.rs::mt_known_vector_byte_pinned`, `mt_fcs_mismatch_refused`, `mt_bad_sof_refused`, `mt_truncated_refused`, `mt_bad_length_refused`, `mt_oversize_refused`, `mt_type_flags_surfaced` |
-| RD-COMPAT-09 | implemented + verified | `ti::TiAdapter`: `MacDataSap` + `MacMgmtSap` + `HasCapabilities` over the mock transport (short-only mapping, adapter-local token echo for confirm-to-slot matching, 4-slot backpressure, cancel-as-`Cancelled`, NCP confirm/receive callback mapping, typed `rx_dropped` accounting) | `compat/tests/ti_vectors.rs::ti_data_request_encodes_mt_frame`, `ti_confirm_mapping_delivered`, `ti_confirm_mapping_no_ack`, `ti_indication_mapping`, `ti_backpressure_and_cancel` |
-| RD-COMPAT-10 | implemented + verified | join-transaction frame flow takes identical SAP decisions on the TI path and the existing short-short MAC codec (`EspAdapter` + `MockDriver`): request handles, confirm statuses, indication source/LQI/MSDU, error mapping, queue-full backpressure | `compat/tests/ti_vectors.rs::ti_join_flow_parity_with_esp_codec`, `ti_error_mapping_parity_with_esp_codec` |
+| RD-COMPAT-08 | implemented + verified, CONFIRMED (sweep-42) | `ti::{encode, decode, fcs}`: SOF-led frames, LEN-as-DATA-count discipline, SREQ/AREQ type bits in `CMD0`, XOR-fold FCS; `MockMtTransport` record/replay double | `compat/tests/ti_vectors.rs::mt_known_vector_byte_pinned`, `mt_fcs_mismatch_refused`, `mt_bad_sof_refused`, `mt_truncated_refused`, `mt_bad_length_refused`, `mt_oversize_refused`, `mt_type_flags_surfaced` |
+| RD-COMPAT-09 | implemented + verified, CONFIRMED (sweep-42) | `ti::TiAdapter`: `MacDataSap` + `MacMgmtSap` + `HasCapabilities` over the mock transport (short-only mapping, adapter-local token echo for confirm-to-slot matching, 4-slot backpressure, cancel-as-`Cancelled`, NCP confirm/receive callback mapping, typed `rx_dropped` accounting) | `compat/tests/ti_vectors.rs::ti_data_request_encodes_mt_frame`, `ti_confirm_mapping_delivered`, `ti_confirm_mapping_no_ack`, `ti_indication_mapping`, `ti_backpressure_and_cancel` |
+| RD-COMPAT-10 | implemented + verified, CONFIRMED (sweep-42) | join-transaction frame flow takes identical SAP decisions on the TI path and the existing short-short MAC codec (`EspAdapter` + `MockDriver`): request handles, confirm statuses, indication source/LQI/MSDU, error mapping, queue-full backpressure | `compat/tests/ti_vectors.rs::ti_join_flow_parity_with_esp_codec`, `ti_error_mapping_parity_with_esp_codec` |
 
 ## Wave-25 traceability — C6-standalone full-stack app (`rounddance-hal-esp::app`)
 

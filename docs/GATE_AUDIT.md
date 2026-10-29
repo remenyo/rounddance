@@ -60,3 +60,34 @@ ESP `riscv32imac-esp-espidf +esp` check exit 0.
 - R5 PRO profile support: SCOPE §7 best-effort tracked fallback, zero PRO rows/evidence in repo. Cause: explicitly best-effort, never scheduled. Owner: repo.
 - R6 Full on-target ESP validation beyond best-effort `cargo check`s parked on hardware/human (`BLOCKERS.md` B-001/B-002/B-003 wifi-deaf quarantines, 15.4-ONLY policy). Cause: needs hands + healthy units. Owner: HW/human-blocker.
 - R7 802.15.4 MAC corpus requirements "coverage pending" (wave-16 note: no MAC corpus mined; `mac-sap` has no corpus req IDs). Cause: corpus gap. Owner: corpus.
+
+## Waves 58–62 evidence-pointer addendum (no verdict changes)
+
+Evidence pointers only — every gate verdict above stands unchanged
+(each cited wave re-ran the full matrix green; RED list untouched).
+Wave-62 lane 2 re-verified the matrix at HEAD: `cargo test
+--workspace` 120 suites / 859 passed / 0 failed exit 0 (doctests
+included), `cargo clippy --workspace --all-targets -- -D warnings` 0
+warnings exit 0, `cargo fmt --check` clean exit 0, `cargo check
+--workspace --exclude lab-arbitrator --target wasm32-unknown-unknown`
+exit 0, 8 protocol crates `--no-default-features` wasm32 green,
+`tools/host-wasm-check.sh` IDENTICAL, corpus `coverage_gate.py` PASS
+(docs=13 pages=3766/3766 unresolved=0 seed=519/519 pending=0, no
+corpus writes). Pedantic-leaning clippy reports only pre-existing
+repo-wide style classes — zero code churn this wave.
+
+- Wave-58 lane 2: `PROGRESS.md` wave-58 row; `REQUIREMENTS.md`
+  wave-58 section (RD-INSPECT-37..38 CONFIRMED via sweep-39);
+  evidence `~/hwscratch/w58/` (SUMMARY.md,
+  sender_roundtrip.pcap).
+- Wave-59 lane 1: `REQUIREMENTS.md` wave-58 section c25-drift
+  resolution note; evidence `~/hwscratch/w59/lane1/`.
+- Wave-60 lane 2: `PROGRESS.md` wave-60 row; `REQUIREMENTS.md`
+  wave-60 section (RD-COMPAT-05..07 MINTED-pending-confirm at mint);
+  evidence `~/hwscratch/w60/`.
+- Wave-61 lane 2: `PROGRESS.md` wave-61 row; `REQUIREMENTS.md`
+  wave-61 section (RD-COMPAT-05..07 flipped → CONFIRMED via
+  sweep-41); evidence `~/hwscratch/w61/lane2/`.
+- Wave-62 lane 2: `PROGRESS.md` wave-62 row; `REQUIREMENTS.md`
+  wave-61 section (RD-COMPAT-08..10 flipped → CONFIRMED via
+  sweep-42, 0 corrections / 0 REJECT); evidence `~/hwscratch/w62/`.
