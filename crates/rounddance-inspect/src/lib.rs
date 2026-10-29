@@ -34,6 +34,7 @@ pub mod keys;
 pub mod mac;
 pub mod nwk;
 pub mod nwkcmd;
+pub mod sender;
 pub mod session;
 pub mod touchlink;
 pub mod tree;

@@ -536,6 +536,124 @@ pub fn session_to_json(eng: &crate::session::SessionEngine) -> String {
     s
 }
 
+/// Human-readable stage name for a session timeline.
+fn timeline_stage_text(stage: crate::session::TimelineStage) -> &'static str {
+    match stage {
+        crate::session::TimelineStage::Absent => "absent",
+        crate::session::TimelineStage::Joining => "joining",
+        crate::session::TimelineStage::Joined => "joined",
+        crate::session::TimelineStage::Keyed => "keyed",
+        crate::session::TimelineStage::Announced => "announced",
+        crate::session::TimelineStage::Active => "active",
+    }
+}
+
+/// Human-readable anomaly names for a timeline flag word, `+`-joined.
+fn timeline_anomaly_text(flags: u8) -> String {
+    use crate::session::{DATA_AFTER_LEAVE, DATA_BEFORE_JOIN, GAP_OBSERVED, REJOIN_WITHOUT_LEAVE};
+    let mut parts = Vec::new();
+    if flags & DATA_BEFORE_JOIN != 0 {
+        parts.push("data-before-join");
+    }
+    if flags & REJOIN_WITHOUT_LEAVE != 0 {
+        parts.push("rejoin-without-leave");
+    }
+    if flags & DATA_AFTER_LEAVE != 0 {
+        parts.push("data-after-leave");
+    }
+    if flags & GAP_OBSERVED != 0 {
+        parts.push("gap");
+    }
+    if parts.is_empty() {
+        String::from("none")
+    } else {
+        parts.join("+")
+    }
+}
+
+/// One-line-per-session human summary of the engine timeline table.
+///
+/// Timelines render separately from [`session_to_text`]: the v1
+/// session snapshot carries no timelines, and neither does its text
+/// shape. Event codes follow [`TimelineEvent::code`](crate::session::TimelineEvent::code).
+pub fn timelines_to_text(eng: &crate::session::SessionEngine) -> String {
+    let mut s = String::new();
+    let _ = writeln!(s, "timelines:");
+    for t in eng.timelines().iter().flatten() {
+        let mut log = String::new();
+        for (code, tree_no) in t.log.iter().flatten() {
+            if !log.is_empty() {
+                log.push(' ');
+            }
+            let _ = write!(log, "{code}@{tree_no}");
+        }
+        let _ = writeln!(
+            s,
+            "  session: pan={} short={} ieee={} stage={} left={} events={} anomalies={} log=[{}]",
+            hex16(t.pan_id),
+            hex16(t.short_addr),
+            t.ieee
+                .map(|e| format!("{e:#018x}"))
+                .unwrap_or_else(|| String::from("-")),
+            timeline_stage_text(t.stage),
+            t.left,
+            t.event_total,
+            timeline_anomaly_text(t.anomalies),
+            log,
+        );
+    }
+    s
+}
+
+/// Machine-readable timeline table (standalone shape, not part of the
+/// v1 session snapshot in [`session_to_json`]).
+pub fn timelines_to_json(eng: &crate::session::SessionEngine) -> String {
+    use crate::session::{DATA_AFTER_LEAVE, DATA_BEFORE_JOIN, GAP_OBSERVED, REJOIN_WITHOUT_LEAVE};
+    let mut s = String::from("{\"timelines\":[");
+    let mut first = true;
+    for t in eng.timelines().iter().flatten() {
+        if !first {
+            s.push(',');
+        }
+        first = false;
+        let mut flags = String::new();
+        for (bit, name) in [
+            (DATA_BEFORE_JOIN, "data-before-join"),
+            (REJOIN_WITHOUT_LEAVE, "rejoin-without-leave"),
+            (DATA_AFTER_LEAVE, "data-after-leave"),
+            (GAP_OBSERVED, "gap"),
+        ] {
+            if t.anomalies & bit != 0 {
+                if !flags.is_empty() {
+                    flags.push(',');
+                }
+                flags.push_str(&format!("\"{name}\""));
+            }
+        }
+        let mut log = String::new();
+        for (code, tree_no) in t.log.iter().flatten() {
+            if !log.is_empty() {
+                log.push(',');
+            }
+            log.push_str(&format!("{{\"ev\":{code},\"tree\":{tree_no}}}"));
+        }
+        s.push_str(&format!(
+            "{{\"pan\":{},\"short\":{},\"ieee\":{},\"stage\":\"{}\",\"left\":{},\"events\":{},\"anomalies\":{},\"flags\":[{}],\"log\":[{}]}}",
+            t.pan_id,
+            t.short_addr,
+            t.ieee.map(|e| e.to_string()).unwrap_or_else(|| String::from("null")),
+            timeline_stage_text(t.stage),
+            t.left,
+            t.event_total,
+            t.anomalies,
+            flags,
+            log,
+        ));
+    }
+    s.push_str("]}");
+    s
+}
+
 /// Session snapshot load failure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SessionLoadError {

@@ -13,10 +13,15 @@
 //! secured-vs-plain frame counts. Per network: PAN id, distinct
 //! device count, and the same secured/plain split. Key slots
 //! ([`keys::KeySlots`]) record operator-loaded lab keys so secured
-//! frames can be reported as decryptable-offline or not.
+//! frames can be reported as decryptable-offline or not. Per session
+//! ([`SessionTimeline`]) the engine links join → transport → announce
+//! → data legs into stage timelines with anomaly flags; the timeline
+//! table keys on (PAN, short) exactly like the device rows, so a
+//! timeline never follows an IEEE rejoin across shorts (documented,
+//! pinned by test).
 
 use crate::keys::KeySlots;
-use crate::tree::DecodeTree;
+use crate::tree::{DecodeTree, GpKind, MacCmdKind, NwkCmdKind, TouchlinkKind};
 
 /// Devices tracked per engine.
 pub const MAX_DEVICES: usize = 32;
@@ -129,11 +134,12 @@ pub struct NetworkEntry {
     pub last_seen: u32,
 }
 
-/// Session engine: fold trees into device/network tables.
+/// Session engine: fold trees into device/network/timeline tables.
 #[derive(Clone, Debug)]
 pub struct SessionEngine {
     devices: [Option<DeviceEntry>; MAX_DEVICES],
     networks: [Option<NetworkEntry>; MAX_NETWORKS],
+    timelines: [Option<SessionTimeline>; MAX_TIMELINES],
     keys: KeySlots,
     now: u32,
     /// Trees folded so far.
@@ -158,6 +164,7 @@ impl SessionEngine {
         Self {
             devices: [None; MAX_DEVICES],
             networks: [None; MAX_NETWORKS],
+            timelines: [None; MAX_TIMELINES],
             keys: KeySlots::new(),
             now: 0,
             trees: 0,
@@ -207,6 +214,10 @@ impl SessionEngine {
         Self {
             devices,
             networks,
+            // Snapshot schema v1 carries no timelines (see
+            // `crate::report`): a restore restarts with an empty
+            // timeline table, like the GP key slots.
+            timelines: [None; MAX_TIMELINES],
             keys: KeySlots::restore(key_slots, key_slots.min(u32::MAX as usize) as u32),
             now: 0,
             trees,
@@ -300,6 +311,36 @@ impl SessionEngine {
                         en.last_rssi = radio.rssi;
                     }
                     en.last_lqi = Some(radio.lqi);
+                }
+            }
+        }
+        // Timeline fold: session-stage legs ride on the same (PAN,
+        // short) key as the device row, so MAC-only join legs and
+        // NWK-carried data legs meet in one row — except accepts and
+        // transport-key legs, which the coordinator sends: those key
+        // on the joiner (destination) short, never the coordinator
+        // source, or every join would pollute the coordinator row.
+        // Source-less trees (acks, beacon requests) and the 0xffff
+        // sentinel short never open a timeline. A gap the replay
+        // windows just counted is timeline evidence too: the session
+        // saw frames go missing.
+        if let Some(ev) = classify_tree(tree) {
+            let key: Option<(u16, Option<u64>)> = match ev {
+                TimelineEvent::JoinAccept | TimelineEvent::TransportKey => {
+                    accept_key(tree).or(short).map(|s| (s, None))
+                }
+                _ => short.map(|s| (s, tree_ieee(tree))),
+            };
+            if let Some((s, ieee)) = key {
+                if s != EMPTY_MEMBER {
+                    let mut gaps = false;
+                    if let Some(idx) = row {
+                        if let Some(en) = self.devices[idx].as_ref() {
+                            gaps = en.nwk_window.is_some_and(|w| w.gaps > 0)
+                                || en.aps_window.is_some_and(|w| w.gaps > 0);
+                        }
+                    }
+                    self.note_timeline(pan, s, ieee, ev, gaps);
                 }
             }
         }
@@ -486,3 +527,409 @@ impl SessionEngine {
 }
 // NWK headers carry no PAN id; NWK-only trees key under PAN 0 (see
 // `note_tree`'s `unwrap_or(0)`) until a MAC header binds the PAN.
+
+// ---------------------------------------------------------------------------
+// Session timelines: join → transport → announce → data per (PAN, short).
+// ---------------------------------------------------------------------------
+
+/// Sessions (join lifecycles) tracked per engine.
+pub const MAX_TIMELINES: usize = 16;
+/// Timeline event-log depth (oldest entries drop off past this).
+pub const MAX_TIMELINE_EVENTS: usize = 8;
+
+/// Anomaly flag: transport, announce, or data observed with no
+/// join-accept on record for this session (frames from an unknown or
+/// already-left device, or a capture that starts mid-session).
+pub const DATA_BEFORE_JOIN: u8 = 0x01;
+/// Anomaly flag: a fresh join request while the session was already
+/// joined and never left (rejoin without a leave, or a duplicate
+/// request storm).
+pub const REJOIN_WITHOUT_LEAVE: u8 = 0x02;
+/// Anomaly flag: transport, announce, or data observed after a leave
+/// with no rejoin-accept since.
+pub const DATA_AFTER_LEAVE: u8 = 0x04;
+/// Observation flag: the session's device row counted an NWK or APS
+/// sequence gap at some folded frame (frames went missing on air).
+pub const GAP_OBSERVED: u8 = 0x08;
+
+/// Lifecycle stage of one session. Stages advance monotonically
+/// (partial captures may skip stages: data on a capture that starts
+/// mid-session jumps straight to [`TimelineStage::Active`] and files
+/// [`DATA_BEFORE_JOIN`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TimelineStage {
+    /// No join leg seen yet.
+    #[default]
+    Absent,
+    /// A join request is on record, no accept yet.
+    Joining,
+    /// An accept (status 0) is on record.
+    Joined,
+    /// A transport-key leg followed the accept.
+    Keyed,
+    /// A Device-annce followed the transport leg.
+    Announced,
+    /// Application data is flowing.
+    Active,
+}
+
+/// One timeline-relevant leg, classified from a dissected tree.
+///
+/// Sealed frames never classify: a secured transport-key outer shows
+/// no APS command leg without its key, so an invisible keying step
+/// stays invisible rather than guessed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TimelineEvent {
+    /// MAC association request, NWK rejoin request, Touchlink
+    /// start/join request.
+    JoinRequest,
+    /// Accepted join (any accept leg with status 0).
+    JoinAccept,
+    /// Refused join (any accept leg with status != 0).
+    JoinDeny,
+    /// MAC disassociation or NWK leave.
+    Leave,
+    /// APS transport-key command (`0x05`).
+    TransportKey,
+    /// ZDO Device-annce (`0x0013` request).
+    Announce,
+    /// Application data (ZCL leg, non-ZDO APS data, GP data).
+    Data,
+}
+
+impl TimelineEvent {
+    /// Compact log discriminant (stable across releases).
+    #[must_use]
+    pub const fn code(self) -> u8 {
+        match self {
+            Self::JoinRequest => 1,
+            Self::JoinAccept => 2,
+            Self::JoinDeny => 3,
+            Self::Leave => 4,
+            Self::TransportKey => 5,
+            Self::Announce => 6,
+            Self::Data => 7,
+        }
+    }
+
+    /// Short log/report name.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::JoinRequest => "join-req",
+            Self::JoinAccept => "join-accept",
+            Self::JoinDeny => "join-deny",
+            Self::Leave => "leave",
+            Self::TransportKey => "transport-key",
+            Self::Announce => "announce",
+            Self::Data => "data",
+        }
+    }
+}
+
+/// One observed session: the linked join → transport → announce →
+/// data chain for a single (PAN, short) key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SessionTimeline {
+    /// PAN identifier the session lives on.
+    pub pan_id: u16,
+    /// Short address the session is keyed on.
+    pub short_addr: u16,
+    /// Extended address, once a leg carries it.
+    pub ieee: Option<u64>,
+    /// Highest lifecycle stage reached.
+    pub stage: TimelineStage,
+    /// Bitwise anomaly flags ([`DATA_BEFORE_JOIN`] et al).
+    pub anomalies: u8,
+    /// True once a leave leg folded with no rejoin-accept since.
+    pub left: bool,
+    /// Total timeline events folded (the log keeps the last
+    /// [`MAX_TIMELINE_EVENTS`]).
+    pub event_total: u32,
+    /// Recent event log: (event code, tree number) pairs.
+    pub log: [Option<(u8, u32)>; MAX_TIMELINE_EVENTS],
+    /// Recency counter (eviction order).
+    pub last_seen: u32,
+}
+
+impl SessionTimeline {
+    /// Total timeline events folded into this session.
+    #[must_use]
+    pub const fn events(self) -> u32 {
+        self.event_total
+    }
+}
+
+/// Classify one dissected tree into its session-timeline event, if
+/// any. Non-session legs (acks, beacons, polls, route/link-status
+/// chatter, scan exchanges, sealed frames) yield `None` and never
+/// open or touch a timeline.
+#[must_use]
+pub fn classify_tree(tree: &DecodeTree) -> Option<TimelineEvent> {
+    // MAC join legs first: they ride on command frames with no NWK.
+    if let Some(m) = tree.maccmd() {
+        match m.kind {
+            MacCmdKind::AssocReq { .. } => return Some(TimelineEvent::JoinRequest),
+            MacCmdKind::AssocResp { status, .. } => {
+                return Some(if status == 0 {
+                    TimelineEvent::JoinAccept
+                } else {
+                    TimelineEvent::JoinDeny
+                });
+            }
+            MacCmdKind::Disassoc { .. } => return Some(TimelineEvent::Leave),
+            _ => return None,
+        }
+    }
+    // NWK join/leave legs (unsecured or verified-open only: sealed
+    // frames carry no `NwkCmd` layer).
+    if let Some(n) = tree.nwkcmd() {
+        match n.kind {
+            NwkCmdKind::RejoinRequest { .. } => return Some(TimelineEvent::JoinRequest),
+            NwkCmdKind::RejoinResponse { status, .. } => {
+                return Some(if status == 0 {
+                    TimelineEvent::JoinAccept
+                } else {
+                    TimelineEvent::JoinDeny
+                });
+            }
+            NwkCmdKind::Leave { .. } => return Some(TimelineEvent::Leave),
+            _ => return None,
+        }
+    }
+    // Touchlink order legs (broadcast-PAN outers, never NWK).
+    if let Some(t) = tree.touchlink() {
+        match t.kind {
+            TouchlinkKind::StartReq { .. } | TouchlinkKind::JoinReq { .. } => {
+                return Some(TimelineEvent::JoinRequest)
+            }
+            TouchlinkKind::StartRsp { status } | TouchlinkKind::JoinRsp { status } => {
+                return Some(if status == 0 {
+                    TimelineEvent::JoinAccept
+                } else {
+                    TimelineEvent::JoinDeny
+                });
+            }
+            _ => return None,
+        }
+    }
+    // APS transport-key command (visible on unsecured or
+    // verified-open legs only).
+    if let Some(a) = tree.aps() {
+        if a.frame_type == 1 {
+            if a.command_id == Some(0x05) {
+                return Some(TimelineEvent::TransportKey);
+            }
+            return None;
+        }
+    }
+    // ZDO Device-annce request; every other envelope is chatter.
+    if let Some(z) = tree.zdo() {
+        if z.cluster_id == 0x0013 && !z.is_response {
+            return Some(TimelineEvent::Announce);
+        }
+        return None;
+    }
+    // Application data: a ZCL leg, a non-ZDO APS data frame, or GP
+    // application data.
+    if tree.zcl().is_some() {
+        return Some(TimelineEvent::Data);
+    }
+    if let Some(a) = tree.aps() {
+        if a.frame_type == 0 && a.profile_id != 0x0000 {
+            return Some(TimelineEvent::Data);
+        }
+    }
+    if tree.gp().is_some_and(|g| g.kind == GpKind::Data) {
+        return Some(TimelineEvent::Data);
+    }
+    None
+}
+
+/// Joiner short for coordinator-sourced legs: the unicast MAC
+/// destination first (association responses name the assigned short
+/// there), then the unicast NWK destination (rejoin responses and
+/// transport-key outers). Broadcast destinations never key a
+/// session; the caller falls back to the source short.
+fn accept_key(tree: &DecodeTree) -> Option<u16> {
+    use crate::tree::Addr as A;
+    if let Some(m) = tree.mac() {
+        if let A::Short(d) = m.dst {
+            if d != EMPTY_MEMBER {
+                return Some(d);
+            }
+        }
+    }
+    if let Some(n) = tree.nwk() {
+        if n.dst_addr != EMPTY_MEMBER {
+            return Some(n.dst_addr);
+        }
+    }
+    None
+}
+
+/// Source IEEE address carried by a tree, if any leg names one.
+fn tree_ieee(tree: &DecodeTree) -> Option<u64> {
+    if let Some(m) = tree.mac() {
+        if let crate::tree::Addr::Extended(e) = m.src {
+            return Some(e);
+        }
+    }
+    if let Some(n) = tree.nwk() {
+        if let Some(e) = n.src_ieee {
+            return Some(e);
+        }
+    }
+    None
+}
+
+impl SessionEngine {
+    /// Timeline rows (table order, dense-prefix not guaranteed).
+    #[must_use]
+    pub fn timelines(&self) -> &[Option<SessionTimeline>; MAX_TIMELINES] {
+        &self.timelines
+    }
+
+    /// Look up a session timeline by (PAN, short).
+    #[must_use]
+    pub fn timeline(&self, pan: u16, short: u16) -> Option<SessionTimeline> {
+        self.timelines
+            .iter()
+            .filter_map(|t| *t)
+            .find(|t| t.pan_id == pan && t.short_addr == short)
+    }
+
+    /// Fold one timeline event into the (PAN, short) row, opening the
+    /// row on first sight. `gaps` marks sequence gaps the device
+    /// replay windows already counted for this frame.
+    fn note_timeline(
+        &mut self,
+        pan: u16,
+        short: u16,
+        ieee: Option<u64>,
+        ev: TimelineEvent,
+        gaps: bool,
+    ) {
+        self.now = self.now.wrapping_add(1);
+        let now = self.now;
+        let tree_no = self.trees;
+        let idx = if let Some(i) = self
+            .timelines
+            .iter()
+            .position(|t| matches!(t, Some(e) if e.pan_id == pan && e.short_addr == short))
+        {
+            i
+        } else if let Some(i) = self.timelines.iter().position(|t| t.is_none()) {
+            self.timelines[i] = Some(SessionTimeline {
+                pan_id: pan,
+                short_addr: short,
+                ieee,
+                stage: TimelineStage::Absent,
+                anomalies: 0,
+                left: false,
+                event_total: 0,
+                log: [None; MAX_TIMELINE_EVENTS],
+                last_seen: now,
+            });
+            i
+        } else {
+            // Evict the stalest row.
+            let mut oldest = 0;
+            for (i, t) in self.timelines.iter().enumerate() {
+                if t.map(|e| e.last_seen).unwrap_or(0)
+                    < self.timelines[oldest]
+                        .map(|e| e.last_seen)
+                        .unwrap_or(u32::MAX)
+                {
+                    oldest = i;
+                }
+            }
+            self.timelines[oldest] = Some(SessionTimeline {
+                pan_id: pan,
+                short_addr: short,
+                ieee,
+                stage: TimelineStage::Absent,
+                anomalies: 0,
+                left: false,
+                event_total: 0,
+                log: [None; MAX_TIMELINE_EVENTS],
+                last_seen: now,
+            });
+            oldest
+        };
+        if let Some(tl) = self.timelines[idx].as_mut() {
+            if ieee.is_some() {
+                tl.ieee = ieee;
+            }
+            let joined_or_beyond = match tl.stage {
+                TimelineStage::Absent | TimelineStage::Joining => false,
+                TimelineStage::Joined
+                | TimelineStage::Keyed
+                | TimelineStage::Announced
+                | TimelineStage::Active => true,
+            };
+            match ev {
+                TimelineEvent::JoinRequest => {
+                    if joined_or_beyond && !tl.left {
+                        tl.anomalies |= REJOIN_WITHOUT_LEAVE;
+                    } else {
+                        tl.stage = TimelineStage::Joining;
+                        tl.left = false;
+                    }
+                }
+                TimelineEvent::JoinAccept => {
+                    if !joined_or_beyond {
+                        tl.stage = TimelineStage::Joined;
+                    }
+                    tl.left = false;
+                }
+                TimelineEvent::JoinDeny => {}
+                TimelineEvent::Leave => {
+                    tl.left = true;
+                }
+                TimelineEvent::TransportKey => {
+                    if !joined_or_beyond {
+                        tl.anomalies |= DATA_BEFORE_JOIN;
+                    } else if tl.left {
+                        tl.anomalies |= DATA_AFTER_LEAVE;
+                    } else if tl.stage == TimelineStage::Joined {
+                        tl.stage = TimelineStage::Keyed;
+                    }
+                }
+                TimelineEvent::Announce => {
+                    if !joined_or_beyond {
+                        tl.anomalies |= DATA_BEFORE_JOIN;
+                    } else if tl.left {
+                        tl.anomalies |= DATA_AFTER_LEAVE;
+                    } else if tl.stage == TimelineStage::Joined || tl.stage == TimelineStage::Keyed
+                    {
+                        tl.stage = TimelineStage::Announced;
+                    }
+                }
+                TimelineEvent::Data => {
+                    if !joined_or_beyond {
+                        tl.anomalies |= DATA_BEFORE_JOIN;
+                    } else if tl.left {
+                        tl.anomalies |= DATA_AFTER_LEAVE;
+                    }
+                    if !tl.left {
+                        tl.stage = TimelineStage::Active;
+                    }
+                }
+            }
+            if gaps {
+                tl.anomalies |= GAP_OBSERVED;
+            }
+            tl.event_total = tl.event_total.saturating_add(1);
+            // Shift the log when full; the newest event lands last.
+            if tl.log[MAX_TIMELINE_EVENTS - 1].is_some() {
+                tl.log.copy_within(1.., 0);
+                tl.log[MAX_TIMELINE_EVENTS - 1] = None;
+            }
+            if let Some(slot) = tl.log.iter_mut().find(|s| s.is_none()) {
+                *slot = Some((ev.code(), tree_no));
+            }
+            tl.last_seen = now;
+        }
+    }
+}

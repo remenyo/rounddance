@@ -1494,3 +1494,43 @@ Status-Code TLVs. Offline reproduction procedure:
 | RD-INSPECT-34 | implemented + verified | `ble::decode_hci` (btsnoop flags 2/3/4/5 → command/event/ACL-TX/ACL-RX; opcode/event/subevent/conn-handle/length naming; strict length checks) + `ble::decode_att` (named opcode classes incl. MTU req/rsp values, error req/handle/code, discovery ranges + 16/128-bit UUID flags, read/write/notify handles with length-named values; unknown opcodes file the octet) + `chain::dissect_ble` (HCI leg, ATT leg, `ble-unknown` stop on refusal; commands/events file HCI only) + `tree::{HciNode, HciKind, AttNode, AttKind}` + `TreeError::{BleTruncated, BleMalformed}` + `report` text/JSON `hci`/`att` legs + `inspect-live` depth key | `inspect/tests/ble_att.rs::repro_hci_records_have_no_ble_leg` (failing-first: no BLE entry pre-fix) + `::hci_acl_mtu_exchange_names_mtu_values` (verbatim 517/256 + report shapes) + `::att_error_response_names_request_and_code` (verbatim 0x80 leg) + `::hci_framing_failures_are_typed` (empty/short/bad-flags/non-ATT-CID/unknown-opcode legs) + `::ble_truncation_prefixes_are_typed_and_panic_free` (every prefix of all 9 verbatim vectors) |
 | RD-INSPECT-35 | implemented + verified | `ble::decode_direct` reusing the `rounddance-direct` GATT tables (new `rounddance-inspect` dependency; no parallel constant table) → `tree::{DirectNode, DirectKind}`: discovery bitmaps (services + 3 security + 8 commissioning chars over reversed LE wire UUIDs; ≥1 Direct UUID required) + Status-Code TLV notifications (exact 4-octet shape, defined domain gate) + write envelopes (≥2 complete defined-tag TLVs, exact consumption; single-TLV CCC writes refused; bodies never carried or rendered) + `report` text/JSON `direct` legs; session attribution unchanged (BLE trees count under PAN 0, no device row, zero secured accounting) | `inspect/tests/ble_att.rs::repro_discovery_without_direct_attribution` (failing-first) + `::direct_discovery_names_all_eleven_characteristics` (verbatim 11-char vector + generic-services no-leg) + `::direct_status_notify_names_domain_and_code` (verbatim GENERAL + FORM notifies, non-status no-leg, report shapes) + `::direct_write_envelope_names_tlvs_without_bodies` (verbatim 27-octet/6-TLV envelope, no body bytes in reports, CCC no-leg) + `::direct_envelope_refusals_stay_undecided` (reserved tag, bad domain, short status) + `::ble_hci_layer_reuses_direct_uuid_tables` + `::ble_trees_fold_without_device_attribution` |
 | RD-INSPECT-36 | implemented + verified | `btsnoop::read_all` (`std`: magic + record walk, monitor-control flags skipped, HCI records with opaque clock; typed BadMagic/Truncated) + `inspect/tests/live_air.rs::captured_corpus_pins_ble_w52` (9 sha256 + per-capture ACL counts + opcode census + MTU values + UUID/write/notify counts as metadata only) | `inspect/tests/ble_att.rs::btsnoop_ingest_reads_hci_records_and_skips_control` (hand-built container: note skip, cmd/evt/ACL ingest, bad-magic/truncation legs, every record dissects) + `::live_air::captured_corpus_pins_ble_w52` + offline `analyze53_ble.py` CENSUS PASS |
+
+## Wave-58 traceability — stateful session engine + sender path (lane 2)
+
+The decode legs are complete (MAC/NWK/NWKcmd/ZDO/Touchlink/GP/BLE
+with goldens plus the offline census); the two remaining
+consolidated-goal gaps are the stateful analysis engine
+(multi-frame session tracking across legs) and the sender path
+(listeners exist via captures, senders do not). This wave lands
+both, offline only (loopback + committed-capture replays, no lab
+use, no corpus writes): a per-(PAN, short) session-timeline table
+fed by every dissected tree, linking join → transport → announce →
+data legs into stage timelines with gap/anomaly flags, plus a
+`Sender` loopback/mock implementation verified
+decision-for-decision against the dissector with a pcap-out writer.
+Reproduce-then-fix per behavior (both HEAD-API repros failed, then
+passed). 2 repo-minted IDs (`RD-INSPECT-37..38`),
+MINTED-pending-confirm. Paraphrase only (D1).
+
+Captured-air vectors: no new verbatim octets — the legs reuse the
+committed goldens. Replay census is metadata only: the w50 set
+(1191 frames: 2 ack / 463 beacon / 480 interpan / 171 mac-command /
+75 secured, 0 dissect errors → initiator 0x7f68 joining ×25 events,
+responder 0x97a4 joined ×7, no anomalies), the w51 lane-1 set
+(5218 frames, 0 errors, 519 GP legs → two Active sessions with
+data-before-join, keying legs sealed), t1/t2 keyed under the
+documented netkey digest (1493 frames, 0 errors, 153 verified-open
+at key sequence 0x00 with 0 orphans, legs 86 APS / 51 NWK-command /
+41 ZCL / 32 ZDO → three Active sessions with leave + gap
+anomalies). Offline reproduction procedure: the temporary
+`replay58` example (run, recorded, removed — `~/hwscratch/w58/`
+`SUMMARY.md` §2; keyed mode loads the lab 0600 key file locally and
+recovers the 1-octet on-air key sequence, never printing key
+bytes). FINDING: on-disk `w50/c25.pcap` no longer matches its
+wave-50 pin (3 hex chars differ; count unchanged at 209) — corpus
+left untouched, old pin as-is.
+
+| Requirement ID | State | Implementing code | Verifying test |
+|----------------|-------|-------------------|----------------|
+| RD-INSPECT-37 | implemented + verified | `session::{SessionTimeline, TimelineStage, TimelineEvent, classify_tree}` + `SessionEngine` timeline table (16 rows, 8-event ring log; accepts/transports key on the joiner destination short, broadcast destinations fall back to source; `DATA_BEFORE_JOIN` / `REJOIN_WITHOUT_LEAVE` / `DATA_AFTER_LEAVE` / `GAP_OBSERVED` flags; short-keyed by design, IEEE rejoin-across-shorts stays two rows with the tie in reports) + `report::{timelines_to_text, timelines_to_json}` (standalone shapes, v1 snapshot byte-identical) | `inspect/tests/timeline.rs::repro_join_accept_data_has_no_session_timeline` (failing-first) + `::timeline_links_nwk_join_transport_announce_data` (MAC + NWK join legs, coordinator legs key on joiner, no coordinator row) + `::timeline_flags_data_before_join` + `::timeline_flags_rejoin_without_leave_and_data_after_leave` + `::timeline_denied_join_never_advances` + `::timeline_marks_sequence_gaps` + `::timeline_report_names_stage_and_anomalies` (v1 snapshot has no timeline key) + `::timeline_ignores_non_session_frames` + `::captured_corpus_pins_timeline_w58` (w50/w51/t1t2 census + c25-drift finding, metadata only) |
+| RD-INSPECT-38 | implemented + verified | `sender::LoopbackSender` (core, no-alloc, 8×256B: `Sender` record + `Listener` FIFO replay with `TooLong`/`Full`+drops/`SmallBuffer` typed errors) + pcap-out via `pcap::write_pcap` (linktype 195; artifact `~/hwscratch/w58/sender_roundtrip.pcap`) | `inspect/tests/sender.rs::repro_no_loopback_sender` (failing-first: crafted→sent→received→dissected tree equals the direct tree) + `::roundtrip_names_every_leg_class` (ZCL data, ZDO annce, NWK leave, APS transport-key, MAC beacon-req/assoc-req, Touchlink scan-req — every leg decision-for-decision) + `::loopback_fifo_order_and_bounds` + `::pcap_out_roundtrip_is_wireshark_readable` (write→read byte-identical, every packet re-dissects to the crafted decision) |
