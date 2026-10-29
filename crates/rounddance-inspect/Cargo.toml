@@ -9,9 +9,19 @@ description = "Packet inspector: 802.15.4/NWK/APS/ZCL dissector chain, decode tr
 [features]
 default = ["std"]
 std = []
+# Host live-listener binary: termios serial driver over `libc` plus
+# the `std` sniffer parser/replay module. Never enabled for wasm.
+live = ["std", "dep:libc"]
 
 [dependencies]
 rounddance-mac-sap = { path = "../rounddance-mac-sap" }
 rounddance-nwk = { path = "../rounddance-nwk" }
 rounddance-aps = { path = "../rounddance-aps" }
 rounddance-zcl = { path = "../rounddance-zcl" }
+rounddance-security = { path = "../rounddance-security" }
+libc = { version = "0.2", optional = true }
+
+[[bin]]
+name = "inspect-live"
+path = "src/bin/inspect-live.rs"
+required-features = ["live"]

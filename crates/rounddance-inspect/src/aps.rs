@@ -7,6 +7,11 @@ use crate::tree::ApsNode;
 pub enum ApsError {
     /// Codec refusal; discriminant preserved for the report.
     Codec(u8),
+    /// The APS security bit is set: the header is followed by the
+    /// auxiliary header and ciphertext, so the command identifier
+    /// (or ZCL payload) is sealed inside and must never be parsed
+    /// from the aux octets. The chain files these as `secured`.
+    Secured,
 }
 
 fn discriminant(e: &rounddance_aps::frame::Error) -> u8 {
@@ -42,6 +47,14 @@ fn delivery_bits(d: rounddance_aps::frame::DeliveryMode) -> u8 {
 pub fn decode(buf: &[u8]) -> Result<(ApsNode, &[u8]), ApsError> {
     let ty = rounddance_aps::frame::peek_frame_type(buf)
         .map_err(|e| ApsError::Codec(discriminant(&e)))?;
+    // A set security bit means an auxiliary header plus ciphertext
+    // follows the APS header: refuse before any command-identifier
+    // or payload parse can misread the aux control octet (seen live
+    // on a transport-key outer whose `0x30` aux octet parsed as a
+    // bogus command).
+    if buf.first().is_some_and(|b| b & 0x20 != 0) {
+        return Err(ApsError::Secured);
+    }
     match ty {
         rounddance_aps::frame::FrameType::Data => {
             let d = rounddance_aps::frame::decode_data(buf)

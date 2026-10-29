@@ -15,11 +15,32 @@ pub enum Addr {
     Extended(u64),
 }
 
+/// Radio capture metadata for one dissected frame: the listener's
+/// channel plus signal readings. The dissector never uses these for
+/// parsing; they travel with the tree so session tables and reports
+/// can attribute signal quality per device.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Radio {
+    /// 802.15.4 channel the frame arrived on (11–26).
+    pub channel: u8,
+    /// Received signal strength in dBm, when physically plausible
+    /// (see [`crate::capture`] for the validity range: positive
+    /// readings are sniffer-side quirks and arrive here as `None`).
+    pub rssi: Option<i8>,
+    /// Link quality indicator (0–255, radio-defined).
+    pub lqi: u8,
+}
+
 /// 802.15.4 MAC header summary (frame-control + sequencing + addressing).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MacNode {
     /// Frame type (bits 0–2): beacon / data / ack / command.
     pub frame_type: u8,
+    /// MAC command identifier: the first MSDU octet of command
+    /// frames (association, data-request poll, beacon request, ...),
+    /// `None` on every other frame type and on empty command
+    /// payloads.
+    pub command_id: Option<u8>,
     /// Security enabled (bit 3).
     pub security_enabled: bool,
     /// Sequence number (suppressed variant records 0 + `seq_present`).
@@ -239,7 +260,8 @@ pub enum ZclDetail {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NoteNode {
     /// Machine-readable reason (`"secured"`, `"truncated"`, `"unknown"`,
-    /// `"trailing"`).
+    /// `"trailing"`, `"ack"`, `"beacon"`, `"mac-command"`,
+    /// `"decrypted"`).
     pub reason: &'static str,
     /// Octets remaining at this layer.
     pub remaining: u16,
@@ -268,6 +290,7 @@ pub const MAX_LAYERS: usize = 5;
 pub struct DecodeTree {
     layers: [Option<Layer>; MAX_LAYERS],
     len: u8,
+    radio: Option<Radio>,
 }
 
 /// Chain-level failure: nothing could be decoded at all.
@@ -294,7 +317,26 @@ impl DecodeTree {
         Self {
             layers: [None; MAX_LAYERS],
             len: 0,
+            radio: None,
         }
+    }
+
+    /// Attach radio capture metadata (channel + signal readings).
+    /// A positive RSSI is unphysical on the lab sniffer path (see
+    /// [`crate::capture`]) and is stored as unknown (`None`); the
+    /// channel and LQI pass through unchanged.
+    pub fn set_radio(&mut self, channel: u8, rssi: i8, lqi: u8) {
+        self.radio = Some(Radio {
+            channel,
+            rssi: if rssi <= 0 { Some(rssi) } else { None },
+            lqi,
+        });
+    }
+
+    /// Radio capture metadata, when attached.
+    #[must_use]
+    pub const fn radio(self) -> Option<Radio> {
+        self.radio
     }
 
     /// Number of layers pushed.

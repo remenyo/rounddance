@@ -70,6 +70,39 @@ pub fn decode(buf: &[u8]) -> Result<(DecodedMac, &[u8]), MacError> {
     let frame_type = (fc & FC_TYPE_MASK) as u8;
     let security_enabled = fc & FC_SECURITY != 0;
     let seq_present = fc & FC_SEQ_SUPPRESS == 0;
+    if frame_type == 2 {
+        // Acknowledgement: frame control plus sequence number only,
+        // no addressing fields. A 3-octet ack is the whole frame;
+        // longer (2015 enhanced) variants keep their tail as MSDU.
+        let mut pos = 2;
+        let mut seq = 0u8;
+        if seq_present {
+            if buf.len() < pos + 1 {
+                return Err(MacError::Truncated);
+            }
+            seq = buf[pos];
+            pos += 1;
+        }
+        let node = MacNode {
+            frame_type,
+            command_id: None,
+            security_enabled,
+            seq,
+            seq_present,
+            dst_pan: None,
+            dst: Addr::None,
+            src_pan: None,
+            src: Addr::None,
+            header_len: pos as u8,
+        };
+        return Ok((
+            DecodedMac {
+                node,
+                header_len: pos,
+            },
+            &buf[pos..],
+        ));
+    }
     let dst_mode = ((fc & FC_DST_MODE_MASK) >> 10) as u8;
     let src_mode = ((fc & FC_SRC_MODE_MASK) >> 14) as u8;
     if dst_mode == 1 || src_mode == 1 {
@@ -117,8 +150,19 @@ pub fn decode(buf: &[u8]) -> Result<(DecodedMac, &[u8]), MacError> {
     if pos > u8::MAX as usize {
         return Err(MacError::Truncated);
     }
+    // Command frames name their command in the first MSDU octet
+    // (association, data-request poll, beacon request, ...); every
+    // other frame type carries no command identifier. A secured
+    // command frame starts with the auxiliary header instead, so its
+    // first octet is never read as a command.
+    let command_id = if frame_type == 3 && !security_enabled {
+        buf.get(pos).copied()
+    } else {
+        None
+    };
     let node = MacNode {
         frame_type,
+        command_id,
         security_enabled,
         seq,
         seq_present,

@@ -30,10 +30,13 @@ fn frame_type_bits(t: rounddance_nwk::frame::FrameType) -> u8 {
     }
 }
 
-/// Dissect one NWK header; returns the tree node plus the NWK payload.
-pub fn decode(buf: &[u8]) -> Result<(NwkNode, &[u8]), NwkError> {
+/// Dissect one NWK header; returns the tree node, the header length
+/// in octets (so callers can split header bytes from payload bytes
+/// for integrity work), plus the NWK payload.
+pub fn decode(buf: &[u8]) -> Result<(NwkNode, usize, &[u8]), NwkError> {
     match rounddance_nwk::frame::decode(buf) {
         Ok(d) => {
+            let header_len = buf.len() - d.payload.len();
             // The command id is the first payload octet only on
             // unsecured command frames; on secured frames the payload
             // starts with the aux header and the id is encrypted.
@@ -58,6 +61,7 @@ pub fn decode(buf: &[u8]) -> Result<(NwkNode, &[u8]), NwkError> {
                     dst_ieee: d.header.dst_ieee,
                     src_ieee: d.header.src_ieee,
                 },
+                header_len,
                 d.payload,
             ))
         }

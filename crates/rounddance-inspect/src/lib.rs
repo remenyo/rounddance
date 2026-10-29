@@ -19,6 +19,7 @@
 pub mod aps;
 pub mod capture;
 pub mod chain;
+pub mod decrypt;
 pub mod keys;
 pub mod mac;
 pub mod nwk;
@@ -30,3 +31,5 @@ pub mod zcl;
 pub mod pcap;
 #[cfg(feature = "std")]
 pub mod report;
+#[cfg(feature = "std")]
+pub mod sniffer;

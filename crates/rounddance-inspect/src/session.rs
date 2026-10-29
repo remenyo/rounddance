@@ -95,6 +95,12 @@ pub struct DeviceEntry {
     pub nwk_window: Option<SeqWindow>,
     /// APS counter replay window (once an APS header is seen).
     pub aps_window: Option<SeqWindow>,
+    /// Last physically-plausible RSSI observed from this device
+    /// (`None` until a tree with radio metadata arrives; positive
+    /// sniffer readings file as unknown and never overwrite).
+    pub last_rssi: Option<i8>,
+    /// Last LQI observed from this device.
+    pub last_lqi: Option<u8>,
     /// Recency counter (eviction order).
     pub last_seen: u32,
 }
@@ -208,7 +214,10 @@ impl SessionEngine {
         let mac = tree.mac();
         let nwk = tree.nwk();
         let aps = tree.aps();
-        let pan = mac.and_then(|m| m.dst_pan).unwrap_or(0);
+        // Attribute to the destination PAN when the header carries
+        // one, else the source PAN (beacons name only their source
+        // PAN), else PAN 0 (acknowledgements name no PAN at all).
+        let pan = mac.and_then(|m| m.dst_pan.or(m.src_pan)).unwrap_or(0);
         let secured = nwk.map(|n| n.security).unwrap_or(false);
         if secured {
             if self.keys.has_key() {
@@ -259,6 +268,18 @@ impl SessionEngine {
                     let mut w = en.aps_window.unwrap_or_default();
                     w.note(a.counter);
                     en.aps_window = Some(w);
+                }
+            }
+            // Fold radio metadata: LQI always, RSSI only when the
+            // tree carries a physically-plausible reading (the tree
+            // already files positive sniffer quirks as unknown).
+            if let Some(radio) = tree.radio() {
+                let slot = self.devices[idx].as_mut();
+                if let Some(en) = slot {
+                    if radio.rssi.is_some() {
+                        en.last_rssi = radio.rssi;
+                    }
+                    en.last_lqi = Some(radio.lqi);
                 }
             }
         }
@@ -421,6 +442,8 @@ impl SessionEngine {
             secured: u32::from(secured),
             nwk_window: None,
             aps_window: None,
+            last_rssi: None,
+            last_lqi: None,
             last_seen: now,
         };
         if let Some(idx) = self.devices.iter().position(|d| d.is_none()) {

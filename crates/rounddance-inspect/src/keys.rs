@@ -84,6 +84,19 @@ impl KeySlots {
         self.slots.iter().any(|s| s.is_some())
     }
 
+    /// Key octets for the slot provisioned under `seq`, if loaded.
+    /// The decryptor resolves strictly by sequence number: a secured
+    /// frame naming an unloaded sequence never decrypts, even when
+    /// other slots are loaded.
+    #[must_use]
+    pub fn key_by_seq(&self, seq: u8) -> Option<[u8; 16]> {
+        self.slots
+            .iter()
+            .filter_map(|s| *s)
+            .find(|s| s.seq == seq)
+            .map(|s| s.key)
+    }
+
     /// Rebuild slot state from a saved snapshot (see
     /// [`crate::report::session_from_json`]): the first `loaded`
     /// slots hold zeroed placeholder octets — never rendered, never

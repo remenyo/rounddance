@@ -1214,3 +1214,37 @@ files (report `~/hwscratch/w47/SUMMARY.md` §1/§5).
 | 05-3474-23-22843-03 | implemented + verified | `aps::SecureDataLink::send_header` + `note_ack` (security flag set, counter taken + advanced, unicast-only ack expectation, off-unicast ack-request forced clear; §2.2.8.4.3, anchor p0102-L2460-L2463) | `aps/tests/secure.rs::secured_send_advances_counter_and_expects_ack` + `::secured_counter_wraps` + `rounddance-sim/tests/app_transaction.rs::secured_aps_data_two_node` (counter-managed secured send over the medium, ack clears) |
 | 05-3474-23-22843-04 | implemented + verified | `aps::SecureDataLink::accept` (unsecured → `Unsecured`, non-data → `IllegalRequest`, replayed source + counter → `NoAck`, else ack expectation owed back; §2.2.8.4.3, anchor p0102-L2472-L2476) | `aps/tests/secure.rs::secured_receive_checks_flag_dup_and_ack` + sim secured leg (both-layer accept, captured replay refused at NWK guard then APS guard, next fresh frame advances) |
 | 05-3474-23-22844-02 | implemented + verified | `aps::secure::{ack_for, parse_ack}` (ack generated only for ack-requested unicast — endpoints swapped, cluster/profile/counter copied, ack-request clear; parsing yields the correlation triple, command acks correlate to nothing; §2.2.8.4.4, anchor p0102-L2483-L2498) + `RetrySession` accounting (no-ack → retransmits to cap → `Failed(NoAck)` = DELIVERY_FAILED surfacing; ack → `Acked`) | `aps/tests/secure.rs::ack_generated_only_on_request_bit` + `::ack_roundtrip_parses_to_correlation_triple` + `::ack_parse_refuses_malformed` + `::retry_without_ack_fails_no_ack_after_cap` (t1 shape) + `::retry_with_ack_succeeds` (t2 shape) + `::captured_air_t1_t2_vector_shapes` (pcap hashes + copy-count metadata + T3 Read decision replay) + `rounddance-sim/tests/app_transaction.rs::aps_ack_leg_acked_vs_unacked_two_node` (acked → success then silent → `Failed(NoAck)` over the medium) |
+
+## Wave-49 traceability — live-validation inspector gaps (lane 2)
+
+Wave-48 lane 1 confirmed 4 inspector gaps on live air plus 2 seam
+gaps (`~/hwscratch/w48/SUMMARY.md` §3): MAC acks surfacing as
+`MacTruncated` (120/120 len-3), no NWK decrypt path (every secured
+app frame stops), the transport-key APS outer misparsed (`0x30` aux
+octet read as the command id), and MAC commands/beacons stopping at
+`unknown`; plus INS-LIVE-01 (listener RSSI/LQI dropped downstream)
+and INS-LIVE-02 (bogus positive sniffer power — documented, firmware
+untouched). This wave closes G1+G3+G4+INS-LIVE-01 in
+`rounddance-inspect`, adds the slotted-key-gated NWK decrypt path
+(G2), and commits the cleaned host live-listener. No lab use, no
+corpus writes; wording in code/tests is paraphrase only (D1). 5
+repo-minted IDs (`RD-INSPECT-19..23`), MINTED-pending-confirm.
+
+Captured-air vectors: the MAC ack / beacon / command octets and the
+transport-key outer pinned in `inspect/tests/live_air.rs` are
+verbatim wave-48 live frames (`~/hwscratch/w48/live1.frames.log`,
+554 frames); the NWK
+round trip seals with a synthetic test-only key so lab keys stay
+local-only (never in the repo). Offline reproduction procedure:
+`cargo run -p rounddance-inspect --features live --bin inspect-live --
+--replay ~/hwscratch/w48/sniff_live1.txt --channel 25` (w47:
+`sniff_t1.txt` / `sniff_t2.txt`) with the lab `0600` key files for
+keyed opens; report `~/hwscratch/w49/SUMMARY.md` §1/§5.
+
+| Requirement ID | State | Implementing code | Verifying test |
+|----------------|-------|-------------------|----------------|
+| RD-INSPECT-19 | implemented + verified | `mac::decode` ack path (type 2: frame control + sequence only, no addressing) + `MacNode::command_id` (first MSDU octet of unsecured command frames; never read on secured outers) + `chain` `ack` / `beacon` / `mac-command` stop notes + session source-PAN fallback attribution (beacons file under their source PAN, acks under PAN 0 with no device row) | `inspect/tests/live_air.rs::mac_ack_decodes_instead_of_truncated` (live f2/f4 + short-ack typed legs) + `::mac_beacon_and_commands_decode_with_named_stops` (live beacon f6, beacon-req, assoc-req/resp, data-req poll + report shapes) + `::acks_fold_without_device_attribution` + replays live1 (554 frames, 0 errors: 120 ack / 147 beacon / 242 mac-command), t1 (745: 133 ack), t2 (748: 126 ack), hex-parity vs the w48 glue log |
+| RD-INSPECT-20 | implemented + verified | `aps::decode` refuses any APDU with the security bit set as `ApsError::Secured` before command-identifier / payload parsing + `chain` files it as a `secured` note (data, command, and ack shapes alike) | `inspect/tests/live_air.rs::transport_key_outer_stops_secured` (live f36: MAC + NWK + secured, no APS node, no `cmd=0x30`) + `::secured_aps_data_shape_refuses_before_payload` (codec-built secured/plain pair) + replays (t1/t2 trailing→secured +2 each) |
+| RD-INSPECT-21 | implemented + verified | `decrypt::open_nwk` (network-base level-5 restore over the zeroed on-air octet, strict key-sequence slot match via `keys::key_by_seq`, extended-source nonce, 4-octet integrity verification, bounded allocation-free open; `None` on no slot, sequence miss, non-network-key shape, or any integrity failure) + `chain::dissect_with_keys` / `dissect_nwk_with_keys` (`decrypted` leg continues on the verified plaintext, all other secured frames keep the `secured` stop) | `inspect/tests/live_air.rs::nwk_decrypt_opens_with_slotted_key_and_stops_without` (synthetic seal→open round trip to APS+ZCL, no-key / wrong-sequence / wrong-key / mutated-octet / bare-NWK legs) + `::nwk_decrypt_gates_session_decryptability` (decryptable 1 vs orphan 1) + `::genuine_secured_air_never_opens_off_slot` (live f19) + `::captured_corpus_pins` (t1/t2 hashes + counts + procedure) |
+| RD-INSPECT-22 | implemented + verified | `tree::Radio` + `DecodeTree::set_radio` (positive RSSI files as unknown) + session per-device `last_rssi` / `last_lqi` (quirk readings never overwrite) + `report` text/JSON radio legs + `capture::Captured::rssi` validity-range documentation (positive = unknown); session schema stays v1, signal is live state, never snapshot state | `inspect/tests/live_air.rs::radio_metadata_threads_tree_to_session` (tree attach, device fold, quirk non-overwrite, report shapes, schema has no radio keys) + replays (TC −104/255 vs joiner −117/228 per-device discrimination) |
+| RD-INSPECT-23 | implemented + verified | `sniffer::parse_received` (shared `received:` line shape, FCS stripped) + `sniffer::ReplayListener` (`std`, saved-feed replay through the same parser) + `inspect-live` binary (`live` feature: termios serial driver with `unsafe` confined to the binary, live accounting with radio attach, `--replay` conformance mode) | `sniffer` unit tests (live shape, bogus-power passthrough, non-frame legs) + `inspect/tests/live_air.rs::replay_listener_feeds_chain_and_session` (saved feed → listener → chain → session) + replays (live1/t1/t2 byte-identical hex parity vs the w48 glue log; live == replay by shared parser) |

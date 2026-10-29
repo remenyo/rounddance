@@ -10,13 +10,27 @@ use std::fmt::Write as _;
 /// One-line human summary plus one indented line per layer.
 pub fn to_text(tree: &DecodeTree) -> String {
     let mut s = String::new();
-    let _ = writeln!(s, "frame: {} layer(s)", tree.len());
+    let _ = writeln!(
+        s,
+        "frame: {} layer(s){}",
+        tree.len(),
+        tree.radio()
+            .map(|r| format!(
+                " radio=ch{} rssi={} lqi={}",
+                r.channel,
+                r.rssi
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| String::from("-")),
+                r.lqi,
+            ))
+            .unwrap_or_default(),
+    );
     for layer in tree.layers().iter().flatten() {
         match layer {
             Layer::Mac(m) => {
                 let _ = writeln!(
                     s,
-                    "  mac: type={} seq={} dst_pan={} dst={} src={}{}",
+                    "  mac: type={} seq={} dst_pan={} dst={} src={}{}{}",
                     m.frame_type,
                     if m.seq_present {
                         hex8(m.seq)
@@ -27,6 +41,9 @@ pub fn to_text(tree: &DecodeTree) -> String {
                     addr(m.dst),
                     addr(m.src),
                     if m.security_enabled { " secured" } else { "" },
+                    m.command_id
+                        .map(|c| format!(" cmd={c:#04x}"))
+                        .unwrap_or_default(),
                 );
             }
             Layer::Nwk(n) => {
@@ -98,7 +115,7 @@ pub fn to_json(tree: &DecodeTree) -> String {
         match layer {
             Layer::Mac(m) => {
                 s.push_str(&format!(
-                    "{{\"mac\":{{\"type\":{},\"seq\":{},\"seq_present\":{},\"dst_pan\":{},\"dst\":\"{}\",\"src\":\"{}\",\"secured\":{}}}}}",
+                    "{{\"mac\":{{\"type\":{},\"seq\":{},\"seq_present\":{},\"dst_pan\":{},\"dst\":\"{}\",\"src\":\"{}\",\"secured\":{},\"cmd\":{}}}}}",
                     m.frame_type,
                     m.seq,
                     m.seq_present,
@@ -106,6 +123,7 @@ pub fn to_json(tree: &DecodeTree) -> String {
                     addr(m.dst),
                     addr(m.src),
                     m.security_enabled,
+                    opt_json_u8(m.command_id),
                 ));
             }
             Layer::Nwk(n) => {
@@ -156,7 +174,19 @@ pub fn to_json(tree: &DecodeTree) -> String {
             }
         }
     }
-    s.push_str("]}");
+    s.push_str("],\"radio\":");
+    match tree.radio() {
+        Some(r) => s.push_str(&format!(
+            "{{\"channel\":{},\"rssi\":{},\"lqi\":{}}}",
+            r.channel,
+            r.rssi
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| String::from("null")),
+            r.lqi,
+        )),
+        None => s.push_str("null"),
+    }
+    s.push('}');
     s
 }
 
@@ -177,7 +207,7 @@ pub fn session_to_text(eng: &crate::session::SessionEngine) -> String {
     for d in eng.devices().iter().flatten() {
         let _ = writeln!(
             s,
-            "  dev: short={} ieee={} last_seq={} frames={} secured={}{}{}",
+            "  dev: short={} ieee={} last_seq={} frames={} secured={}{}{}{}{}",
             hex16(d.short_addr),
             d.ieee
                 .map(|e| format!("{e:#018x}"))
@@ -203,6 +233,10 @@ pub fn session_to_text(eng: &crate::session::SessionEngine) -> String {
                     w.late
                 ))
                 .unwrap_or_default(),
+            d.last_rssi
+                .map(|r| format!(" rssi={r}"))
+                .unwrap_or_default(),
+            d.last_lqi.map(|l| format!(" lqi={l}")).unwrap_or_default(),
         );
     }
     for n in eng.networks().iter().flatten() {
@@ -411,6 +445,11 @@ impl<'a> Parser<'a> {
             secured,
             nwk_window,
             aps_window,
+            // Radio readings are live-capture state, not snapshot
+            // state: the schema carries no RSSI/LQI, so a restored
+            // row restarts with unknown signal.
+            last_rssi: None,
+            last_lqi: None,
             last_seen: 0,
         })
     }

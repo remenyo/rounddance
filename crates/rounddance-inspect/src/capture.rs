@@ -10,7 +10,16 @@
 pub struct Captured<'a> {
     /// 802.15.4 channel the frame arrived on (11–26).
     pub channel: u8,
-    /// Received signal strength in dBm.
+    /// Received signal strength in dBm, as reported by the radio.
+    ///
+    /// Validity range: zero and below are plausible air readings on
+    /// the lab sniffer path (observed live traffic sits around
+    /// −117..−104 dBm); positive values are unphysical — the sniffer
+    /// firmware reports bogus positive power on short background
+    /// frames (len-8 beacon requests seen at +105..+113 dBm) — and
+    /// every downstream consumer must treat them as unknown, never
+    /// as link estimates. [`crate::tree::DecodeTree::set_radio`] and
+    /// the session engine file positive readings as unknown.
     pub rssi: i8,
     /// Link quality indicator (0–255, radio-defined).
     pub lqi: u8,

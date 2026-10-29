@@ -1109,9 +1109,11 @@ dependencies = [
 name = "rounddance-inspect"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "rounddance-aps",
  "rounddance-mac-sap",
  "rounddance-nwk",
+ "rounddance-security",
  "rounddance-zcl",
 ]
 
