@@ -579,7 +579,7 @@ never spec text (D1).
 | RD-BROWSER-01 | implemented + verified | `rounddance-browser`: same `run_first_transaction(ScenarioConfig::first_transaction())` scenario as the host leg, built for `wasm32-unknown-unknown` | `tools/browser-check.sh` builds the bundle; `browser_decisions.rs::browser_getters_match_native_pin` |
 | RD-BROWSER-02 | implemented + verified | 13 `pub mod exports` getters (digest hi/lo + 6 bools + cmd/report/resume counters + tsn + trace_lines), zero-import shape (no bindgen, no new deps) | `harness/browser/check_imports.py` (zero imports gate in `browser-check.sh`); `index.html` reads all 13 via empty-import instantiate |
 | RD-BROWSER-03 | implemented + verified (wasmtime leg) | `tools/browser-check.sh`: native `host_transaction` output vs `wasmtime --invoke` getter dump, digest + every field + trace_lines compared | `browser-check.sh` exit 0 with `DECISION-MATCH: digest 0x3ea31047e1933c90`; `harness/browser/expected.txt` pins the excerpt |
-| RD-BROWSER-04 | implemented, browser execution open | `harness/browser/index.html`: real-browser driver (fetch + `instantiateStreaming` with `{}` imports, unsigned compare, PASS/MISMATCH verdict) | NOT run on-box — no browser engine (chromium/firefox/webkit) or JS engine (node/deno) installed; engine present = wasmtime 36.0.2 only. First box with a browser runs it and records the verdict here. |
+| RD-BROWSER-04 | implemented + verified (R4 CLOSED wave-34) | `harness/browser/index.html`: real-browser driver (fetch + `instantiateStreaming` with `{}` imports, unsigned compare, PASS/MISMATCH verdict) | CLOSED wave-34: headless Chromium 156.0.8078.47 executed `harness/browser/index.html` → DECISION-MATCH digest `0x3ea31047e1933c90` trace_lines=35, all 13 getters == native (== pinned, == wasmtime); reproducer `tools/browser-real.sh` + install/run docs `harness/browser/README` (proof: `PROGRESS.md` wave-34 row; `docs/GATE_AUDIT.md` R4) |
 
 ## Wave-20 traceability — Touchlink commissioning completion (`rounddance-commission`)
 
@@ -1772,7 +1772,9 @@ root cause in `rounddance-gp`: `reset` re-initializes the whole
 session, and the `note_success` / `tick`-timeout arms clear the
 reply-window deadline alongside the staged reply, so no stage state
 leaks across any transition out of the reply window. 1 repo-minted
-ID (`RD-GP-07`), MINTED-pending-confirm. Also carried from wave-67:
+ID (`RD-GP-07`), MINTED at mint; CONFIRMED via corpus sweep-49 (0
+corrections / 0 REJECT), row updated in place. Also carried from
+wave-67:
 `RD-SIM-03` flipped MINTED-pending-confirm → CONFIRMED via corpus
 sweep-48 (0 corrections / 0 REJECT), row and preamble updated in
 place. No lab use, no corpus writes; wording in code/tests is
@@ -1780,4 +1782,4 @@ paraphrase only (D1).
 
 | Requirement ID | State | Implementing code | Verifying test |
 |----------------|-------|-------------------|----------------|
-| RD-GP-07 | implemented + verified | `commissioning::CommissioningSession::reset` (reset restores the full idle invariant: staged reply dropped, reply-window deadline cleared, parked exchange identity cleared) + `note_success` / `tick`-timeout arms (reply-window deadline cleared alongside the staged reply) | `gp/tests/session_stages.rs::repro_reset_clears_staged_reply_and_window` (failing-first: parked exchange with staged reply → `reset` → `Idle` with no reply owed, no window running; a fresh park with nothing staged reports pending rather than stale bytes) + `::timeout_clears_staged_reply_and_window` (lapsed window → `Idle` with no reply owed) |
+| RD-GP-07 | implemented + verified, CONFIRMED (sweep-49) | `commissioning::CommissioningSession::reset` (reset restores the full idle invariant: staged reply dropped, reply-window deadline cleared, parked exchange identity cleared) + `note_success` / `tick`-timeout arms (reply-window deadline cleared alongside the staged reply) | `gp/tests/session_stages.rs::repro_reset_clears_staged_reply_and_window` (failing-first: parked exchange with staged reply → `reset` → `Idle` with no reply owed, no window running; a fresh park with nothing staged reports pending rather than stale bytes) + `::timeout_clears_staged_reply_and_window` (lapsed window → `Idle` with no reply owed) |
