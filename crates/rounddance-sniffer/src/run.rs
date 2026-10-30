@@ -86,7 +86,9 @@ pub struct StreamStats {
 }
 
 impl RunReport {
-    fn new(tag: &str, channel: u8, lease: u64, keys: &KeySlots) -> Self {
+    /// Start an empty run (public so the live binary loop can fold
+    /// frames one at a time under its capture deadline).
+    pub fn new(tag: &str, channel: u8, lease: u64, keys: &KeySlots) -> Self {
         let mut engine = SessionEngine::new();
         engine.set_keys(keys);
         Self {
@@ -100,7 +102,11 @@ impl RunReport {
         }
     }
 
-    fn fold(
+    /// Fold one frame: dissect with `keys`, attach radio metadata,
+    /// and note the tree in the session. Public so the live binary
+    /// loop shares the exact offline fold leg (same trees, same
+    /// session — the live == file invariant).
+    pub fn push_frame(
         &mut self,
         keys: &KeySlots,
         channel: u8,
@@ -155,7 +161,7 @@ where
         match li.next_frame(&mut buf) {
             Ok(Some(c)) => {
                 let ts_us = rep.frames.len() as u64 + 1;
-                rep.fold(keys, channel, c.rssi, c.lqi, ts_us, c.payload);
+                rep.push_frame(keys, channel, c.rssi, c.lqi, ts_us, c.payload);
             }
             Ok(None) => break,
             Err(_) => {
@@ -180,7 +186,28 @@ pub fn run_packets(
 ) -> RunReport {
     let mut rep = RunReport::new(tag, channel, lease, keys);
     for p in packets {
-        rep.fold(keys, channel, 0, 0, p.ts_us, &p.data);
+        rep.push_frame(keys, channel, 0, 0, p.ts_us, &p.data);
+    }
+    rep
+}
+
+/// Replay radio-header pcap records (written by
+/// [`write_pcap_radio`], read back with [`read_pcap_radio`])
+/// through the same dissect + fold legs. Every record keeps its own
+/// capture timestamp, channel, RSSI, and LQI; `channel` only labels
+/// the run header. A live run's radio pcap replayed here with the
+/// same tag/lease/keys renders byte-identical text and JSON reports
+/// — the live == file conformance leg.
+pub fn run_radio_packets(
+    packets: &[RadioPacket],
+    channel: u8,
+    keys: &KeySlots,
+    tag: &str,
+    lease: u64,
+) -> RunReport {
+    let mut rep = RunReport::new(tag, channel, lease, keys);
+    for p in packets {
+        rep.push_frame(keys, p.channel, p.rssi, p.lqi, p.ts_us, &p.data);
     }
     rep
 }

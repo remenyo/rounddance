@@ -22,24 +22,34 @@
 //! [`Ingest`](rounddance_inspect::stream::Ingest) byte pipe so the
 //! live == replay invariant (Listener path vs streamed path produce
 //! byte-identical trees and sessions) is testable offline.
+//! [`run::run_radio_packets`] replays radio-header pcap records, so a
+//! live run's radio pcap re-ingested with the same tag/lease/keys
+//! renders byte-identical reports (live == file conformance).
 //!
 //! Outputs: per-frame text/JSON reports plus the session v2 snapshot
 //! ([`session_to_json_v2`](rounddance_inspect::report::session_to_json_v2),
 //! v1 bytes frozen as its prefix), and pcap-out in two link types —
 //! the untouched 195 writer and the radio-header variant ([`radio`]).
 //! Per-run worker lease IDs are pure derivations ([`lease`]): no
-//! arbitrator calls, no live hardware in this wave.
+//! arbitrator calls. Live capture ([`live`]) opens the lab nRF
+//! sniffer over serial (passive RX only, channel-gated, Drop parks
+//! the hardware); the port lease itself stays an operator step.
 //!
 //! The decode path (dissect + fold) is the `no_std` +
 //! `#![forbid(unsafe_code)]` core of `rounddance-inspect`; the
 //! [`lease`] and [`radio`] modules keep that discipline here, while
-//! [`run`] and the `rd-sniff` binary are host-side (`std`) file IO.
+//! [`run`], [`live`], and the `rd-sniff` binary are host-side (`std`)
+//! file and serial IO (the raw termios driver, which needs `unsafe`,
+//! lives in the binary — the library stays `forbid(unsafe_code)`).
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_code)]
 
 pub mod lease;
 pub mod radio;
+
+#[cfg(feature = "std")]
+pub mod live;
 
 #[cfg(feature = "std")]
 pub mod run;

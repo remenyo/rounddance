@@ -1182,6 +1182,7 @@ dependencies = [
 name = "rounddance-sniffer"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "rounddance-aps",
  "rounddance-inspect",
  "rounddance-nwk",

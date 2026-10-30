@@ -12,6 +12,10 @@ std = ["rounddance-inspect/std"]
 
 [dependencies]
 rounddance-inspect = { path = "../rounddance-inspect" }
+# Raw termios serial driver for the `rd-sniff --live` binary (unix).
+# The library itself stays `forbid(unsafe_code)`-clean: it is generic
+# over any `Read + Write` port, and only the binary touches `libc`.
+libc = "0.2"
 
 [dev-dependencies]
 rounddance-aps = { path = "../rounddance-aps" }
