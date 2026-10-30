@@ -28,9 +28,17 @@ use std::time::Instant;
 
 // esp-idf-sys 0.38 ships no binding for this symbol (same reason the
 // scratch image declares the 15.4 externs itself); signature matches
-// the IDF v6.1 `esp_efuse.h` header.
+// the IDF v6.1 `esp_mac.h` header. NOTE: do NOT use
+// `esp_efuse_mac_get_default` here: on 802.15.4 chips (C6) it splices
+// the efuse MAC_EXT (`ff:fe`) into the returned bytes (and overruns a
+// 6-byte buffer), so the full base-MAC compare in `role_from_mac`
+// could never match. `ESP_MAC_BASE` (5) returns the raw 6-byte
+// factory MAC (`get_efuse_factory_mac`, verified in IDF v6.1
+// `components/esp_hw_support/mac_addr.c`) — the same value
+// `esptool read-mac` reports as BASE MAC.
+const ESP_MAC_BASE: u32 = 5;
 unsafe extern "C" {
-    fn esp_efuse_mac_get_default(mac: *mut u8) -> i32;
+    fn esp_read_mac(mac: *mut u8, type_: u32) -> i32;
 }
 
 /// [`SerialLog`] over the IDF console (USB-Serial-JTAG on the Xiao C6).
@@ -55,8 +63,8 @@ fn main() {
     // unit (healthy 7F68, full base-MAC compare) boots this image;
     // anything else refuses without transmitting.
     let mut mac = [0u8; 6];
-    let rc = unsafe { esp_efuse_mac_get_default(mac.as_mut_ptr()) };
-    assert!(rc == 0, "efuse mac rc={rc}");
+    let rc = unsafe { esp_read_mac(mac.as_mut_ptr(), ESP_MAC_BASE) };
+    assert!(rc == 0, "esp_read_mac BASE rc={rc}");
     let eui = eui_from_mac(&mac);
     println!("RDCOORD ident mac={mac:02x?} eui={eui:02x?}");
     if role_from_mac(&mac) != Some(AppRole::Coordinator) {
