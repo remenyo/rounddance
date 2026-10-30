@@ -32,7 +32,8 @@
 //! Requirement traceability (repo-minted, MINTED-pending-confirm):
 //! `RD-COMPAT-08` (codec), `RD-COMPAT-09` (SAP mapping),
 //! `RD-COMPAT-10` (join-flow parity with the existing MAC codec),
-//! `RD-COMPAT-12` (streaming [`MtDecoder`]).
+//! `RD-COMPAT-12` (streaming [`MtDecoder`]), wired into the adapter
+//! receive path under `RD-COMPAT-09`.
 
 use rounddance_mac_sap::{
     AddrMode, Channel, ExtAddr, FramePayload, MacAddress, MacCapabilities, MacDataSap, MacError,
@@ -508,6 +509,7 @@ const TI_INDICATION_DEPTH: usize = 8;
 #[derive(Clone, Debug)]
 pub struct TiAdapter {
     transport: MockMtTransport,
+    decoder: MtDecoder,
     pan: PanId,
     short: ShortAddr,
     ext: [u8; 8],
@@ -532,6 +534,7 @@ impl TiAdapter {
     pub const fn new() -> Self {
         Self {
             transport: MockMtTransport::new(),
+            decoder: MtDecoder::new(),
             pan: 0xC601,
             short: 0x0002,
             ext: [0; 8],
@@ -637,12 +640,52 @@ impl TiAdapter {
                 self.rx_dropped = self.rx_dropped.saturating_add(1);
                 continue;
             };
-            match (frame.cmd0, frame.cmd1) {
-                (EVT_TX_CONFIRM_C0, EVT_TX_CONFIRM_C1) => self.note_confirm(&frame),
-                (EVT_DATA_RECEIVE_C0, EVT_DATA_RECEIVE_C1) => self.note_receive(&frame),
-                _ => {
+            self.note_frame(&frame);
+        }
+    }
+
+    /// Feed raw NCP wire bytes (UART order) through the streaming
+    /// [`MtDecoder`]: complete frames dispatch exactly as the queued
+    /// [`Self::pump`] path routes them, while decoder drops
+    /// ([`MtDropReason`]) and unroutable commands count toward
+    /// [`Self::rx_dropped`], never queue. Split and back-to-back
+    /// feeds reassemble identically — length, not calls, delimits.
+    pub fn push_rx_bytes(&mut self, bytes: &[u8]) {
+        let mut i = 0;
+        while i < bytes.len() {
+            match self.decoder.push_byte(bytes[i]) {
+                Some(MtOutcome::Frame(frame)) => self.note_frame(&frame),
+                Some(MtOutcome::Dropped(_)) => {
                     self.rx_dropped = self.rx_dropped.saturating_add(1);
                 }
+                None => {}
+            }
+            i += 1;
+        }
+    }
+
+    /// Decoder drop runs seen on the byte ingress (diagnostic; each
+    /// one feeds [`Self::rx_dropped`] one-for-one).
+    #[must_use]
+    pub const fn stream_dropped(&self) -> u32 {
+        self.decoder.dropped()
+    }
+
+    /// Decoder drop runs since the last good frame on the byte
+    /// ingress (desync meter, cleared by a good frame).
+    #[must_use]
+    pub const fn stream_consecutive_bad(&self) -> u32 {
+        self.decoder.consecutive_bad()
+    }
+
+    /// Route one complete NCP frame to its SAP queue (shared by the
+    /// queued [`Self::pump`] path and the byte-ingress path).
+    fn note_frame(&mut self, frame: &MtFrame) {
+        match (frame.cmd0, frame.cmd1) {
+            (EVT_TX_CONFIRM_C0, EVT_TX_CONFIRM_C1) => self.note_confirm(frame),
+            (EVT_DATA_RECEIVE_C0, EVT_DATA_RECEIVE_C1) => self.note_receive(frame),
+            _ => {
+                self.rx_dropped = self.rx_dropped.saturating_add(1);
             }
         }
     }

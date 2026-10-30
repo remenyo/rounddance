@@ -455,3 +455,147 @@ fn ti_join_flow_parity_with_esp_codec() {
     assert_eq!(ie.msdu.as_slice(), msdu);
     assert_eq!(is.msdu.as_slice(), msdu);
 }
+
+/// Streaming receive path, byte-pinned: SOF | LEN=5 | 0x44 | 0x82 |
+/// `01 00 C8 08 00` (src 0x0001, LQI 200, MSDU `08 00`) | FCS
+/// (`05 ^ 44 ^ 82 ^ 01 ^ 00 ^ C8 ^ 08 ^ 00` = 0x02, independent
+/// python3 XOR-fold oracle). Fed whole through the byte ingress, the
+/// indication surfaces with the same source, LQI, and MSDU the NCP
+/// reported and no drop is counted.
+#[test]
+fn ti_stream_receive_byte_pinned_vector() {
+    let wire = [SOF, 0x05, 0x44, 0x82, 0x01, 0x00, 0xC8, 0x08, 0x00, 0x02];
+    let mut adapter = TiAdapter::new();
+    adapter.push_rx_bytes(&wire);
+    let ind = adapter.poll_indication().unwrap();
+    assert_eq!(ind.src, MacAddress::short(0xC601, 0x0001));
+    assert_eq!(ind.lqi, 200);
+    assert_eq!(ind.msdu.as_slice(), &[0x08, 0x00]);
+    assert_eq!(adapter.poll_indication(), None);
+    assert_eq!(
+        (adapter.stream_dropped(), adapter.stream_consecutive_bad()),
+        (0, 0)
+    );
+    assert_eq!(adapter.rx_dropped(), 0);
+}
+
+/// Split feeds reassemble through the adapter: one confirm callback
+/// (`FE 02 44 81 00 00 C7`, token 0 + DELIVERED) fed byte-by-byte
+/// plus one receive callback fed in 3-byte chunks complete the same
+/// request/confirm/indication decisions the queued-frame pump makes.
+#[test]
+fn ti_stream_receive_split_feed_delivers_confirm_and_indication() {
+    let mut adapter = TiAdapter::new();
+    let h = adapter
+        .data_request(req(MacAddress::short(0xC601, 0x0002), &[0x01], true))
+        .unwrap();
+    let confirm = [SOF, 0x02, 0x44, 0x81, 0x00, 0x00, 0xC7];
+    for b in &confirm {
+        adapter.push_rx_bytes(&[*b]);
+    }
+    let c = adapter.poll_confirm().unwrap();
+    assert_eq!((c.handle, c.status), (h, TxStatus::Delivered));
+    let receive = [SOF, 0x05, 0x44, 0x82, 0x01, 0x00, 0xC8, 0x08, 0x00, 0x02];
+    for chunk in receive.chunks(3) {
+        adapter.push_rx_bytes(chunk);
+    }
+    let ind = adapter.poll_indication().unwrap();
+    assert_eq!(ind.src, MacAddress::short(0xC601, 0x0001));
+    assert_eq!(ind.msdu.as_slice(), &[0x08, 0x00]);
+    assert_eq!(
+        (adapter.stream_dropped(), adapter.stream_consecutive_bad()),
+        (0, 0)
+    );
+    assert_eq!(adapter.rx_dropped(), 0);
+}
+
+/// A failed delivery streamed off the wire surfaces as `NoAck`:
+/// `FE 02 44 81 00 01 C6` (token 0 + NO_ACK, FCS `02 ^ 44 ^ 81 ^
+/// 00 ^ 01` = 0xC6 via the python3 oracle) completes the matching
+/// transaction without success.
+#[test]
+fn ti_stream_receive_no_ack_maps_to_noack() {
+    let mut adapter = TiAdapter::new();
+    let h = adapter
+        .data_request(req(MacAddress::short(0xC601, 0x0002), &[0x01], true))
+        .unwrap();
+    adapter.push_rx_bytes(&[SOF, 0x02, 0x44, 0x81, 0x00, 0x01, 0xC6]);
+    let c = adapter.poll_confirm().unwrap();
+    assert_eq!((c.handle, c.status), (h, TxStatus::NoAck));
+    assert_eq!(adapter.rx_dropped(), 0);
+}
+
+/// Line noise, an oversize LEN, and a bad FCS drop through the byte
+/// ingress exactly as the decoder reports them — then a good confirm
+/// still completes its transaction and the desync meter resets.
+#[test]
+fn ti_stream_receive_resyncs_over_noise_bad_len_and_bad_fcs() {
+    let mut adapter = TiAdapter::new();
+    let h = adapter
+        .data_request(req(MacAddress::short(0xC601, 0x0002), &[0x01], true))
+        .unwrap();
+    // Noise with no SOF: silent, no counters.
+    adapter.push_rx_bytes(&[0x00, 0x55]);
+    assert_eq!(
+        (adapter.stream_dropped(), adapter.stream_consecutive_bad()),
+        (0, 0)
+    );
+    // SOF naming 0xFF data octets: one BadLen drop, then re-armed.
+    adapter.push_rx_bytes(&[SOF, 0xFF]);
+    assert_eq!(
+        (adapter.stream_dropped(), adapter.stream_consecutive_bad()),
+        (1, 1)
+    );
+    // Confirm with a flipped data octet (FCS still 0xC7): BadFcs drop.
+    adapter.push_rx_bytes(&[SOF, 0x02, 0x44, 0x81, 0x01, 0x00, 0xC7]);
+    assert_eq!(
+        (adapter.stream_dropped(), adapter.stream_consecutive_bad()),
+        (2, 2)
+    );
+    // The good confirm still matches its slot; the meter resets.
+    adapter.push_rx_bytes(&[SOF, 0x02, 0x44, 0x81, 0x00, 0x00, 0xC7]);
+    let c = adapter.poll_confirm().unwrap();
+    assert_eq!((c.handle, c.status), (h, TxStatus::Delivered));
+    assert_eq!(
+        (adapter.stream_dropped(), adapter.stream_consecutive_bad()),
+        (2, 0)
+    );
+    assert_eq!(adapter.rx_dropped(), 2);
+}
+
+/// An FCS-clean frame with an unknown command (`FE 01 44 FF 00 BA`,
+/// FCS `01 ^ 44 ^ FF ^ 00` = 0xBA via the python3 oracle) is
+/// well-formed but unroutable: counted, never queued.
+#[test]
+fn ti_stream_receive_unknown_command_counts_dropped() {
+    let mut adapter = TiAdapter::new();
+    adapter.push_rx_bytes(&[SOF, 0x01, 0x44, 0xFF, 0x00, 0xBA]);
+    assert_eq!(adapter.poll_confirm(), None);
+    assert_eq!(adapter.poll_indication(), None);
+    assert_eq!(
+        (adapter.stream_dropped(), adapter.stream_consecutive_bad()),
+        (0, 0)
+    );
+    assert_eq!(adapter.rx_dropped(), 1);
+}
+
+/// Backpressure parity with the queued-frame pump: the indication
+/// queue holds 8, so the 9th streamed receive callback is counted,
+/// never queued — and every queued indication drains in order.
+#[test]
+fn ti_stream_receive_full_indication_queue_counts_dropped() {
+    let mut adapter = TiAdapter::new();
+    let one = [SOF, 0x05, 0x44, 0x82, 0x01, 0x00, 0xC8, 0x08, 0x00, 0x02];
+    let mut nine = [0u8; 90];
+    for (i, slot) in nine.chunks_mut(10).enumerate() {
+        slot.copy_from_slice(&one);
+        let _ = i;
+    }
+    adapter.push_rx_bytes(&nine);
+    for _ in 0..8 {
+        let ind = adapter.poll_indication().unwrap();
+        assert_eq!(ind.src, MacAddress::short(0xC601, 0x0001));
+    }
+    assert_eq!(adapter.poll_indication(), None);
+    assert_eq!(adapter.rx_dropped(), 1);
+}
