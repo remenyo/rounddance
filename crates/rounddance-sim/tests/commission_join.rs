@@ -189,3 +189,75 @@ fn secure_join_replays_deterministically() {
     assert_eq!(first.announce_wire, second.announce_wire);
     assert_eq!(first.tc_device, second.tc_device);
 }
+
+// Secure-join matrix: admission decisions are timing-independent.
+// Four seeds incl. the 0/u64::MAX edges — per-seed double runs
+// replay the identical trace + wire + device, and every seed admits
+// the same device and announces the same bytes (same
+// timing-vs-decision split as the GP matrices: Delay jitter moves
+// `queued_us` timestamps, never the admission decision — the naive
+// cross-seed trace pin fails on those timestamps only).
+#[test]
+fn secure_join_matrix_seeds_share_wire_and_device() {
+    const SEEDS: [u64; 4] = [0x0000, 0x501E, 0xBEEF, u64::MAX];
+    let script = || {
+        vec![
+            ScriptAction::Delay {
+                base_us: 320,
+                jitter_us: 100,
+            },
+            ScriptAction::Deliver,
+        ]
+    };
+    let mut ref_wire: Option<Vec<u8>> = None;
+    let mut ref_device = None;
+    for &seed in &SEEDS {
+        let first = secure_join(seed, script());
+        let second = secure_join(seed, script());
+        assert_eq!(
+            first.trace, second.trace,
+            "per-seed trace replay, seed {seed:#x}"
+        );
+        assert_eq!(
+            first.announce_wire, second.announce_wire,
+            "per-seed wire replay, seed {seed:#x}"
+        );
+        assert_eq!(
+            first.tc_device, second.tc_device,
+            "per-seed device replay, seed {seed:#x}"
+        );
+        assert!(first.joiner_done, "joiner joins, seed {seed:#x}");
+        assert!(first.tc_device.verified, "device verified, seed {seed:#x}");
+        assert_eq!(
+            first.tc_device.attrs,
+            KeyAttributes::SYMMETRIC,
+            "symmetric attrs, seed {seed:#x}"
+        );
+        assert_eq!(
+            first.announce_wire.len(),
+            DeviceAnnce::LEN,
+            "announce length pin, seed {seed:#x}"
+        );
+        assert!(
+            first
+                .trace
+                .iter()
+                .any(|l| l.contains("confirm handle=0 status=Delivered")),
+            "trace records delivery, seed {seed:#x}"
+        );
+        match (&ref_wire, &ref_device) {
+            (None, None) => {
+                ref_wire = Some(first.announce_wire.clone());
+                ref_device = Some(first.tc_device);
+            }
+            (Some(w), Some(d)) => {
+                assert_eq!(
+                    &first.announce_wire, w,
+                    "cross-seed wire pin, seed {seed:#x}"
+                );
+                assert_eq!(&first.tc_device, d, "cross-seed device pin, seed {seed:#x}");
+            }
+            _ => unreachable!(),
+        }
+    }
+}
