@@ -8,11 +8,13 @@ fn main() {
     let body = std::fs::read_to_string(&defaults)
         .unwrap_or_else(|e| panic!("missing {}: {e}", defaults.display()));
     assert!(
-        body.lines().any(|l| l.trim() == "CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384"),
+        body.lines()
+            .any(|l| l.trim() == "CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384"),
         "sdkconfig.defaults lacks CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384"
     );
     assert!(
-        body.lines().any(|l| l.trim() == "CONFIG_ESP_IPC_TASK_STACK_SIZE=4096"),
+        body.lines()
+            .any(|l| l.trim() == "CONFIG_ESP_IPC_TASK_STACK_SIZE=4096"),
         "sdkconfig.defaults lacks CONFIG_ESP_IPC_TASK_STACK_SIZE=4096"
     );
     for pin in [
