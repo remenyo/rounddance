@@ -433,3 +433,38 @@ fn gp_sink_replay_is_deterministic() {
     assert!(!trace_a.is_empty());
     assert_eq!(decisions_a.len(), 8);
 }
+
+// RD-GP intake (matrix): sink decisions are timing-independent. Four
+// seeds incl. the 0/u64::MAX edges — per-seed double runs replay the
+// identical trace + decision log, and every seed decides the proven
+// 8-decision intake timeline (same timing-vs-decision split as the
+// RD-SIM-03 matrix: jitter moves timestamps, never decisions).
+#[test]
+fn gp_sink_matrix_seeds_share_decisions() {
+    const SEEDS: [u64; 4] = [0x0000, 0x51A6, 0x2222, u64::MAX];
+    const PIN: [&str; 8] = [
+        "commission:admit",
+        "data:handoff:0104/ffff/00",
+        "replay:drop:SecurityFailed",
+        "data:handoff:advanced",
+        "ask:admit",
+        "reply:served",
+        "success:commissioned",
+        "data-b:handoff",
+    ];
+    for &seed in &SEEDS {
+        let (trace_a, decisions_a) = scenario(seed);
+        let (trace_b, decisions_b) = scenario(seed);
+        assert_eq!(trace_a, trace_b, "per-seed trace replay, seed {seed:#x}");
+        assert_eq!(
+            decisions_a, decisions_b,
+            "per-seed decision replay, seed {seed:#x}"
+        );
+        assert_eq!(
+            decisions_a,
+            PIN.map(str::to_string),
+            "cross-seed decision pin, seed {seed:#x}"
+        );
+        assert!(!trace_a.is_empty());
+    }
+}

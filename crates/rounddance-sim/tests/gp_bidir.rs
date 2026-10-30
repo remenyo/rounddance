@@ -361,6 +361,40 @@ fn gp_bidir_replay_is_deterministic() {
     assert_eq!(decisions_a.len(), 6);
 }
 
+// RD-SIM-03 (matrix): sink decisions are timing-independent. Four
+// seeds incl. the 0/u64::MAX edges — per-seed double runs replay the
+// identical trace + decision log, and every seed decides the proven
+// 6-decision intake timeline (the naive cross-seed trace pin fails on
+// medium jitter timestamps only; deliveries and confirms are
+// seed-identical, see `gp_bidir_matrix_naive_trace_pin` repro).
+#[test]
+fn gp_bidir_matrix_seeds_share_decisions() {
+    const SEEDS: [u64; 4] = [0x0000, 0xB1D1, 0x2222, u64::MAX];
+    const PIN: [&str; 6] = [
+        "ask:admit",
+        "reply:served",
+        "success:commissioned",
+        "data:handoff:0104/ffff/00",
+        "replay:drop:SecurityFailed",
+        "data:handoff:advanced",
+    ];
+    for &seed in &SEEDS {
+        let (trace_a, decisions_a) = scenario(seed);
+        let (trace_b, decisions_b) = scenario(seed);
+        assert_eq!(trace_a, trace_b, "per-seed trace replay, seed {seed:#x}");
+        assert_eq!(
+            decisions_a, decisions_b,
+            "per-seed decision replay, seed {seed:#x}"
+        );
+        assert_eq!(
+            decisions_a,
+            PIN.map(str::to_string),
+            "cross-seed decision pin, seed {seed:#x}"
+        );
+        assert!(!trace_a.is_empty());
+    }
+}
+
 // Mismatch + timeout edges: a foreign Success is refused and a
 // lapsed window times out instead of completing.
 #[test]

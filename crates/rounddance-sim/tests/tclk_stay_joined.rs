@@ -241,6 +241,37 @@ fn stay_joined(seed: u64) -> (Vec<String>, u64, u64, u64, Vec<String>) {
     (log, latch_us, confirm_us, end_us, trace)
 }
 
+// RD-SIM-02 (matrix): the stay-joined decision log, the air timeline
+// markers, and the medium trace are seed-independent — four seeds
+// incl. the 0/u64::MAX edges, double-run per seed. Exact scripted
+// delays (jitter 0) make even the trace cross-seed identical, unlike
+// the jittered GP timelines where only decisions pin across seeds.
+#[test]
+fn tclk_matrix_seeds_share_log_and_trace() {
+    const SEEDS: [u64; 4] = [0x0000, 0x7C1C, 0xBEEF, u64::MAX];
+    for &seed in &SEEDS {
+        let run_a = stay_joined(seed);
+        let run_b = stay_joined(seed);
+        assert_eq!(run_a, run_b, "per-seed replay, seed {seed:#x}");
+        assert_eq!(
+            run_a.0,
+            vec![
+                "phase0-joined".to_string(),
+                format!("latch t={}", run_a.1),
+                "foreign-type-tolerated".to_string(),
+                "transport-open-tclk-latched".to_string(),
+                format!("confirm-ok t={} state=Authorized", run_a.2),
+                "timeline-latch-confirm-3.6s-in-budget".to_string(),
+                format!("stay-joined t={} no-leave", run_a.3),
+            ],
+            "cross-seed decision pin, seed {seed:#x}"
+        );
+        assert_eq!(run_a.2 - run_a.1, LATCH_TO_CONFIRM_US);
+    }
+    // Exact delays: the first and last seeds share one trace.
+    assert_eq!(stay_joined(SEEDS[0]).4, stay_joined(SEEDS[3]).4);
+}
+
 // RD-SIM-02: the full stay-joined run, first-try confirm, ~78.8 s
 // joined, no-Leave invariant, budget margin pinned.
 #[test]
