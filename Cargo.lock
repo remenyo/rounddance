@@ -1186,6 +1186,7 @@ dependencies = [
  "rounddance-aps",
  "rounddance-inspect",
  "rounddance-nwk",
+ "rounddance-security",
  "rounddance-zcl",
 ]
 
