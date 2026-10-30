@@ -317,10 +317,10 @@ pub enum MacCmdKind {
 /// NWK command payload summary: the named sub-dissector for NWK
 /// command frames, on unsecured as well as verified-open legs.
 /// Routing and leave shapes reuse the `rounddance-nwk` codecs;
-/// network-status, route-record, network-report, rejoin, and
-/// timeout shapes are length-gated names (no repo codec covers
-/// them); anything else files as `Unknown` with its command
-/// identifier, never a guess.
+/// network-status, route-record, network-report, network-update,
+/// rejoin, and timeout shapes are length-gated names (no repo
+/// codec covers them); anything else files as `Unknown` with
+/// its command identifier, never a guess.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NwkCmdNode {
     /// NWK command identifier (first payload octet).
@@ -365,6 +365,16 @@ pub enum NwkCmdKind {
         /// Declared report count (options bits 0-4).
         reports: u8,
         /// First listed PAN ID (`0xffff` when the list is empty).
+        first_pan: u16,
+    },
+    /// Network update: new-PAN-ID count plus the first new PAN ID
+    /// (the EPID, the update id, and the ID list itself stay in
+    /// the capture, never in the node — the link-status entry-list
+    /// precedent).
+    NetworkUpdate {
+        /// Declared update count (options bits 0-4).
+        updates: u8,
+        /// First listed new PAN ID (`0xffff` when the list is empty).
         first_pan: u16,
     },
     /// Link status: entry count plus the first neighbor (the entry

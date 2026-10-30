@@ -1025,6 +1025,9 @@ fn nwkcmd_text(k: &NwkCmdKind) -> String {
         NwkCmdKind::NetworkReport { reports, first_pan } => {
             format!("net-report count={reports} first={}", hex16(first_pan))
         }
+        NwkCmdKind::NetworkUpdate { updates, first_pan } => {
+            format!("net-update count={updates} first={}", hex16(first_pan))
+        }
         NwkCmdKind::NetworkStatus { status, dst_addr } => {
             format!("net-status status={status:#04x} dst={}", hex16(dst_addr))
         }
@@ -1188,6 +1191,10 @@ fn nwkcmd_json(n: &NwkCmdNode) -> String {
         NwkCmdKind::NetworkReport { reports, first_pan } => (
             "net-report",
             format!(",\"count\":{reports},\"first\":{first_pan}"),
+        ),
+        NwkCmdKind::NetworkUpdate { updates, first_pan } => (
+            "net-update",
+            format!(",\"count\":{updates},\"first\":{first_pan}"),
         ),
         NwkCmdKind::NetworkStatus { status, dst_addr } => (
             "net-status",

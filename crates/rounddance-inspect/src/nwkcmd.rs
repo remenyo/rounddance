@@ -3,13 +3,15 @@
 //!
 //! Routing and leave shapes reuse the `rounddance-nwk` codecs (the
 //! same parsers the stack decodes with). Network-status,
-//! route-record, network-report, rejoin-request / rejoin-response,
-//! and timeout-request / timeout-response have no repo codec, so
-//! they are length-gated names over the live shapes (status +
-//! destination; count-consistent relay list; count-consistent
-//! PAN-ID conflict list past the EPID; capability octet; short +
-//! status; two preserved octets). Any other identifier — or a named
-//! shape at an unexpected length — files as
+//! route-record, network-report, network-update, rejoin-request /
+//! rejoin-response, and timeout-request / timeout-response have no
+//! repo codec, so they are length-gated names over the live shapes
+//! (status + destination; count-consistent relay list;
+//! count-consistent PAN-ID conflict list past the EPID;
+//! count-consistent new-PAN-ID list past the EPID + update id;
+//! capability octet; short + status; two preserved octets). Any
+//! other identifier — or a named shape at an unexpected length —
+//! files as
 //! [`NwkCmdKind::Unknown`] with its identifier, never a guess. Only
 //! an empty payload refuses outright.
 
@@ -103,6 +105,28 @@ pub fn decode(buf: &[u8]) -> Result<(NwkCmdNode, usize), NwkCmdError> {
                     reports: buf[1] & 0x1f,
                     first_pan: if (buf[1] & 0x1f) > 0 {
                         u16::from_le_bytes([buf[10], buf[11]])
+                    } else {
+                        0xffff
+                    },
+                },
+                len,
+            )
+        }
+        // Network update: identifier + options + 8-octet EPID +
+        // update-id octet + new-PAN-ID list (update-command-id 0
+        // only; no repo codec covers it). The count (options bits
+        // 0-4) must exactly cover the trailing octets past the
+        // update-id octet, and a reserved command id is never
+        // guessed.
+        0x0a if len >= 11
+            && (buf[1] >> 5) == 0x00
+            && usize::from(buf[1] & 0x1f) * 2 == len - 11 =>
+        {
+            (
+                NwkCmdKind::NetworkUpdate {
+                    updates: buf[1] & 0x1f,
+                    first_pan: if (buf[1] & 0x1f) > 0 {
+                        u16::from_le_bytes([buf[11], buf[12]])
                     } else {
                         0xffff
                     },
