@@ -1,6 +1,8 @@
 //! Network-manager basics: leave / permit-joining / channel-update
-//! structures plus codecs. Full management logic (scan scheduling,
-//! conflict resolution) is a later wave; structures now.
+//! structures plus codecs, and the network-address conflict-resolution
+//! core (detect → decide → report/act). Emitting the report broadcast
+//! and owning address tables stay with later waves (see residue note
+//! on [`decide_remote_conflict`]); the decision itself lives here.
 //!
 //! Paraphrase-level model of doc `05-3474-23` R23.2 §2.4.3.3.5
 //! (`Mgmt_Leave_req` 0x0034, anchor p0145-L3530-L3531), §2.4.3.3.7
@@ -17,6 +19,7 @@
 
 use crate::desc::Error;
 use crate::status::ZdpStatus;
+use crate::zdp::DeviceAnnce;
 
 /// `Mgmt_Leave_req`: ask a remote device to leave the network
 /// (§2.4.3.3.5, anchor p0145-L3530-L3531).
@@ -552,5 +555,170 @@ impl MgmtNwkUpdateNotify {
         out[9] = failed[1];
         out[10..10 + expect].copy_from_slice(&self.energy[..expect]);
         Ok(n)
+    }
+}
+
+/// Local device role for conflict handling: only routers and the
+/// coordinator decide, and only the coordinator keeps a disputed
+/// address.
+///
+/// Requirement `05-3474-23-36110-02` (MINTED-pending-confirm).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConflictRole {
+    /// Never changes its address, still files the report.
+    Coordinator,
+    /// Gives up a disputed address for a fresh one.
+    Router,
+    /// Never self-resolves; the parent owns the fix.
+    EndDevice,
+}
+
+/// What happens to the local address after a confirmed local
+/// conflict.
+///
+/// Requirement `05-3474-23-36110-02` (MINTED-pending-confirm).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConflictDecision {
+    /// Keep using the address (coordinator).
+    KeepAddress,
+    /// Stop using the address; the caller acquires a fresh one via
+    /// rejoin or a parent-assigned pick, then re-announces.
+    AdoptNewAddress,
+    /// Take no local action; the parent resolves it (end device).
+    DeferToParent,
+}
+
+/// Decided fate plus the report duty: `report_addr` names the
+/// offending address the caller owes a status broadcast for, or
+/// `None` when no broadcast is owed.
+///
+/// Requirement `05-3474-23-36110-03` (MINTED-pending-confirm).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ConflictOutcome {
+    /// Fate of the local address.
+    pub decision: ConflictDecision,
+    /// Address to name in the report broadcast, if any.
+    pub report_addr: Option<u16>,
+}
+
+/// Whether one sighting claims the local network address for a
+/// different long address: same network address plus a mismatched
+/// long address is a local conflict; the local re-announce (same
+/// long address) and any other network address are not.
+///
+/// Paraphrase of the receipt rule (§3.6.1.10.2, anchor
+/// p0363-L8275-L8278).
+///
+/// Requirement `05-3474-23-36110-01` (MINTED-pending-confirm).
+#[must_use]
+pub const fn detect_local_conflict(
+    own_nwk: u16,
+    own_ieee: u64,
+    seen_nwk: u16,
+    seen_ieee: u64,
+) -> bool {
+    own_nwk == seen_nwk && own_ieee != seen_ieee
+}
+
+/// Table-scope scan: index of the first neighbor-table row binding
+/// `addr_nwk` to a long address other than `addr_ieee` — a second
+/// claimant of the watched address — or `None` when every row
+/// agrees. Lets callers check the local address and any announced
+/// address against one neighbor page with the same pass.
+///
+/// Paraphrase of the table-consistency check (§2.4.3.1.11.2, anchor
+/// p0135-L3279-L3281: match on long address plus a different node
+/// identifier names the conflict).
+///
+/// Requirement `05-3474-23-36110-01` (MINTED-pending-confirm).
+#[must_use]
+pub fn first_table_conflict(
+    entries: &[NeighborEntry],
+    addr_nwk: u16,
+    addr_ieee: u64,
+) -> Option<usize> {
+    entries
+        .iter()
+        .position(|e| e.nwk == addr_nwk && e.ieee != addr_ieee)
+}
+
+/// Decide a confirmed local conflict: the coordinator keeps its
+/// address, a router adopts a new one, an end device defers to its
+/// parent (paraphrase of §3.6.1.10.5: coordinator never changes,
+/// end devices never resolve, changer re-announces; anchors
+/// p0365-L8356-L8358). A conflict learned inside a status report
+/// owes no fresh report broadcast; any other sighting reports the
+/// previous address (anchors p0364-L8349-L8352).
+///
+/// Requirement `05-3474-23-36110-02` (MINTED-pending-confirm).
+#[must_use]
+pub const fn decide_local_conflict(
+    role: ConflictRole,
+    own_nwk: u16,
+    via_status_report: bool,
+) -> ConflictOutcome {
+    let report_addr = if via_status_report {
+        None
+    } else {
+        Some(own_nwk)
+    };
+    match role {
+        ConflictRole::Coordinator => ConflictOutcome {
+            decision: ConflictDecision::KeepAddress,
+            report_addr,
+        },
+        ConflictRole::Router => ConflictOutcome {
+            decision: ConflictDecision::AdoptNewAddress,
+            report_addr,
+        },
+        ConflictRole::EndDevice => ConflictOutcome {
+            decision: ConflictDecision::DeferToParent,
+            report_addr: None,
+        },
+    }
+}
+
+/// Report duty for a conflict on somebody else's address (e.g. a
+/// table row disagreeing with an announcement about an address the
+/// local device does not hold): routers and the coordinator name
+/// the offending address for the status broadcast, unless the
+/// conflict itself arrived inside a status report; end devices owe
+/// nothing. Emitting that broadcast stays with the NWK/roles owner
+/// (timed, jittered send); this names the payload address.
+///
+/// Paraphrase of §3.6.1.10.5 (anchors p0364-L8343-L8348).
+///
+/// Requirement `05-3474-23-36110-03` (MINTED-pending-confirm).
+#[must_use]
+pub const fn decide_remote_conflict(
+    role: ConflictRole,
+    offender: u16,
+    via_status_report: bool,
+) -> Option<u16> {
+    match role {
+        ConflictRole::Router | ConflictRole::Coordinator => {
+            if via_status_report {
+                None
+            } else {
+                Some(offender)
+            }
+        }
+        ConflictRole::EndDevice => None,
+    }
+}
+
+/// Act edge for [`ConflictDecision::AdoptNewAddress`]: the
+/// re-announce a device broadcasts under its replacement address
+/// (paraphrase of §3.6.1.10.5, anchor p0365-L8367-L8369). Consumes
+/// [`DeviceAnnce`] (`05-3474-23-24311-11`).
+///
+/// Requirement `05-3474-23-36110-04` (MINTED-pending-confirm).
+#[must_use]
+pub const fn reannounce(tsn: u8, new_nwk: u16, ieee: u64, capability: u8) -> DeviceAnnce {
+    DeviceAnnce {
+        tsn,
+        nwk_addr: new_nwk,
+        ieee,
+        capability,
     }
 }

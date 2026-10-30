@@ -564,6 +564,136 @@ fn vector_bind_manager_tables_05_3474_23_24322_02() {
     assert_eq!(mgr.bind(&bad, local), ZdpStatus::InvalidEp);
 }
 
+// 05-3474-23-36110-01: local conflict detection — same network
+// address claimed for a different long address conflicts; the local
+// re-announce (same long address) and any other network address do
+// not.
+#[test]
+fn vector_mgmt_conflict_detect_05_3474_23_36110_01() {
+    const OWN_NWK: u16 = 0x1234;
+    const OWN_IEEE: u64 = 0x1111_2222_3333_4444;
+    const OTHER_IEEE: u64 = 0x5555_6666_7777_8888;
+    // A stranger claiming our address: conflict.
+    assert!(detect_local_conflict(
+        OWN_NWK, OWN_IEEE, OWN_NWK, OTHER_IEEE
+    ));
+    // Our own re-announce echoing back: no conflict.
+    assert!(!detect_local_conflict(OWN_NWK, OWN_IEEE, OWN_NWK, OWN_IEEE));
+    // A stranger on any other address: no local conflict.
+    assert!(!detect_local_conflict(
+        OWN_NWK, OWN_IEEE, 0x5678, OTHER_IEEE
+    ));
+}
+
+// 05-3474-23-36110-01: table-scope conflict scan — first neighbor row
+// binding the watched network address to a different long address;
+// no row, or an empty page, reports no conflict.
+#[test]
+fn vector_mgmt_conflict_table_05_3474_23_36110_01() {
+    const WATCH_NWK: u16 = 0x1234;
+    const WATCH_IEEE: u64 = 0x1111_2222_3333_4444;
+    let blank = NeighborEntry {
+        ext_pan: 0,
+        ieee: 0,
+        nwk: 0,
+        device_type: 0,
+        rx_on_idle: false,
+        relationship: 0,
+        depth: 0,
+        lqi: 0,
+    };
+    let mut entries = [blank; MAX_NEIGHBORS];
+    entries[0] = NeighborEntry {
+        nwk: 0x5678,
+        ieee: 0xAAAA_BBBB_CCCC_DDDD,
+        ..blank
+    };
+    // Row 0 is a different address; row 1 re-binds the watched
+    // address to a stranger: the scan names row 1.
+    entries[1] = NeighborEntry {
+        nwk: WATCH_NWK,
+        ieee: 0x5555_6666_7777_8888,
+        ..blank
+    };
+    assert_eq!(
+        first_table_conflict(&entries[..2], WATCH_NWK, WATCH_IEEE),
+        Some(1)
+    );
+    // The watched owner itself in the table: no conflict.
+    entries[1].ieee = WATCH_IEEE;
+    assert_eq!(
+        first_table_conflict(&entries[..2], WATCH_NWK, WATCH_IEEE),
+        None
+    );
+    // Empty page: no conflict.
+    assert_eq!(first_table_conflict(&[], WATCH_NWK, WATCH_IEEE), None);
+}
+
+// 05-3474-23-36110-02: local-conflict decision — a router gives up
+// the address (reporting the previous one unless the conflict arrived
+// inside a status report), a coordinator keeps it (still reporting),
+// an end device defers to its parent and stays silent.
+#[test]
+fn vector_mgmt_conflict_decide_05_3474_23_36110_02() {
+    const OWN_NWK: u16 = 0x1234;
+    // Router, fresh sighting: adopt a new address, report the old.
+    let router = decide_local_conflict(ConflictRole::Router, OWN_NWK, false);
+    assert_eq!(router.decision, ConflictDecision::AdoptNewAddress);
+    assert_eq!(router.report_addr, Some(OWN_NWK));
+    // Router, learned via a status report: same move, no new report.
+    let router_via = decide_local_conflict(ConflictRole::Router, OWN_NWK, true);
+    assert_eq!(router_via.decision, ConflictDecision::AdoptNewAddress);
+    assert_eq!(router_via.report_addr, None);
+    // Coordinator never changes its address, but still reports.
+    let coord = decide_local_conflict(ConflictRole::Coordinator, OWN_NWK, false);
+    assert_eq!(coord.decision, ConflictDecision::KeepAddress);
+    assert_eq!(coord.report_addr, Some(OWN_NWK));
+    // End device never self-resolves: parent owns the fix.
+    let end = decide_local_conflict(ConflictRole::EndDevice, OWN_NWK, false);
+    assert_eq!(end.decision, ConflictDecision::DeferToParent);
+    assert_eq!(end.report_addr, None);
+}
+
+// 05-3474-23-36110-03: remote-conflict report — a router or the
+// coordinator names the offending address for the status broadcast
+// (suppressed when learned via a status report); an end device owes
+// nothing.
+#[test]
+fn vector_mgmt_conflict_report_05_3474_23_36110_03() {
+    const OFFENDER: u16 = 0x9ABC;
+    assert_eq!(
+        decide_remote_conflict(ConflictRole::Router, OFFENDER, false),
+        Some(OFFENDER)
+    );
+    assert_eq!(
+        decide_remote_conflict(ConflictRole::Coordinator, OFFENDER, false),
+        Some(OFFENDER)
+    );
+    assert_eq!(
+        decide_remote_conflict(ConflictRole::Router, OFFENDER, true),
+        None
+    );
+    assert_eq!(
+        decide_remote_conflict(ConflictRole::EndDevice, OFFENDER, false),
+        None
+    );
+}
+
+// 05-3474-23-36110-04: act edge — a device that adopts a new address
+// re-announces itself under it; the announce round-trips the new
+// address.
+#[test]
+fn vector_mgmt_conflict_reannounce_05_3474_23_36110_04() {
+    const IEEE: u64 = 0x1111_2222_3333_4444;
+    let ann = reannounce(0x33, 0x9ABC, IEEE, 0x8E);
+    assert_eq!(ann.nwk_addr, 0x9ABC);
+    assert_eq!(ann.ieee, IEEE);
+    let mut out = [0u8; 16];
+    let n = ann.encode_into(&mut out).unwrap();
+    let seen = DeviceAnnce::decode(&out[..n]).unwrap();
+    assert_eq!(seen, ann);
+}
+
 // 05-3474-23-244-01: status codes round-trip, unknowns preserved.
 #[test]
 fn vector_status_codes_05_3474_23_244_01() {

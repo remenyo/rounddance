@@ -44,8 +44,10 @@ pub use desc::{
 };
 pub use endpoint::{endpoint_answerable, simple_desc_fits, EndpointTable, MAX_LOCAL_ENDPOINTS};
 pub use mgmt::{
-    MgmtLeaveReq, MgmtLeaveRsp, MgmtLqiReq, MgmtLqiRsp, MgmtNwkUpdateNotify, MgmtNwkUpdateReq,
-    MgmtPermitJoiningReq, MgmtPermitJoiningRsp, NeighborEntry, MAX_ENERGY_VALUES, MAX_NEIGHBORS,
+    decide_local_conflict, decide_remote_conflict, detect_local_conflict, first_table_conflict,
+    reannounce, ConflictDecision, ConflictOutcome, ConflictRole, MgmtLeaveReq, MgmtLeaveRsp,
+    MgmtLqiReq, MgmtLqiRsp, MgmtNwkUpdateNotify, MgmtNwkUpdateReq, MgmtPermitJoiningReq,
+    MgmtPermitJoiningRsp, NeighborEntry, MAX_ENERGY_VALUES, MAX_NEIGHBORS,
 };
 pub use status::ZdpStatus;
 pub use transaction::{transaction_expected, Pending, PendingTable, TxnError};
