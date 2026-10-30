@@ -24,10 +24,19 @@
 //!
 //! # Profile conventions (rounddance, not spec algorithms)
 //!
-//! * The negotiated suite bit is `SUITE_1`; only single-bit suite
-//!   fields naming it are accepted, everything else terminates per
-//!   the guard table.
-//! * Certificates on the wire are the 48-octet suite-1 implicit form;
+//! * The negotiated suite bit is `SUITE_1` or `SUITE_2` (see
+//!   [`SUPPORTED_SUITE_MASK`]); only single-bit suite fields naming
+//!   our configured bit are accepted, everything else terminates per
+//!   the guard table. The wire shape below (command framing,
+//!   negotiation guards, attribute advertisement) is pinned for both
+//!   bits; the suite-2 cryptographic core — credential sizes beyond
+//!   the 48-octet opaque certificate form, curve choice, KDF labels —
+//!   is residue, not implemented here: no in-repo anchor
+//!   (`07-5123-08-1073-*` family, `07-5356-22-C311/C312` rows)
+//!   pins a suite-2 primitive, and this profile does not invent one.
+//! * Certificates on the wire are the 48-octet opaque implicit form
+//!   for either suite bit (no in-repo anchor pins a distinct suite-2
+//!   size, so none is carried here);
 //!   ephemeral points are accepted in BOTH wire forms — the 33-octet
 //!   compressed encoding (parity tag + x, `y` recovered on receipt)
 //!   and the 64-octet expanded convention — while transmit uses the
@@ -63,8 +72,32 @@ pub const REVISION: u16 = 2;
 pub const ATTR_SUITE: u16 = 0x0000;
 /// Suite bit implemented here (Crypto Suite 1 shape).
 pub const SUITE_1: u16 = 0x0001;
-/// Suite bit not implemented here (Crypto Suite 2 shape).
+/// Suite bit with wire-shape + negotiation implemented here; the
+/// cryptographic core is residue (see the module docs).
 pub const SUITE_2: u16 = 0x0002;
+/// Known suite bits: the union of the declared `SUITE_*` bits.
+///
+/// Requirement `07-5123-08-1073-02` (MINTED-pending-confirm).
+pub const SUPPORTED_SUITE_MASK: u16 = SUITE_1 | SUITE_2;
+
+/// Whether `suite` names exactly one suite bit (zero and multi-bit
+/// fields are malformed on the wire and terminate with
+/// [`TERM_BAD_MESSAGE`]).
+///
+/// Requirement `07-5123-08-1073-02` (MINTED-pending-confirm).
+#[must_use]
+pub const fn is_single_suite_bit(suite: u16) -> bool {
+    suite != 0 && suite.count_ones() == 1
+}
+
+/// Whether `suite` names one of the declared suite bits
+/// ([`SUITE_1`], [`SUITE_2`]).
+///
+/// Requirement `07-5123-08-1073-02` (MINTED-pending-confirm).
+#[must_use]
+pub const fn is_known_suite(suite: u16) -> bool {
+    suite == SUITE_1 || suite == SUITE_2
+}
 
 /// Server received: Initiate Key Establishment Request.
 pub const CMD_INITIATE_REQ: u8 = 0x00;
@@ -216,10 +249,25 @@ impl ClusterDef for ClientDef {
     }
 }
 
-/// Build a fresh suite attribute store (suite 1 advertised).
+/// Build a fresh suite attribute store advertising `SUITE_1`.
+///
+/// Requirement `07-5123-08-1073-02` (MINTED-pending-confirm).
 pub fn server_store() -> Result<AttrStore, Error> {
+    server_store_for_suite(SUITE_1)
+}
+
+/// Build a fresh suite attribute store advertising `suite`: one of
+/// the declared suite bits ([`SUITE_1`], [`SUITE_2`]). Anything else
+/// — zero, multi-bit, or an unknown bit — is refused, never
+/// defaulted.
+///
+/// Requirement `07-5123-08-1073-02` (MINTED-pending-confirm).
+pub fn server_store_for_suite(suite: u16) -> Result<AttrStore, Error> {
+    if !is_single_suite_bit(suite) || !is_known_suite(suite) {
+        return Err(Error::InvalidValue(0));
+    }
     let mut store = AttrStore::new(None);
-    store.add(SERVER_ATTRS[0], Value::Enum16(SUITE_1))?;
+    store.add(SERVER_ATTRS[0], Value::Enum16(suite))?;
     store.add_globals(REVISION)?;
     Ok(store)
 }
@@ -233,7 +281,7 @@ pub struct InitiateMsg {
     pub eph_time: u8,
     /// Peer confirm-generation hint.
     pub confirm_time: u8,
-    /// Implicit certificate octets (suite-1: 48).
+    /// Implicit certificate octets (48-octet opaque form, either suite).
     pub cert: [u8; IMPLICIT_CERT_LEN],
 }
 
@@ -555,9 +603,11 @@ impl Exchange {
     }
 
     /// Validate an incoming suite field: exactly our bit, nothing else.
+    /// A foreign single bit terminates with `UNSUPPORTED_SUITE`;
+    /// zero and multi-bit fields terminate with `BAD_MESSAGE`.
     fn check_suite(&self, suite: u16) -> Result<(), TerminateMsg> {
         if suite != self.suite {
-            if suite.count_ones() == 1 {
+            if is_single_suite_bit(suite) {
                 return Err(TerminateMsg {
                     status: TERM_UNSUPPORTED_SUITE,
                     wait_s: 0,

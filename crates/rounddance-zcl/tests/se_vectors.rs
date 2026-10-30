@@ -423,6 +423,95 @@ fn vector_keyest_retry_advice_07_5123_08_1074_04() {
     assert_eq!(keyest::retry_advice(&give_up), keyest::RetryAdvice::GiveUp);
 }
 
+// Suite-2 wire shape + negotiation (07-5123-08-1073-02 suite bits,
+// 07-5123-08-1074-01 initiate framing, 07-5356-22-C312-02 guards):
+// the suite-2 bit is advertised, framed byte-exact, and negotiated
+// with the same guards as suite 1. The suite-2 crypto core
+// (credentials, curve, KDF labels) is residue: no in-repo anchor
+// pins a suite-2 certificate/ephemeral size, so nothing here runs a
+// suite-2 key derivation.
+#[test]
+fn vector_keyest_suite2_advertise_07_5123_08_1073_02() {
+    assert_eq!(keyest::SUPPORTED_SUITE_MASK, 0x0003);
+    assert_eq!(
+        keyest::SUPPORTED_SUITE_MASK,
+        keyest::SUITE_1 | keyest::SUITE_2
+    );
+    // Single-bit rule names the wire guard (multi-bit terminates).
+    for good in [keyest::SUITE_1, keyest::SUITE_2, 0x0004, 0x8000] {
+        assert!(keyest::is_single_suite_bit(good), "0x{good:04x}");
+    }
+    for bad in [0x0000, 0x0003, 0x00FF, 0xFFFF] {
+        assert!(!keyest::is_single_suite_bit(bad), "0x{bad:04x}");
+    }
+    // Known bits are exactly the two declared suite bits.
+    assert!(keyest::is_known_suite(keyest::SUITE_1));
+    assert!(keyest::is_known_suite(keyest::SUITE_2));
+    for unknown in [0x0000u16, 0x0003, 0x0004, 0x8000, 0xFFFF] {
+        assert!(!keyest::is_known_suite(unknown), "0x{unknown:04x}");
+    }
+    // Advertisement: suite-1 store is unchanged, suite-2 advertises
+    // its own bit; anything else is refused, never defaulted.
+    let s1 = keyest::server_store().unwrap();
+    let s1b = keyest::server_store_for_suite(keyest::SUITE_1).unwrap();
+    assert_eq!(
+        s1.get(keyest::ATTR_SUITE),
+        Some(Value::Enum16(keyest::SUITE_1))
+    );
+    assert_eq!(
+        s1b.get(keyest::ATTR_SUITE),
+        Some(Value::Enum16(keyest::SUITE_1))
+    );
+    let s2 = keyest::server_store_for_suite(keyest::SUITE_2).unwrap();
+    assert_eq!(
+        s2.get(keyest::ATTR_SUITE),
+        Some(Value::Enum16(keyest::SUITE_2))
+    );
+    for refused in [0x0000u16, 0x0003, 0x0004, 0xFFFF] {
+        assert!(
+            keyest::server_store_for_suite(refused).is_err(),
+            "0x{refused:04x}"
+        );
+    }
+}
+
+// 07-5123-08-1074-01 + 07-5123-08-1074-04: suite-2 framing is
+// byte-exact: the suite field carries the suite-2 bit, lengths are
+// unchanged (2 + 1 + 1 + 48 initiate, 4 terminate).
+#[test]
+fn vector_keyest_suite2_framing_07_5123_08_1074_01() {
+    let msg = keyest::InitiateMsg {
+        suite: keyest::SUITE_2,
+        eph_time: 0x02,
+        confirm_time: 0x03,
+        cert: [0xA5; 48],
+    };
+    let mut out = [0u8; 64];
+    assert_eq!(keyest::encode_initiate(&msg, &mut out), Ok(52));
+    assert_eq!(&out[..4], &[0x02, 0x00, 0x02, 0x03]);
+    assert_eq!(&out[4..52], &[0xA5; 48]);
+    assert_eq!(keyest::decode_initiate(&out[..52]).unwrap(), msg);
+    assert!(keyest::decode_initiate(&out[..51]).is_err());
+    assert!(keyest::decode_initiate(&out[..53]).is_err());
+    // Terminate with a suite-2 mask: exact bytes + fallback advice.
+    let term = keyest::TerminateMsg {
+        status: keyest::TERM_UNSUPPORTED_SUITE,
+        wait_s: 5,
+        suite: keyest::SUITE_2,
+    };
+    let mut tb = [0u8; 8];
+    assert_eq!(keyest::encode_terminate(&term, &mut tb), Ok(4));
+    assert_eq!(&tb[..4], &[0x05, 0x05, 0x02, 0x00]);
+    assert_eq!(keyest::decode_terminate(&tb[..4]).unwrap(), term);
+    assert_eq!(
+        keyest::retry_advice(&term),
+        keyest::RetryAdvice::TryOtherSuite {
+            wait_s: 5,
+            suite: keyest::SUITE_2,
+        }
+    );
+}
+
 /// ECQV-consistent device provisioning (same construction as the
 /// security-crate host vectors: full private key from the cert
 /// binding, NOT the cert randomness).
@@ -451,6 +540,10 @@ struct Pair {
 }
 
 fn make_pair() -> Pair {
+    make_pair_suite(keyest::SUITE_1)
+}
+
+fn make_pair_suite(suite: u16) -> Pair {
     let b = HostBackend::new();
     let ca_priv = [0xC0u8; 32];
     let ca_pub = b.base_mul(&ca_priv).unwrap();
@@ -466,7 +559,7 @@ fn make_pair() -> Pair {
         [0x22; 32],
         q_i,
         &[id_i, id_r],
-        keyest::SUITE_1,
+        suite,
     )
     .unwrap();
     let resp = keyest::Exchange::begin(
@@ -477,7 +570,7 @@ fn make_pair() -> Pair {
         [0x55; 32],
         q_r,
         &[id_r, id_i],
-        keyest::SUITE_1,
+        suite,
     )
     .unwrap();
     Pair {
@@ -623,6 +716,83 @@ fn vector_keyest_initiate_guards_07_5356_22_c312_02() {
     assert_eq!(
         pair.resp.take_terminate().unwrap().status,
         keyest::TERM_BAD_MESSAGE
+    );
+}
+
+// Suite-2 negotiation (07-5123-08-107-02/03/04 +
+// 07-5356-22-C312-02/03): a suite-2-configured pair accepts the
+// suite-2 bit through initiation and rejects anything else with
+// the same guard table as suite 1 — never a crypto run, only the
+// negotiation half (suite-2 key derivation is residue).
+#[test]
+fn vector_keyest_suite2_negotiation_07_5356_22_c312_02() {
+    let mut pair = make_pair_suite(keyest::SUITE_2);
+    let b = HostBackend::new();
+    // Acceptance: the suite-2 bit passes both initiation halves and
+    // parks both sides at Initiated with the bit preserved.
+    let req = pair.init.initiate_request().unwrap();
+    assert_eq!(req.suite, keyest::SUITE_2);
+    let rsp = pair.resp.on_initiate(&b, &req).unwrap();
+    assert_eq!(rsp.suite, keyest::SUITE_2);
+    pair.init.on_initiate_response(&b, &rsp).unwrap();
+    assert_eq!(pair.init.stage(), keyest::Stage::Initiated);
+    assert_eq!(pair.resp.stage(), keyest::Stage::Initiated);
+    // The initiator still offers ephemeral framing after a
+    // suite-2 initiation (framing half, not derivation).
+    assert!(pair.init.ephemeral_request().is_ok());
+
+    // Foreign single bit (suite 1): UNSUPPORTED_SUITE, and the
+    // queued terminate carries our own suite-2 bit.
+    let mut pair = make_pair_suite(keyest::SUITE_2);
+    let mut foreign = pair.init.initiate_request().unwrap();
+    foreign.suite = keyest::SUITE_1;
+    assert_eq!(
+        pair.resp.on_initiate(&b, &foreign),
+        Err(keyest::ExchangeError::Terminated)
+    );
+    let term = pair.resp.take_terminate().unwrap();
+    assert_eq!(term.status, keyest::TERM_UNSUPPORTED_SUITE);
+    assert_eq!(term.suite, keyest::SUITE_2);
+
+    // Multi-bit suite field: BAD_MESSAGE (same rule as suite 1).
+    let mut pair = make_pair_suite(keyest::SUITE_2);
+    let mut multi = pair.init.initiate_request().unwrap();
+    multi.suite = keyest::SUITE_1 | keyest::SUITE_2;
+    assert_eq!(
+        pair.resp.on_initiate(&b, &multi),
+        Err(keyest::ExchangeError::Terminated)
+    );
+    assert_eq!(
+        pair.resp.take_terminate().unwrap().status,
+        keyest::TERM_BAD_MESSAGE
+    );
+
+    // Zero suite field: BAD_MESSAGE, not unsupported.
+    let mut pair = make_pair_suite(keyest::SUITE_2);
+    let mut zero = pair.init.initiate_request().unwrap();
+    zero.suite = 0x0000;
+    assert_eq!(
+        pair.resp.on_initiate(&b, &zero),
+        Err(keyest::ExchangeError::Terminated)
+    );
+    assert_eq!(
+        pair.resp.take_terminate().unwrap().status,
+        keyest::TERM_BAD_MESSAGE
+    );
+
+    // Mirror: a suite-1 initiator rejects a suite-2 response with
+    // UNSUPPORTED_SUITE (initiate-response half).
+    let mut pair = make_pair_suite(keyest::SUITE_1);
+    let req = pair.init.initiate_request().unwrap();
+    let mut rsp2 = pair.resp.on_initiate(&b, &req).unwrap();
+    rsp2.suite = keyest::SUITE_2;
+    assert_eq!(
+        pair.init.on_initiate_response(&b, &rsp2),
+        Err(keyest::ExchangeError::Terminated)
+    );
+    assert_eq!(
+        pair.init.take_terminate().unwrap().status,
+        keyest::TERM_UNSUPPORTED_SUITE
     );
 }
 
