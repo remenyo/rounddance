@@ -37,7 +37,9 @@
 //! CRC) are what the vectors pin.
 //!
 //! Requirement traceability (repo-minted, MINTED-pending-confirm):
-//! `RD-COMPAT-05` (codec), `RD-COMPAT-06` (SAP mapping),
+//! `RD-COMPAT-05` (codec, plus the streaming [`EzspDecoder`] byte
+//! pump over the same wire shape), `RD-COMPAT-06` (SAP mapping;
+//! adapter wiring of the streaming ingress waits a later increment),
 //! `RD-COMPAT-07` (join-flow parity with the existing MAC codec).
 
 use rounddance_mac_sap::{
@@ -369,6 +371,157 @@ pub fn decode(buf: &[u8]) -> Result<(EzspFrame, usize), EzspError> {
     };
     frame.payload[..payload_len].copy_from_slice(&body[4..4 + payload_len]);
     Ok((frame, end + 1))
+}
+
+/// Why a byte run was dropped instead of decoded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EzspDropReason {
+    /// `LEN` disagrees with the delimited body length, names a body
+    /// shorter than `CTRL + ID + CRC`, or the run overflowed the
+    /// bounded buffer before any closing [`FLAG`].
+    BadLength,
+    /// CRC-16/CCITT mismatch (frame dropped, never decoded).
+    BadCrc,
+    /// `ESC` with no following octet before the closing [`FLAG`].
+    BadEscape,
+}
+
+/// One decoder step result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EzspOutcome {
+    /// A complete, CRC-clean frame.
+    Frame(EzspFrame),
+    /// A malformed run was skipped; the parser re-armed at [`FLAG`].
+    Dropped(EzspDropReason),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EzspState {
+    Sync,
+    InFrame,
+    Skip,
+}
+
+/// Streaming EZSP frame parser: feed wire bytes, collect outcomes.
+///
+/// Bytes before the first [`FLAG`] are skipped silently (line noise,
+/// a peer mid-frame on attach). The stuffed body between the flags is
+/// accumulated verbatim and validated by the same [`decode`] the
+/// one-shot path uses, so streaming and queued framing agree by
+/// construction: a `LEN` mismatch surfaces as
+/// [`EzspDropReason::BadLength`], a checksum mismatch as
+/// [`EzspDropReason::BadCrc`], a dangling [`ESC`] as
+/// [`EzspDropReason::BadEscape`]. A run that outgrows the bounded
+/// buffer before any closing flag drops once as `BadLength` and its
+/// tail through the run's flag is swallowed, so one overlong run can
+/// never wedge the stream nor double-count. A closing [`FLAG`] never
+/// doubles as the next opener — back-to-back frames still need their
+/// own opener, exactly where one-shot `decode` resumes. It never
+/// panics and holds no allocator state.
+#[derive(Clone, Debug)]
+pub struct EzspDecoder {
+    state: EzspState,
+    buf: [u8; MAX_ENCODED_FRAME],
+    len: usize,
+    dropped: u32,
+    consecutive_bad: u32,
+}
+
+impl EzspDecoder {
+    /// Parser waiting at [`FLAG`], counters zero.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            state: EzspState::Sync,
+            buf: [0; MAX_ENCODED_FRAME],
+            len: 0,
+            dropped: 0,
+            consecutive_bad: 0,
+        }
+    }
+
+    /// Total dropped runs so far (diagnostic).
+    #[must_use]
+    pub const fn dropped(&self) -> u32 {
+        self.dropped
+    }
+
+    /// Dropped runs since the last good frame (desync meter).
+    #[must_use]
+    pub const fn consecutive_bad(&self) -> u32 {
+        self.consecutive_bad
+    }
+
+    fn drop(&mut self, reason: EzspDropReason) -> EzspOutcome {
+        self.dropped = self.dropped.saturating_add(1);
+        self.consecutive_bad = self.consecutive_bad.saturating_add(1);
+        EzspOutcome::Dropped(reason)
+    }
+
+    /// Feed one byte; at most one outcome per call (`None` while the
+    /// frame is still arriving or noise is being skipped).
+    pub fn push_byte(&mut self, byte: u8) -> Option<EzspOutcome> {
+        match self.state {
+            EzspState::Sync => {
+                if byte == FLAG {
+                    self.buf[0] = FLAG;
+                    self.len = 1;
+                    self.state = EzspState::InFrame;
+                }
+                None
+            }
+            EzspState::InFrame => {
+                if byte == FLAG {
+                    // `len >= 1` by construction, so room for the
+                    // closer always exists.
+                    self.buf[self.len] = FLAG;
+                    self.len += 1;
+                    self.state = EzspState::Sync;
+                    return Some(self.close());
+                }
+                if self.len >= self.buf.len() {
+                    // Overlong run: drop once, swallow the tail
+                    // through the run's flag so it cannot double-count.
+                    self.state = EzspState::Skip;
+                    self.len = 0;
+                    return Some(self.drop(EzspDropReason::BadLength));
+                }
+                self.buf[self.len] = byte;
+                self.len += 1;
+                None
+            }
+            EzspState::Skip => {
+                if byte == FLAG {
+                    self.state = EzspState::Sync;
+                }
+                None
+            }
+        }
+    }
+
+    /// Validate one `FLAG .. FLAG` run through [`decode`].
+    fn close(&mut self) -> EzspOutcome {
+        let run = &self.buf[..self.len];
+        self.len = 0;
+        match decode(run) {
+            Ok((frame, _)) => {
+                self.consecutive_bad = 0;
+                EzspOutcome::Frame(frame)
+            }
+            Err(EzspError::BadCrc) => self.drop(EzspDropReason::BadCrc),
+            Err(EzspError::BadEscape) => self.drop(EzspDropReason::BadEscape),
+            // `BadFlag`/`Truncated` cannot name a run that opens and
+            // closes with `FLAG`; every other decode refusal is a
+            // length-discipline refusal.
+            Err(_) => self.drop(EzspDropReason::BadLength),
+        }
+    }
+}
+
+impl Default for EzspDecoder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Mock NCP transport: records every encoded host-to-NCP frame and

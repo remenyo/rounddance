@@ -7,9 +7,9 @@
 //! MINTED-pending-confirm).
 
 use rounddance_compat::ember::{
-    decode, encode, next_seq, EmberAdapter, EzspError, MockEzspTransport, CMD_DATA_SEND,
-    CTRL_CALLBACK, CTRL_SEQ_MASK, EVT_DATA_RECEIVE, FLAG, MAX_EZSP_PAYLOAD, STATUS_DELIVERED,
-    STATUS_NO_ACK,
+    decode, encode, next_seq, EmberAdapter, EzspDecoder, EzspDropReason, EzspError, EzspOutcome,
+    MockEzspTransport, CMD_DATA_SEND, CTRL_CALLBACK, CTRL_SEQ_MASK, EVT_DATA_RECEIVE, FLAG,
+    MAX_ENCODED_FRAME, MAX_EZSP_PAYLOAD, STATUS_DELIVERED, STATUS_NO_ACK,
 };
 use rounddance_mac_sap::{
     AddrMode, FramePayload, MacAddress, MacDataSap, MacMgmtSap, TxHandle, TxOptions, TxRequest,
@@ -305,4 +305,188 @@ fn ember_join_flow_parity_with_esp_codec() {
     assert_eq!((ie.lqi, is.lqi), (200, 200));
     assert_eq!(ie.msdu.as_slice(), msdu);
     assert_eq!(is.msdu.as_slice(), msdu);
+}
+
+/// Feed every byte, collecting the non-silent outcomes.
+fn pump_dec(dec: &mut EzspDecoder, bytes: &[u8]) -> Vec<EzspOutcome> {
+    let mut out = Vec::new();
+    for b in bytes {
+        if let Some(o) = dec.push_byte(*b) {
+            out.push(o);
+        }
+    }
+    out
+}
+
+/// Streaming byte pin: FLAG | LEN=6 | CTRL=0x02 | ID 0x0001 LE |
+/// stuffed FLAG (`7D 5E`) | CRC16-LE(`02 01 00 7E` = 0xC1C1) | FLAG.
+/// The payload carries a FLAG-valued octet (only the two delimiting
+/// FLAGs are raw — the body FLAG is stuffed) and the CRC is
+/// hand-computed through the independent CRC-16/CCITT oracle
+/// (`crc16(b"123456789") == 0x29B1` pins the oracle itself).
+#[test]
+fn ezsp_decoder_byte_pinned_vector() {
+    let wire = [FLAG, 0x06, 0x02, 0x01, 0x00, 0x7D, 0x5E, 0xC1, 0xC1, FLAG];
+    assert_eq!(
+        rounddance_compat::ember::crc16(&[0x02, 0x01, 0x00, 0x7E]),
+        0xC1C1
+    );
+    let mut dec = EzspDecoder::new();
+    for b in &wire[..wire.len() - 1] {
+        assert_eq!(dec.push_byte(*b), None);
+    }
+    let Some(EzspOutcome::Frame(frame)) = dec.push_byte(wire[wire.len() - 1]) else {
+        panic!("pinned wire must decode");
+    };
+    assert_eq!(frame.control, 0x02);
+    assert_eq!(frame.seq(), 2);
+    assert!(!frame.is_callback());
+    assert_eq!(frame.frame_id, CMD_DATA_SEND);
+    assert_eq!(frame.payload_bytes(), &[0x7E]);
+    assert_eq!(dec.dropped(), 0);
+}
+
+/// Split feeds reassemble to the same frame the one-shot `decode`
+/// returns, however the bytes are chunked (length delimits, and the
+/// stuffed body is re-validated byte-identically on close).
+#[test]
+fn ezsp_decoder_split_feed_reassembles() {
+    let mut raw = [0u8; MAX_ENCODED_FRAME];
+    let payload = [FLAG, 0x7D, 0x08, 0x00, 0x00, 0x01, 0x00, 0x1E, 0x7A];
+    let n = encode(5, CMD_DATA_SEND, &payload, &mut raw).unwrap();
+    let (want, used) = decode(&raw[..n]).unwrap();
+    assert_eq!(used, n);
+    for split in [1usize, 2, 5, 7, 9] {
+        let mut dec = EzspDecoder::new();
+        let mut frames = Vec::new();
+        for chunk in raw[..n].chunks(split) {
+            for o in pump_dec(&mut dec, chunk) {
+                frames.push(o);
+            }
+        }
+        assert_eq!(frames.len(), 1, "split {split}");
+        let EzspOutcome::Frame(got) = frames[0] else {
+            panic!("split {split} must yield a frame");
+        };
+        assert_eq!(got, want, "split {split}");
+    }
+}
+
+/// Line noise ahead of FLAG is skipped silently; a LEN that disagrees
+/// with the delimited body drops one run and re-arms, so the next
+/// good frame still decodes and the desync meter resets.
+#[test]
+fn ezsp_decoder_resyncs_over_noise_and_bad_len() {
+    let mut raw = [0u8; 32];
+    let n = encode(1, CMD_DATA_SEND, &[0xAA], &mut raw).unwrap();
+    let mut bad = [0u8; 32];
+    bad[..n].copy_from_slice(&raw[..n]);
+    bad[1] = bad[1].wrapping_add(1);
+    assert_eq!(decode(&bad[..n]), Err(EzspError::BadLength));
+    let mut dec = EzspDecoder::new();
+    // Noise with no FLAG: silent.
+    assert!(pump_dec(&mut dec, &[0x00, 0x55, 0x13]).is_empty());
+    // LEN mismatch: one BadLength drop, then re-armed.
+    assert_eq!(
+        pump_dec(&mut dec, &bad[..n]),
+        [EzspOutcome::Dropped(EzspDropReason::BadLength)]
+    );
+    assert_eq!(dec.dropped(), 1);
+    assert_eq!(dec.consecutive_bad(), 1);
+    // The good frame still decodes; the meter resets.
+    let outcomes = pump_dec(&mut dec, &raw[..n]);
+    assert_eq!(outcomes.len(), 1);
+    let EzspOutcome::Frame(frame) = outcomes[0] else {
+        panic!("good frame must decode after a drop");
+    };
+    assert_eq!(frame.payload_bytes(), &[0xAA]);
+    assert_eq!(dec.consecutive_bad(), 0);
+    assert_eq!(dec.dropped(), 1);
+}
+
+/// A flipped body octet fails the CRC: one `BadCrc` drop, counters
+/// tick, and the stream re-arms for the next frame.
+#[test]
+fn ezsp_decoder_bad_crc_drops_and_rearms() {
+    let mut raw = [0u8; 32];
+    let n = encode(1, CMD_DATA_SEND, &[0xAA, 0x10], &mut raw).unwrap();
+    let mut bad = [0u8; 32];
+    bad[..n].copy_from_slice(&raw[..n]);
+    bad[n - 3] ^= 0x01;
+    assert_eq!(decode(&bad[..n]), Err(EzspError::BadCrc));
+    let mut dec = EzspDecoder::new();
+    assert_eq!(
+        pump_dec(&mut dec, &bad[..n]),
+        [EzspOutcome::Dropped(EzspDropReason::BadCrc)]
+    );
+    assert_eq!((dec.dropped(), dec.consecutive_bad()), (1, 1));
+    let outcomes = pump_dec(&mut dec, &raw[..n]);
+    assert!(matches!(outcomes[..], [EzspOutcome::Frame(_)]));
+    assert_eq!(dec.consecutive_bad(), 0);
+}
+
+/// A dangling ESC just before the closing FLAG is a `BadEscape` drop
+/// (same verdict the one-shot `decode` returns on the same bytes),
+/// and the stream re-arms for the next frame.
+#[test]
+fn ezsp_decoder_dangling_escape_drops() {
+    // Hand-built: LEN=5 names `CTRL ID CRC` but the last body octet
+    // is an ESC with no following octet before the FLAG.
+    let wire = [FLAG, 0x05, 0x00, 0x01, 0x00, 0xAD, 0x7D, FLAG];
+    assert_eq!(decode(&wire), Err(EzspError::BadEscape));
+    let mut dec = EzspDecoder::new();
+    assert_eq!(
+        pump_dec(&mut dec, &wire),
+        [EzspOutcome::Dropped(EzspDropReason::BadEscape)]
+    );
+    assert_eq!((dec.dropped(), dec.consecutive_bad()), (1, 1));
+    // Re-armed: a good frame decodes next.
+    let mut raw = [0u8; 32];
+    let n = encode(0, CMD_DATA_SEND, &[], &mut raw).unwrap();
+    let outcomes = pump_dec(&mut dec, &raw[..n]);
+    assert!(matches!(outcomes[..], [EzspOutcome::Frame(_)]));
+    assert_eq!(dec.consecutive_bad(), 0);
+}
+
+/// A run with no closing FLAG inside the bounded buffer drops exactly
+/// once: the overflow byte ends the run, the tail through the run's
+/// FLAG is swallowed, and the next good frame decodes.
+#[test]
+fn ezsp_decoder_overflow_drops_once_and_rearms() {
+    let mut raw = [0u8; 32];
+    let n = encode(3, CMD_DATA_SEND, &[0x01], &mut raw).unwrap();
+    // FLAG-led run of 299 non-FLAG octets closed by its own FLAG:
+    // the overflow trips long before the closer arrives.
+    let mut overlong = [0x55u8; 301];
+    overlong[0] = FLAG;
+    overlong[300] = FLAG;
+    let mut dec = EzspDecoder::new();
+    let outcomes = pump_dec(&mut dec, &overlong);
+    assert_eq!(outcomes, [EzspOutcome::Dropped(EzspDropReason::BadLength)]);
+    assert_eq!((dec.dropped(), dec.consecutive_bad()), (1, 1));
+    let outcomes = pump_dec(&mut dec, &raw[..n]);
+    assert!(matches!(outcomes[..], [EzspOutcome::Frame(_)]));
+    assert_eq!((dec.dropped(), dec.consecutive_bad()), (1, 0));
+}
+
+/// Back-to-back frames on one feed decode in order with no drops.
+#[test]
+fn ezsp_decoder_back_to_back_frames() {
+    let mut first = [0u8; 32];
+    let n1 = encode(0, CMD_DATA_SEND, &[0x01], &mut first).unwrap();
+    let mut second = [0u8; 32];
+    let n2 = encode(1, CMD_DATA_SEND, &[0x02, 0x03], &mut second).unwrap();
+    let mut wire = [0u8; 64];
+    wire[..n1].copy_from_slice(&first[..n1]);
+    wire[n1..n1 + n2].copy_from_slice(&second[..n2]);
+    let mut dec = EzspDecoder::new();
+    let outcomes = pump_dec(&mut dec, &wire[..n1 + n2]);
+    assert_eq!(outcomes.len(), 2);
+    let [EzspOutcome::Frame(a), EzspOutcome::Frame(b)] = outcomes[..] else {
+        panic!("back-to-back frames must both decode");
+    };
+    assert_eq!((a.seq(), b.seq()), (0, 1));
+    assert_eq!(a.payload_bytes(), &[0x01]);
+    assert_eq!(b.payload_bytes(), &[0x02, 0x03]);
+    assert_eq!(dec.dropped(), 0);
 }
