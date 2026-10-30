@@ -733,10 +733,10 @@ fn aps_ack_leg_acked_vs_unacked_two_node() {
     assert!(aps_a.pending_ack().is_some());
 }
 
-// SCOPE.md §8: the same seed + request bytes always yield identical
-// traces and identical delivered octets across runs.
-#[test]
-fn app_transaction_replays_deterministically() {
+// SCOPE.md §8: Match_Desc leg driver shared by the replay pin and
+// the seed matrix: the same seed + request bytes always yield
+// identical traces and identical delivered octets across runs.
+fn match_desc_sent() -> Vec<u8> {
     let req = MatchDescReq {
         tsn: 0x51,
         nwk_of_interest: 0xfffd,
@@ -752,47 +752,70 @@ fn app_transaction_replays_deterministically() {
     };
     let mut mbuf = [0u8; 48];
     let mn = req.encode_into(&mut mbuf).unwrap();
-    let sent = npdu(
+    npdu(
         NODE_A,
         NODE_B,
         &zdp_apdu(CLUSTER_MATCH_DESC_REQ, 0x20, &mbuf[..mn]),
+    )
+}
+
+fn run_match_desc(seed: u64, sent: &[u8]) -> (Vec<String>, Vec<u8>) {
+    let mut radio = ScriptedRadio::new(
+        Seed(seed),
+        vec![
+            ScriptAction::Delay {
+                base_us: 320,
+                jitter_us: 100,
+            },
+            ScriptAction::Deliver,
+        ],
     );
-    let run = |seed: u64| {
-        let mut radio = ScriptedRadio::new(
-            Seed(seed),
-            vec![
-                ScriptAction::Delay {
-                    base_us: 320,
-                    jitter_us: 100,
-                },
-                ScriptAction::Deliver,
-            ],
-        );
-        radio.reset(true);
-        radio.set_channel(Channel::new(15).unwrap()).unwrap();
-        radio.set_pan_id(PAN);
-        radio.set_short_addr(NODE_A);
-        radio
-            .data_request(TxRequest {
-                dst: MacAddress::short(PAN, NODE_B),
-                msdu: FramePayload::from_slice(&sent).expect("fits"),
-                options: TxOptions::ACK,
-            })
-            .expect("room");
-        radio.run_until_idle(16);
-        let rx = radio
-            .poll_indication()
-            .expect("delivery")
-            .msdu
-            .as_slice()
-            .to_vec();
-        (radio.trace_lines().to_vec(), rx)
-    };
-    let (t1, r1) = run(0xA710);
-    let (t2, r2) = run(0xA710);
+    radio.reset(true);
+    radio.set_channel(Channel::new(15).unwrap()).unwrap();
+    radio.set_pan_id(PAN);
+    radio.set_short_addr(NODE_A);
+    radio
+        .data_request(TxRequest {
+            dst: MacAddress::short(PAN, NODE_B),
+            msdu: FramePayload::from_slice(sent).expect("fits"),
+            options: TxOptions::ACK,
+        })
+        .expect("room");
+    radio.run_until_idle(16);
+    let rx = radio
+        .poll_indication()
+        .expect("delivery")
+        .msdu
+        .as_slice()
+        .to_vec();
+    (radio.trace_lines().to_vec(), rx)
+}
+
+#[test]
+fn app_transaction_replays_deterministically() {
+    let sent = match_desc_sent();
+    let (t1, r1) = run_match_desc(0xA710, &sent);
+    let (t2, r2) = run_match_desc(0xA710, &sent);
     assert_eq!(t1, t2);
     assert_eq!(r1, r2);
     assert_eq!(r1, sent);
+}
+
+// Same 4-seed boundary set as the earlier transport matrices
+// (0x0000/u64::MAX edges + 0x1234/0xBEEF mids): per-seed double-run
+// trace+octet replay equality, cross-seed delivered-bytes pin. The
+// Delay jitter arm is seed-driven (timestamps move across seeds),
+// so the cross-seed pin covers wire bytes, not trace text.
+#[test]
+fn app_transaction_matrix_seeds_share_wire() {
+    let sent = match_desc_sent();
+    for seed in [0x0000u64, 0x1234, 0xBEEF, u64::MAX] {
+        let (t1, r1) = run_match_desc(seed, &sent);
+        let (t2, r2) = run_match_desc(seed, &sent);
+        assert_eq!(t1, t2, "seed {seed:#x} replays its own trace");
+        assert_eq!(r1, r2, "seed {seed:#x} replays its own octets");
+        assert_eq!(r1, sent, "seed {seed:#x} delivers the sent frame");
+    }
 }
 
 // 05-3474-23-22411-09/10 over the scripted medium: B's Device_annce
