@@ -767,3 +767,140 @@ fn ash_full_window_wrap_loopback_through_decoder() {
     assert_eq!(tx.try_allocate(), Some(0));
     assert_eq!((rx.expected(), rx.ack_num()), (0, 0));
 }
+
+/// Loss-recovery + wrap-crossing ACK loopback through the streaming
+/// decoder: a frame lost by omission is NAK-recovered off the real
+/// wire, the retransmit run re-enters through the byte pump, and a
+/// later cumulative ACK retires across the 7 -> 0 wrap. This pins
+/// the recovery composition the happy-path full-window loopback and
+/// the one-shot NAK round-trip each cover only half of: every
+/// streamed frame is cross-checked against one-shot `decode`, and
+/// every intake count is asserted exactly. Direct delivery only —
+/// loss is omission, no timers, no bring-up sequencing.
+#[test]
+fn ash_loss_recovery_and_wrap_ack_loopback_through_decoder() {
+    let mut tx = AshTxWindow::new();
+    let mut rx = AshRxState::new();
+    let mut dec = AshDecoder::new();
+    // Fill the whole window: frames 0..=6, one-octet payloads.
+    let mut wires = [[0u8; 32]; ASH_TX_WINDOW as usize];
+    let mut lens = [0usize; ASH_TX_WINDOW as usize];
+    for frm in 0..ASH_TX_WINDOW {
+        assert_eq!(tx.try_allocate(), Some(frm));
+        lens[frm as usize] = encode_data(frm, 0, false, &[0x50 + frm], &mut wires[frm as usize])
+            .expect("window payload must encode");
+    }
+    assert!(tx.window_full());
+    // Stream every frame except 3 (loss by omission). Each delivered
+    // outcome is cross-checked against one-shot `decode` before the
+    // receiver files the frame number.
+    for frm in 0..ASH_TX_WINDOW {
+        if frm == 3 {
+            continue;
+        }
+        let wire = &wires[frm as usize][..lens[frm as usize]];
+        let (want, used) = decode(wire).expect("window frame must decode");
+        assert_eq!(used, wire.len());
+        let outcomes = pump_ash(&mut dec, wire);
+        assert_eq!(outcomes.len(), 1, "frame {frm} must yield one outcome");
+        let AshOutcome::Frame(got) = outcomes[0] else {
+            panic!("frame {frm} must decode through the stream");
+        };
+        assert_eq!(got, want);
+        let expect = if frm < 3 {
+            Ok(RxOutcome::Accept)
+        } else {
+            Ok(RxOutcome::Gap)
+        };
+        assert_eq!(rx.on_data(frm), expect);
+        assert_eq!(got.payload_bytes(), &[0x50 + frm]);
+    }
+    // Frames 0..=2 accepted (ack 2, expects 3); 4..=6 arrived while
+    // expecting 3, so gaps with the ack number held at 2.
+    assert_eq!((rx.expected(), rx.ack_num()), (3, 2));
+    // NAK(2) off the real wire, byte-pinned through the independent
+    // CRC-16/CCITT oracle: CTRL = NAK_BASE | (2 << 3) = 0x91,
+    // CRC16(0x91) = 0x7268.
+    let mut nak_wire = [0u8; 16];
+    let n = encode_nak(2, &mut nak_wire).expect("NAK must encode");
+    assert_eq!(&nak_wire[..n], &[FLAG, 0x03, 0x91, 0x68, 0x72, FLAG]);
+    let (nak, _) = decode(&nak_wire[..n]).expect("NAK must decode");
+    assert_eq!(nak.kind, AshKind::Nak { ack_num: 2 });
+    // Sender files the NAK: frames 0..=2 retire cumulatively, the
+    // retransmit run starts at 3 over frames 3, 4, 5, 6.
+    let decision = tx.on_nak(2).unwrap();
+    assert!(decision.needed());
+    assert_eq!((decision.start_frm, decision.count), (3, 4));
+    assert_eq!(tx.outstanding(), 4);
+    // Re-encode the run with the retransmit flag and stream it back
+    // through the byte pump with one-shot parity; the receiver takes
+    // the run in order (3 fresh, then 4/5/6 — seen but never filed).
+    for k in 0..decision.count {
+        let frm = (decision.start_frm + k) & NUM_MASK;
+        let mut wire = [0u8; 32];
+        let n = encode_data(frm, 0, true, &[0x50 + frm], &mut wire).expect("reTx must encode");
+        let (want, used) = decode(&wire[..n]).expect("reTx must decode");
+        assert_eq!(used, n);
+        let outcomes = pump_ash(&mut dec, &wire[..n]);
+        assert_eq!(outcomes.len(), 1, "reTx {frm} must yield one outcome");
+        let AshOutcome::Frame(got) = outcomes[0] else {
+            panic!("reTx {frm} must decode through the stream");
+        };
+        assert_eq!(got, want);
+        assert_eq!(
+            got.kind,
+            AshKind::Data {
+                frm_num: frm,
+                ack_num: 0,
+                re_tx: true
+            }
+        );
+        assert_eq!(rx.on_data(frm), Ok(RxOutcome::Accept));
+        assert_eq!(got.payload_bytes(), &[0x50 + frm]);
+    }
+    assert_eq!((rx.expected(), rx.ack_num()), (7, 6));
+    // Cumulative ACK(6) off the real wire (CTRL = ACK_BASE | (6 << 3)
+    // = 0xB0, CRC16(0xB0) = 0x462B) retires the four recovered
+    // frames — the three already retired by the NAK stay retired.
+    let mut ack_wire = [0u8; 16];
+    let n = encode_ack(6, &mut ack_wire).expect("ACK must encode");
+    assert_eq!(&ack_wire[..n], &[FLAG, 0x03, 0xB0, 0x2B, 0x46, FLAG]);
+    let (ack, _) = decode(&ack_wire[..n]).expect("ACK must decode");
+    let AshKind::Ack { ack_num } = ack.kind else {
+        panic!("ACK frame expected");
+    };
+    assert_eq!(tx.on_ack(ack_num), Ok(4));
+    assert_eq!(tx.outstanding(), 0);
+    assert!(!tx.retransmit_pending().needed());
+    // Wrap leg: allocate 7, 0, 1, 2 (base 7 straddles the wrap),
+    // stream through the pump with parity, receiver accepts in
+    // order, then a cumulative ACK(2) retires across the 7 -> 0
+    // boundary (span arithmetic over the wrap, not around it).
+    for frm in [7u8, 0, 1, 2] {
+        assert_eq!(tx.try_allocate(), Some(frm));
+        let mut wire = [0u8; 32];
+        let n = encode_data(frm, 0, false, &[0x60 + frm], &mut wire).expect("wrap must encode");
+        let (want, used) = decode(&wire[..n]).expect("wrap must decode");
+        assert_eq!(used, n);
+        let outcomes = pump_ash(&mut dec, &wire[..n]);
+        assert_eq!(outcomes.len(), 1, "wrap frame {frm} must yield one outcome");
+        let AshOutcome::Frame(got) = outcomes[0] else {
+            panic!("wrap frame {frm} must decode through the stream");
+        };
+        assert_eq!(got, want);
+        assert_eq!(rx.on_data(frm), Ok(RxOutcome::Accept));
+        assert_eq!(got.payload_bytes(), &[0x60 + frm]);
+    }
+    assert_eq!((rx.expected(), rx.ack_num()), (3, 2));
+    // ACK(2): CTRL = ACK_BASE | (2 << 3) = 0x90, CRC16(0x90) = 0x6249.
+    let n = encode_ack(2, &mut ack_wire).expect("wrap ACK must encode");
+    assert_eq!(&ack_wire[..n], &[FLAG, 0x03, 0x90, 0x49, 0x62, FLAG]);
+    let (ack, _) = decode(&ack_wire[..n]).expect("wrap ACK must decode");
+    let AshKind::Ack { ack_num } = ack.kind else {
+        panic!("ACK frame expected");
+    };
+    assert_eq!(tx.on_ack(ack_num), Ok(4));
+    assert_eq!(tx.outstanding(), 0);
+    assert_eq!((tx.base(), tx.next_frm()), (3, 3));
+    assert_eq!((dec.dropped(), dec.consecutive_bad()), (0, 0));
+}
