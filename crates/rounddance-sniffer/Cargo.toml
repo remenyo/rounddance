@@ -1,0 +1,24 @@
+[package]
+name = "rounddance-sniffer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Offline 802.15.4 sniffer: file input, dissect, text/JSON report, pcap-out, timelines"
+
+[features]
+default = ["std"]
+std = ["rounddance-inspect/std"]
+
+[dependencies]
+rounddance-inspect = { path = "../rounddance-inspect" }
+
+[dev-dependencies]
+rounddance-aps = { path = "../rounddance-aps" }
+rounddance-nwk = { path = "../rounddance-nwk" }
+rounddance-zcl = { path = "../rounddance-zcl" }
+
+[[bin]]
+name = "rd-sniff"
+path = "src/bin/rd-sniff.rs"
+required-features = ["std"]

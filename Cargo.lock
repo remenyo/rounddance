@@ -1179,6 +1179,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rounddance-sniffer"
+version = "0.1.0"
+dependencies = [
+ "rounddance-aps",
+ "rounddance-inspect",
+ "rounddance-nwk",
+ "rounddance-zcl",
+]
+
+[[package]]
 name = "rounddance-zcl"
 version = "0.1.0"
 dependencies = [

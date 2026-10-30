@@ -442,6 +442,10 @@ pub fn to_json(tree: &DecodeTree) -> String {
 /// Session schema version for [`session_to_json`].
 pub const SESSION_SCHEMA: u8 = 1;
 
+/// Session schema version for [`session_to_json_v2`]: the v1
+/// document plus the timeline table.
+pub const SESSION_SCHEMA_V2: u8 = 2;
+
 /// One-line-per-row human summary of a [`SessionEngine`](crate::session::SessionEngine).
 pub fn session_to_text(eng: &crate::session::SessionEngine) -> String {
     let mut s = String::new();
@@ -505,11 +509,37 @@ pub fn session_to_text(eng: &crate::session::SessionEngine) -> String {
 ///
 /// Arrays are in table order (not sorted); absent windows render as
 /// `null`. No key material is ever rendered.
+///
+/// The rendering is frozen: [`session_to_json_v2`] reuses exactly
+/// this byte prefix, and the `session_schema_*_exact` pins assert
+/// both shapes byte-for-byte.
 pub fn session_to_json(eng: &crate::session::SessionEngine) -> String {
-    let mut s = format!(
-        "{{\"v\":{},\"trees\":{},\"devices\":[",
-        SESSION_SCHEMA, eng.trees
-    );
+    let mut s = session_prefix_json(eng, SESSION_SCHEMA);
+    s.push('}');
+    s
+}
+
+/// Extended machine-readable session snapshot (schema
+/// [`SESSION_SCHEMA_V2`]): the [`session_to_json`] document plus the
+/// timeline table in exactly the [`timelines_to_json`] object shape.
+///
+/// Additive by construction — the v1 rendering forms the byte prefix
+/// of the v2 document, so every v1 pin keeps passing. A v1-strict
+/// loader ([`session_from_json`]) refuses a v2 document at the
+/// schema gate ([`SessionLoadError::BadSchema`]); see
+/// [`session_v2_from_json`] for the v2 loader.
+pub fn session_to_json_v2(eng: &crate::session::SessionEngine) -> String {
+    let mut s = session_prefix_json(eng, SESSION_SCHEMA_V2);
+    s.push_str(",\"timelines\":");
+    s.push_str(&timelines_array_json(eng));
+    s.push('}');
+    s
+}
+
+/// The session rendering minus its final root `}`: shared head of
+/// the v1 and v2 documents (the schema octet differs per version).
+fn session_prefix_json(eng: &crate::session::SessionEngine, schema: u8) -> String {
+    let mut s = format!("{{\"v\":{},\"trees\":{},\"devices\":[", schema, eng.trees);
     let mut first = true;
     for d in eng.devices().iter().flatten() {
         if !first {
@@ -540,7 +570,7 @@ pub fn session_to_json(eng: &crate::session::SessionEngine) -> String {
         ));
     }
     s.push_str(&format!(
-        "],\"sec\":{{\"decryptable\":{},\"orphan\":{},\"slots\":{}}}}}",
+        "],\"sec\":{{\"decryptable\":{},\"orphan\":{},\"slots\":{}}}",
         eng.secured_decryptable,
         eng.secured_orphan,
         eng.keys().loaded(),
@@ -617,59 +647,72 @@ pub fn timelines_to_text(eng: &crate::session::SessionEngine) -> String {
     s
 }
 
-/// Machine-readable timeline table (standalone shape, not part of the
-/// v1 session snapshot in [`session_to_json`]).
+/// Machine-readable timeline table (standalone shape, also embedded
+/// in the v2 session snapshot in [`session_to_json_v2`]).
 pub fn timelines_to_json(eng: &crate::session::SessionEngine) -> String {
-    use crate::session::{DATA_AFTER_LEAVE, DATA_BEFORE_JOIN, GAP_OBSERVED, REJOIN_WITHOUT_LEAVE};
-    let mut s = String::from("{\"timelines\":[");
+    format!("{{\"timelines\":{}}}", timelines_array_json(eng))
+}
+
+/// The timeline-table array shared by [`timelines_to_json`] and
+/// [`session_to_json_v2`]: identical objects, identical order.
+fn timelines_array_json(eng: &crate::session::SessionEngine) -> String {
+    let mut s = String::from("[");
     let mut first = true;
     for t in eng.timelines().iter().flatten() {
         if !first {
             s.push(',');
         }
         first = false;
-        let mut flags = String::new();
-        for (bit, name) in [
-            (DATA_BEFORE_JOIN, "data-before-join"),
-            (REJOIN_WITHOUT_LEAVE, "rejoin-without-leave"),
-            (DATA_AFTER_LEAVE, "data-after-leave"),
-            (GAP_OBSERVED, "gap"),
-        ] {
-            if t.anomalies & bit != 0 {
-                if !flags.is_empty() {
-                    flags.push(',');
-                }
-                flags.push_str(&format!("\"{name}\""));
-            }
-        }
-        let mut log = String::new();
-        for (code, tree_no) in t.log.iter().flatten() {
-            if !log.is_empty() {
-                log.push(',');
-            }
-            log.push_str(&format!("{{\"ev\":{code},\"tree\":{tree_no}}}"));
-        }
-        s.push_str(&format!(
-            "{{\"pan\":{},\"short\":{},\"ieee\":{},\"stage\":\"{}\",\"left\":{},\"events\":{},\"anomalies\":{},\"flags\":[{}],\"log\":[{}]}}",
-            t.pan_id,
-            t.short_addr,
-            t.ieee.map(|e| e.to_string()).unwrap_or_else(|| String::from("null")),
-            timeline_stage_text(t.stage),
-            t.left,
-            t.event_total,
-            t.anomalies,
-            flags,
-            log,
-        ));
+        s.push_str(&timeline_entry_json(t));
     }
-    s.push_str("]}");
+    s.push(']');
     s
+}
+
+/// One timeline row in the machine-readable shape.
+fn timeline_entry_json(t: &crate::session::SessionTimeline) -> String {
+    use crate::session::{DATA_AFTER_LEAVE, DATA_BEFORE_JOIN, GAP_OBSERVED, REJOIN_WITHOUT_LEAVE};
+    let mut flags = String::new();
+    for (bit, name) in [
+        (DATA_BEFORE_JOIN, "data-before-join"),
+        (REJOIN_WITHOUT_LEAVE, "rejoin-without-leave"),
+        (DATA_AFTER_LEAVE, "data-after-leave"),
+        (GAP_OBSERVED, "gap"),
+    ] {
+        if t.anomalies & bit != 0 {
+            if !flags.is_empty() {
+                flags.push(',');
+            }
+            flags.push_str(&format!("\"{name}\""));
+        }
+    }
+    let mut log = String::new();
+    for (code, tree_no) in t.log.iter().flatten() {
+        if !log.is_empty() {
+            log.push(',');
+        }
+        log.push_str(&format!("{{\"ev\":{code},\"tree\":{tree_no}}}"));
+    }
+    format!(
+        "{{\"pan\":{},\"short\":{},\"ieee\":{},\"stage\":\"{}\",\"left\":{},\"events\":{},\"anomalies\":{},\"flags\":[{}],\"log\":[{}]}}",
+        t.pan_id,
+        t.short_addr,
+        t.ieee.map(|e| e.to_string()).unwrap_or_else(|| String::from("null")),
+        timeline_stage_text(t.stage),
+        t.left,
+        t.event_total,
+        t.anomalies,
+        flags,
+        log,
+    )
 }
 
 /// Session snapshot load failure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SessionLoadError {
-    /// Schema version missing or not [`SESSION_SCHEMA`]: the
+    /// Schema version missing or not the expected schema
+    /// ([`SESSION_SCHEMA`] for [`session_from_json`],
+    /// [`SESSION_SCHEMA_V2`] for [`session_v2_from_json`]): the
     /// snapshot comes from an incompatible writer.
     BadSchema,
     /// Truncated, mistyped, out-of-range, or over-capacity input.
@@ -690,6 +733,23 @@ pub fn session_from_json(s: &str) -> Result<crate::session::SessionEngine, Sessi
         i: 0,
     }
     .parse_session()
+}
+
+/// Load a session snapshot written by [`session_to_json_v2`].
+///
+/// The schema version gates first: anything but
+/// [`SESSION_SCHEMA_V2`] is [`SessionLoadError::BadSchema`]. Key
+/// material is never in the snapshot (see [`session_from_json`]);
+/// timelines restore with their event logs, and recency counters
+/// restart at zero — none of those are rendered, so a save/load
+/// round trip re-renders byte-identically (pinned by the
+/// `session_schema_v2_*` tests).
+pub fn session_v2_from_json(s: &str) -> Result<crate::session::SessionEngine, SessionLoadError> {
+    Parser {
+        b: s.as_bytes(),
+        i: 0,
+    }
+    .parse_session_v2()
 }
 
 /// Byte-cursor parser for exactly the [`session_to_json`] shape
@@ -872,6 +932,269 @@ impl<'a> Parser<'a> {
             gaps,
             late,
         }))
+    }
+
+    fn parse_session_v2(mut self) -> Result<crate::session::SessionEngine, SessionLoadError> {
+        use crate::session::SessionEngine;
+        use crate::session::{MAX_DEVICES, MAX_NETWORKS, MAX_TIMELINES};
+        self.ch(b'{')?;
+        self.key("v")?;
+        let v = self.num()?;
+        if v != u64::from(SESSION_SCHEMA_V2) {
+            return Err(SessionLoadError::BadSchema);
+        }
+        self.ch(b',')?;
+        self.key("trees")?;
+        let trees = self.num_u32()?;
+        self.ch(b',')?;
+        self.key("devices")?;
+        self.ch(b'[')?;
+        let mut devices = [None; MAX_DEVICES];
+        let mut nd = 0usize;
+        if !self.peek(b']') {
+            loop {
+                if nd >= MAX_DEVICES {
+                    return Err(SessionLoadError::Malformed);
+                }
+                devices[nd] = Some(self.device()?);
+                nd += 1;
+                if self.consume(b',') {
+                    continue;
+                }
+                break;
+            }
+        }
+        self.ch(b']')?;
+        self.ch(b',')?;
+        self.key("networks")?;
+        self.ch(b'[')?;
+        let mut networks = [None; MAX_NETWORKS];
+        let mut nn = 0usize;
+        if !self.peek(b']') {
+            loop {
+                if nn >= MAX_NETWORKS {
+                    return Err(SessionLoadError::Malformed);
+                }
+                networks[nn] = Some(self.network()?);
+                nn += 1;
+                if self.consume(b',') {
+                    continue;
+                }
+                break;
+            }
+        }
+        self.ch(b']')?;
+        self.ch(b',')?;
+        self.key("sec")?;
+        self.ch(b'{')?;
+        self.key("decryptable")?;
+        let decryptable = self.num_u32()?;
+        self.ch(b',')?;
+        self.key("orphan")?;
+        let orphan = self.num_u32()?;
+        self.ch(b',')?;
+        self.key("slots")?;
+        let slots = self.num()?;
+        if slots > crate::keys::MAX_NWK_KEYS as u64 {
+            return Err(SessionLoadError::Malformed);
+        }
+        self.ch(b'}')?;
+        self.ch(b',')?;
+        self.key("timelines")?;
+        self.ch(b'[')?;
+        let mut timelines = [None; MAX_TIMELINES];
+        let mut nt = 0usize;
+        if !self.peek(b']') {
+            loop {
+                if nt >= MAX_TIMELINES {
+                    return Err(SessionLoadError::Malformed);
+                }
+                timelines[nt] = Some(self.timeline()?);
+                nt += 1;
+                if self.consume(b',') {
+                    continue;
+                }
+                break;
+            }
+        }
+        self.ch(b']')?;
+        self.ch(b'}')?;
+        self.end()?;
+        Ok(SessionEngine::restore_v2(
+            trees,
+            devices,
+            networks,
+            decryptable,
+            orphan,
+            slots as usize,
+            timelines,
+        ))
+    }
+
+    fn timeline(&mut self) -> Result<crate::session::SessionTimeline, SessionLoadError> {
+        use crate::session::SessionTimeline;
+        self.ch(b'{')?;
+        self.key("pan")?;
+        let pan_id = self.num_u16()?;
+        self.ch(b',')?;
+        self.key("short")?;
+        let short_addr = self.num_u16()?;
+        self.ch(b',')?;
+        self.key("ieee")?;
+        let ieee = if self.consume_str("null") {
+            None
+        } else {
+            Some(self.num()?)
+        };
+        self.ch(b',')?;
+        self.key("stage")?;
+        let stage = self.stage_name()?;
+        self.ch(b',')?;
+        self.key("left")?;
+        let left = self.boolean()?;
+        self.ch(b',')?;
+        self.key("events")?;
+        let event_total = self.num_u32()?;
+        self.ch(b',')?;
+        self.key("anomalies")?;
+        let anomalies = self.num_u8()?;
+        self.ch(b',')?;
+        self.key("flags")?;
+        self.flags()?;
+        self.ch(b',')?;
+        self.key("log")?;
+        let log = self.timeline_log()?;
+        self.ch(b'}')?;
+        Ok(SessionTimeline {
+            pan_id,
+            short_addr,
+            ieee,
+            stage,
+            anomalies,
+            left,
+            event_total,
+            log,
+            last_seen: 0,
+        })
+    }
+
+    fn stage_name(&mut self) -> Result<crate::session::TimelineStage, SessionLoadError> {
+        use crate::session::TimelineStage;
+        self.skip_ws();
+        if self.b.get(self.i) != Some(&b'"') {
+            return Err(SessionLoadError::Malformed);
+        }
+        self.i += 1;
+        let start = self.i;
+        while self.i < self.b.len() && self.b[self.i] != b'"' {
+            self.i += 1;
+        }
+        if self.i >= self.b.len() {
+            return Err(SessionLoadError::Malformed);
+        }
+        let name = &self.b[start..self.i];
+        self.i += 1;
+        match name {
+            b"absent" => Ok(TimelineStage::Absent),
+            b"joining" => Ok(TimelineStage::Joining),
+            b"joined" => Ok(TimelineStage::Joined),
+            b"keyed" => Ok(TimelineStage::Keyed),
+            b"announced" => Ok(TimelineStage::Announced),
+            b"active" => Ok(TimelineStage::Active),
+            _ => Err(SessionLoadError::Malformed),
+        }
+    }
+
+    fn boolean(&mut self) -> Result<bool, SessionLoadError> {
+        if self.consume_str("true") {
+            return Ok(true);
+        }
+        if self.consume_str("false") {
+            return Ok(false);
+        }
+        Err(SessionLoadError::Malformed)
+    }
+
+    /// Flag-name array: every name must be one of the four anomaly
+    /// names, each at most once (order is free; the numeric
+    /// `anomalies` word stays authoritative and the flags re-render
+    /// from it).
+    fn flags(&mut self) -> Result<(), SessionLoadError> {
+        self.ch(b'[')?;
+        let mut seen: u8 = 0;
+        if !self.peek(b']') {
+            loop {
+                let bit = self.flag_name()?;
+                if seen & bit != 0 {
+                    return Err(SessionLoadError::Malformed);
+                }
+                seen |= bit;
+                if self.consume(b',') {
+                    continue;
+                }
+                break;
+            }
+        }
+        self.ch(b']')?;
+        Ok(())
+    }
+
+    fn flag_name(&mut self) -> Result<u8, SessionLoadError> {
+        use crate::session::{
+            DATA_AFTER_LEAVE, DATA_BEFORE_JOIN, GAP_OBSERVED, REJOIN_WITHOUT_LEAVE,
+        };
+        self.skip_ws();
+        if self.b.get(self.i) != Some(&b'"') {
+            return Err(SessionLoadError::Malformed);
+        }
+        self.i += 1;
+        let start = self.i;
+        while self.i < self.b.len() && self.b[self.i] != b'"' {
+            self.i += 1;
+        }
+        if self.i >= self.b.len() {
+            return Err(SessionLoadError::Malformed);
+        }
+        let name = &self.b[start..self.i];
+        self.i += 1;
+        match name {
+            b"data-before-join" => Ok(DATA_BEFORE_JOIN),
+            b"rejoin-without-leave" => Ok(REJOIN_WITHOUT_LEAVE),
+            b"data-after-leave" => Ok(DATA_AFTER_LEAVE),
+            b"gap" => Ok(GAP_OBSERVED),
+            _ => Err(SessionLoadError::Malformed),
+        }
+    }
+
+    fn timeline_log(
+        &mut self,
+    ) -> Result<[Option<(u8, u32)>; crate::session::MAX_TIMELINE_EVENTS], SessionLoadError> {
+        use crate::session::MAX_TIMELINE_EVENTS;
+        self.ch(b'[')?;
+        let mut log = [None; MAX_TIMELINE_EVENTS];
+        let mut n = 0usize;
+        if !self.peek(b']') {
+            loop {
+                if n >= MAX_TIMELINE_EVENTS {
+                    return Err(SessionLoadError::Malformed);
+                }
+                self.ch(b'{')?;
+                self.key("ev")?;
+                let ev = self.num_u8()?;
+                self.ch(b',')?;
+                self.key("tree")?;
+                let tree = self.num_u32()?;
+                self.ch(b'}')?;
+                log[n] = Some((ev, tree));
+                n += 1;
+                if self.consume(b',') {
+                    continue;
+                }
+                break;
+            }
+        }
+        self.ch(b']')?;
+        Ok(log)
     }
 
     fn skip_ws(&mut self) {

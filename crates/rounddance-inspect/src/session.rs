@@ -196,6 +196,13 @@ impl SessionEngine {
         &self.keys
     }
 
+    /// Adopt operator-loaded key slots: offline runs load lab keys
+    /// once and fold every frame under them, so decryptable/orphan
+    /// accounting reflects the operator's key state.
+    pub fn set_keys(&mut self, keys: &KeySlots) {
+        self.keys = *keys;
+    }
+
     /// Rebuild an engine from saved snapshot fields (see
     /// [`crate::report::session_from_json`]). Table order is
     /// preserved; recency counters restart at zero and the key
@@ -218,6 +225,33 @@ impl SessionEngine {
             // `crate::report`): a restore restarts with an empty
             // timeline table, like the GP key slots.
             timelines: [None; MAX_TIMELINES],
+            keys: KeySlots::restore(key_slots, key_slots.min(u32::MAX as usize) as u32),
+            now: 0,
+            trees,
+            secured_decryptable,
+            secured_orphan,
+        }
+    }
+
+    /// Rebuild an engine from saved v2 snapshot fields (see
+    /// [`crate::report::session_to_json_v2`]): like [`Self::restore`]
+    /// but the timeline table restores too (recency counters restart
+    /// at zero — none of those are rendered, so a save/load round
+    /// trip re-renders byte-identically).
+    #[must_use]
+    pub fn restore_v2(
+        trees: u32,
+        devices: [Option<DeviceEntry>; MAX_DEVICES],
+        networks: [Option<NetworkEntry>; MAX_NETWORKS],
+        secured_decryptable: u32,
+        secured_orphan: u32,
+        key_slots: usize,
+        timelines: [Option<SessionTimeline>; MAX_TIMELINES],
+    ) -> Self {
+        Self {
+            devices,
+            networks,
+            timelines,
             keys: KeySlots::restore(key_slots, key_slots.min(u32::MAX as usize) as u32),
             now: 0,
             trees,

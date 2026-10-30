@@ -17,6 +17,10 @@ pub const PCAP_MAGIC_BE: u32 = 0xd4c3b2a1;
 pub const PCAPNG_MAGIC_LE: u32 = 0x0a0d0d0a;
 /// 802.15.4 link type (no FCS).
 pub const LINKTYPE_IEEE802_15_4: u32 = 195;
+/// 802.15.4 link type without FCS (Wireshark-native no-FCS capture;
+/// the lab `sniff2pcap` recordings use this — ingest is link-type
+/// agnostic, the type is recorded per file for the report).
+pub const LINKTYPE_IEEE802_15_4_NOFCS: u32 = 230;
 
 /// pcapng block types we consume or skip.
 const PB_SHB: u32 = 0x0A0D0D0A;

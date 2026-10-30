@@ -20,6 +20,7 @@ members = [
     "crates/rounddance-rcp",
     "crates/rounddance-ffi",
     "crates/rounddance-inspect",
+    "crates/rounddance-sniffer",
     "tools/arbitrator",
 ]
 
