@@ -1006,3 +1006,120 @@ fn ash_control_frames_loopback_through_decoder() {
     );
     assert_eq!((dec.dropped(), dec.consecutive_bad()), (0, 0));
 }
+
+/// DATA piggyback-ACK loopback through the streaming decoder:
+/// bidirectional A<->B exchange where the ack number riding in a
+/// DATA header — not an ACK-only frame — drives the sender window.
+/// A sends DATA(0,ack0)+DATA(1,ack0) through the byte pump with
+/// one-shot parity (B accepts both, ack 0->1); B replies
+/// DATA(0,ack1) through the pump with parity and A files the frame
+/// number, retiring both outstanding frames via
+/// `tx.on_ack(piggyback)`; a replayed B->A wire pins the stale leg
+/// (duplicate re-file + `on_ack` retires 0, never an error). This
+/// closes the last ack-path composition gap: ACK-only and NAK intake
+/// already drive the window off-wire, DATA piggyback never did.
+/// Direct delivery only — no timers, no bring-up sequencing.
+#[test]
+fn ash_data_piggyback_ack_loopback_through_decoder() {
+    use rounddance_compat::ember::crc16;
+    assert_eq!(crc16(b"123456789"), 0x29B1);
+    // Oracle pins: CRC-16/CCITT over each unescaped CTRL|payload body.
+    assert_eq!(crc16(&[0x00, 0x41]), 0x45EA);
+    assert_eq!(crc16(&[0x01, 0x42]), 0x46B8);
+    assert_eq!(crc16(&[0x08, 0x43]), 0xEC01);
+    // A allocates two fresh frames (piggyback ack 0: nothing received).
+    let mut a_tx = AshTxWindow::new();
+    let mut a_rx = AshRxState::new();
+    assert_eq!(a_tx.try_allocate(), Some(0));
+    assert_eq!(a_tx.try_allocate(), Some(1));
+    // Byte-pinned A->B DATA frames: LEN=4, CRC-16 LE per oracle pin.
+    let mut a0_wire = [0u8; 16];
+    let n_a0 = encode_data(0, 0, false, &[0x41], &mut a0_wire).unwrap();
+    assert_eq!(
+        &a0_wire[..n_a0],
+        &[FLAG, 0x04, 0x00, 0x41, 0xEA, 0x45, FLAG]
+    );
+    let mut a1_wire = [0u8; 16];
+    let n_a1 = encode_data(1, 0, false, &[0x42], &mut a1_wire).unwrap();
+    assert_eq!(
+        &a1_wire[..n_a1],
+        &[FLAG, 0x04, 0x01, 0x42, 0xB8, 0x46, FLAG]
+    );
+    // B receives through the byte pump with one-shot parity and
+    // accepts both frames in order (ack 0->1, expects 2).
+    let mut b_rx = AshRxState::new();
+    let mut dec_b = AshDecoder::new();
+    for (wire, frm, body) in [
+        (&a0_wire[..n_a0], 0u8, 0x41u8),
+        (&a1_wire[..n_a1], 1u8, 0x42u8),
+    ] {
+        let (want, used) = decode(wire).expect("A->B DATA must decode");
+        assert_eq!(used, wire.len());
+        let outcomes = pump_ash(&mut dec_b, wire);
+        assert_eq!(outcomes.len(), 1, "DATA({frm}) must yield one outcome");
+        let AshOutcome::Frame(got) = outcomes[0] else {
+            panic!("DATA({frm}) must decode through the stream");
+        };
+        assert_eq!(got, want);
+        let AshKind::Data {
+            frm_num,
+            ack_num,
+            re_tx: false,
+        } = got.kind
+        else {
+            panic!("DATA({frm}) must be fresh DATA");
+        };
+        assert_eq!(frm_num, frm);
+        assert_eq!(ack_num, 0);
+        assert_eq!(b_rx.on_data(frm_num), Ok(RxOutcome::Accept));
+        assert_eq!(got.payload_bytes(), &[body]);
+    }
+    assert_eq!((b_rx.expected(), b_rx.ack_num()), (2, 1));
+    // B replies DATA(0,ack1): its own frame 0 carrying the piggyback.
+    let mut b0_wire = [0u8; 16];
+    let n_b0 = encode_data(0, b_rx.ack_num(), false, &[0x43], &mut b0_wire).unwrap();
+    assert_eq!(
+        &b0_wire[..n_b0],
+        &[FLAG, 0x04, 0x08, 0x43, 0x01, 0xEC, FLAG]
+    );
+    // A receives through its own pump with parity, files the frame
+    // number, and retires both outstanding frames off the piggyback.
+    let mut dec_a = AshDecoder::new();
+    let (want, used) = decode(&b0_wire[..n_b0]).expect("B->A DATA must decode");
+    assert_eq!(used, n_b0);
+    let outcomes = pump_ash(&mut dec_a, &b0_wire[..n_b0]);
+    assert_eq!(outcomes.len(), 1);
+    let AshOutcome::Frame(got) = outcomes[0] else {
+        panic!("B->A DATA must decode through the stream");
+    };
+    assert_eq!(got, want);
+    let AshKind::Data {
+        frm_num,
+        ack_num,
+        re_tx: false,
+    } = got.kind
+    else {
+        panic!("B->A must be fresh DATA");
+    };
+    assert_eq!((frm_num, ack_num), (0, 1));
+    assert_eq!(a_rx.on_data(frm_num), Ok(RxOutcome::Accept));
+    assert_eq!(got.payload_bytes(), &[0x43]);
+    assert_eq!(a_tx.on_ack(ack_num), Ok(2));
+    assert_eq!(a_tx.outstanding(), 0);
+    assert!(!a_tx.retransmit_pending().needed());
+    assert_eq!((dec_a.dropped(), dec_a.consecutive_bad()), (0, 0));
+    assert_eq!((dec_b.dropped(), dec_b.consecutive_bad()), (0, 0));
+    // Replay leg: the same B->A wire replays stale — duplicate
+    // re-file, `on_ack` retires nothing, never an error, meters hold.
+    let (replay, _) = decode(&b0_wire[..n_b0]).expect("replay must decode");
+    assert_eq!(replay, want);
+    let outcomes = pump_ash(&mut dec_a, &b0_wire[..n_b0]);
+    assert_eq!(outcomes.len(), 1);
+    let AshOutcome::Frame(again) = outcomes[0] else {
+        panic!("replay must still decode through the stream");
+    };
+    assert_eq!(again, want);
+    assert_eq!(a_rx.on_data(0), Ok(RxOutcome::Duplicate));
+    assert_eq!(a_tx.on_ack(1), Ok(0));
+    assert_eq!((dec_a.dropped(), dec_a.consecutive_bad()), (0, 0));
+}
