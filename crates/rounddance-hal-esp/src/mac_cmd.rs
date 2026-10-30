@@ -371,7 +371,9 @@ pub fn parse_data_poll_long(psdu: &[u8]) -> Option<DataPoll> {
 ///
 /// Layout: `FC 00 80 | seq | src pan | src short | superframe |
 /// GTS 00 | pending 00 | payload[15]`. The payload is the OTA shape
-/// (marker `0x00`, stack `0x02`, caps [`MAC_CAPS`], `ext_pan`,
+/// (marker `0x00`, stack `0x22` (Zigbee PRO profile 2 / revision 2 —
+/// every live network surveyed emits `0x22`; `0x02` made Ember scan
+/// parsers drop the beacon, rung-3 diag), caps [`MAC_CAPS`], `ext_pan`,
 /// 3-octet offset `0xFF`, update id `0x00`). The `0xFF` offset is the
 /// standard nonbeacon-network marker the Ember scan parser requires:
 /// the pre-fix `0x00` offset was dropped alongside SO=0 (rung-3 §2).
@@ -400,7 +402,7 @@ pub fn build_beacon(
     out[9] = 0x00;
     out[10] = 0x00;
     out[11] = 0x00;
-    out[12] = 0x02;
+    out[12] = 0x22; // Stack profile 2 / revision 2 (see doc above).
     out[13] = MAC_CAPS;
     out[14..22].copy_from_slice(ext_pan);
     out[22] = 0xff;
