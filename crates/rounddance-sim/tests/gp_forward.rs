@@ -176,3 +176,28 @@ fn gp_forwarding_replay_is_deterministic() {
     assert_eq!(triple_a, triple_b);
     assert!(!trace_a.is_empty());
 }
+
+// Proxy→sink forwarding (matrix): the translated triple is
+// timing-independent. Four seeds incl. the 0/u64::MAX edges —
+// per-seed double runs replay the identical trace + triple, and every
+// seed translates the tunneled toggle into the On/Off-cluster command
+// 0x01 (same timing-vs-decision split as the RD-SIM-03 / RD-GP-intake
+// matrices: Delay jitter moves `queued_us` timestamps, never the
+// translated triple — the naive cross-seed trace pin fails on those
+// timestamps only).
+#[test]
+fn gp_forwarding_matrix_seeds_share_triple() {
+    const SEEDS: [u64; 4] = [0x0000, 0x6A0D, 0x1234, u64::MAX];
+    for &seed in &SEEDS {
+        let (trace_a, triple_a) = scenario(seed);
+        let (trace_b, triple_b) = scenario(seed);
+        assert_eq!(trace_a, trace_b, "per-seed trace replay, seed {seed:#x}");
+        assert_eq!(triple_a, triple_b, "per-seed triple replay, seed {seed:#x}");
+        assert_eq!(
+            triple_a,
+            (0x0104, 0x0006, 0x01),
+            "cross-seed triple pin, seed {seed:#x}"
+        );
+        assert!(!trace_a.is_empty());
+    }
+}
