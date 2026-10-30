@@ -107,13 +107,15 @@ pub struct ApsNode {
 
 /// APS command payload summary: the named sub-dissector for APS
 /// command frames, on unsecured as well as verified-open legs.
-/// The transport-key, update-device, remove-device, and request-key
-/// commands earn shaped names (key type over the live and spec-agreed
-/// fixed shapes, key bytes stay sealed, never rendered; device status +
-/// short over the spec-agreed fixed prefix, the 8-octet EUI stays in the
-/// capture; the remove-device EUI alone stays in the capture, never in
-/// the node; the request-key type alone names its shape, the 8-octet
-/// partner EUI stays in the capture); anything else files as `Unknown` with its
+/// The transport-key, update-device, remove-device, request-key, and
+/// switch-key commands earn shaped names (key type over the live and
+/// spec-agreed fixed shapes, key bytes stay sealed, never rendered;
+/// device status + short over the spec-agreed fixed prefix, the 8-octet
+/// EUI stays in the capture; the remove-device EUI alone stays in the
+/// capture, never in the node; the request-key type alone names its
+/// shape, the 8-octet partner EUI stays in the capture; the switch-key
+/// sequence alone names its shape, no addresses ride it); anything
+/// else files as `Unknown` with its
 /// command identifier, never a guess.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ApsCmdNode {
@@ -166,6 +168,16 @@ pub enum ApsCmdKind {
     RequestKey {
         /// Requested key type (first body octet).
         key_type: u8,
+    },
+    /// Switch-key command: the new-network-key sequence number alone
+    /// (1 octet, no addresses, no key material), so the exact 1-octet
+    /// body gates the name. The node carries the sequence alone — the
+    /// request-key key-type precedent; sequence values are the
+    /// stack's, never validated here — the update-device status
+    /// precedent.
+    SwitchKey {
+        /// Key sequence number (sole body octet).
+        key_seq: u8,
     },
     /// None of the named shapes: identifier filed, payload unparsed.
     Unknown,

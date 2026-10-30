@@ -1,6 +1,6 @@
-//! APS transport-key, update-device, remove-device, and request-key
-//! command dissector: names the join legs the chain used to abandon at
-//! `trailing`.
+//! APS transport-key, update-device, remove-device, request-key, and
+//! switch-key command dissector: names the join legs the chain used to
+//! abandon at `trailing`.
 //!
 //! Every other stack layer already earns a named sub-leg (MAC command,
 //! NWK command, ZDO, ZCL, Green Power, Touchlink); APS command frames
@@ -15,10 +15,12 @@
 //! them, so only the 11-octet fixed prefix gates the name, the
 //! remove-device command (`0x07`, the Trust-Center-to-router removal
 //! order) by its 8-octet device address alone: an exact 8-octet body
-//! gate with no TLV tail, and the request-key command (`0x08`, the
+//! gate with no TLV tail, the request-key command (`0x08`, the
 //! device-to-Trust-Center key request) by its 1-octet key type plus
 //! the 8-octet partner address alone: an exact 9-octet body gate with
-//! no TLV tail. Key bytes are never rendered — the transport-key
+//! no TLV tail, and the switch-key command (`0x09`, the
+//! Trust-Center-to-device key-switch order) by its 1-octet sequence
+//! number alone: an exact 1-octet body gate with no TLV tail. Key bytes are never rendered — the transport-key
 //! node carries the key type alone, exactly as Touchlink order bodies
 //! keep wrapped keys sealed; the update-device, remove-device, and
 //! request-key EUIs stay in the capture (the network-report EPID
@@ -41,6 +43,9 @@ pub const CMD_REMOVE_DEVICE: u8 = 0x07;
 
 /// APS request-key command identifier (Table 4-31).
 pub const CMD_REQUEST_KEY: u8 = 0x08;
+
+/// APS switch-key command identifier (Table 4-31).
+pub const CMD_SWITCH_KEY: u8 = 0x09;
 
 /// Standard key type: network key (Table 4-9; 33-octet descriptor).
 pub const KEY_TYPE_NETWORK: u8 = 0x01;
@@ -124,6 +129,18 @@ pub fn decode(cmd_id: u8, buf: &[u8]) -> Result<(ApsCmdNode, usize), ApsCmdError
         CMD_REQUEST_KEY => {
             if len == 9 {
                 ApsCmdKind::RequestKey { key_type: buf[0] }
+            } else {
+                ApsCmdKind::Unknown
+            }
+        }
+        // Switch-key: the key sequence number alone (1 octet, no
+        // addresses, no key material, no TLV tail), so the gate is
+        // exact. The node carries the sequence alone — the
+        // request-key key-type precedent; values are the stack's,
+        // never validated here.
+        CMD_SWITCH_KEY => {
+            if len == 1 {
+                ApsCmdKind::SwitchKey { key_seq: buf[0] }
             } else {
                 ApsCmdKind::Unknown
             }

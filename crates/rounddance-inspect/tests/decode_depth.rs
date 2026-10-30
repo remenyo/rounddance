@@ -1689,7 +1689,10 @@ fn aps_request_key_leg_names_key_type() {
     // Exact gate: short (8) and long (10, trailing octet) bodies stay
     // `Unknown` under the same stop with no timeline event, as do
     // reserved command identifiers at the named length and the next
-    // command identifier (switch-key 0x09, a future wave's leg).
+    // named command identifier (switch-key 0x09, now its own wave-81
+    // leg at its exact 1-octet gate — a 1-octet body is no longer
+    // `Unknown` there — plus reserved 0x0A and tunnel 0x0E, future
+    // legs still `Unknown`).
     let short = &body[..8];
     let long = [&body[..], &[0xAAu8][..]].concat();
     assert_eq!(long.len(), 10);
@@ -1697,7 +1700,8 @@ fn aps_request_key_leg_names_key_type() {
         (0x08u8, short),
         (0x08u8, &long[..]),
         (0x01u8, &body[..]),
-        (0x09u8, &[0x00u8][..]),
+        (0x0Au8, &[0x00u8][..]),
+        (0x0Eu8, &[0x00u8][..]),
     ] {
         let t = chain::dissect(&wrap_aps_command(cmd, b)).unwrap();
         assert_eq!(t.apscmd().expect("unknown leg").kind, K::Unknown);
@@ -1707,6 +1711,84 @@ fn aps_request_key_leg_names_key_type() {
     // A lone command octet (empty body) refuses the leg outright but
     // keeps the same stop.
     let lone = chain::dissect(&wrap_aps_command(0x08, &[])).unwrap();
+    assert!(lone.apscmd().is_none());
+    assert_eq!(note_reasons(&lone), vec!["trailing"]);
+}
+
+// ---------------------------------------------------------------------------
+// Wave-81 track-inspect: APS switch-key (0x09) command leg. The next
+// unnamed APS command id after wave-80's request-key (0x08): spec Table
+// 4-31 assigns 0x09 to SWITCH_KEY, and the wave-80 test pins it as a
+// future leg (`Unknown`). Wire shape is the new-network-key sequence
+// number alone — a fixed 1-octet body (2-octet payload with the command
+// octet), so the gate is exact. No addresses and no key material ride
+// this command; the node carries the sequence number alone (the
+// update-device status / request-key key-type precedent). Sequence
+// values are the stack's, never validated here (the update-device
+// status precedent — the length is fixed, so no structural gate needs
+// the value).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn aps_switch_key_leg_names_seq() {
+    use tree::ApsCmdKind as K;
+    // Synthetic: sequence number 0x02 alone: a sequence octet only,
+    // never an address, never key material, never rendered as bytes.
+    let body = [0x02u8];
+    let tree = chain::dissect(&wrap_aps_command(0x09, &body)).unwrap();
+    let a = tree.apscmd().expect("switch-key leg");
+    assert_eq!(a.command_id, 0x09);
+    assert_eq!(a.kind, K::SwitchKey { key_seq: 0x02 });
+    assert_eq!(a.payload_len, 2);
+    // The APS envelope still files the command identifier; no ZCL
+    // rides a command frame.
+    assert_eq!(tree.aps().expect("aps envelope").command_id, Some(0x09));
+    assert!(tree.zcl().is_none());
+    // Stop taxonomy never moves for a named leg.
+    assert_eq!(note_reasons(&tree), vec!["trailing"]);
+    let text = report::to_text(&tree);
+    assert!(text.contains("apscmd:"), "named leg renders: {text}");
+    assert!(text.contains("switch-key"), "leg kind renders: {text}");
+    assert!(text.contains("seq=0x02"), "sequence number renders: {text}");
+    let json = report::to_json(&tree);
+    assert!(json.contains("\"apscmd\""), "json leg renders: {json}");
+    assert!(
+        json.contains("\"kind\":\"switch-key\""),
+        "json kind renders: {json}"
+    );
+    assert!(json.contains("\"cmd\":9"), "json command id: {json}");
+    assert!(json.contains("\"key_seq\":2"), "json sequence: {json}");
+    // Switch chatter never opens a session timeline.
+    assert_eq!(session::classify_tree(&tree), None);
+    // Sequence values are never validated: an all-ones sequence still
+    // names the shape (the reserved-status precedent of the
+    // update-device leg).
+    let other = chain::dissect(&wrap_aps_command(0x09, &[0xFFu8])).unwrap();
+    assert_eq!(
+        other.apscmd().expect("unvalidated-seq leg").kind,
+        K::SwitchKey { key_seq: 0xFF }
+    );
+    assert_eq!(note_reasons(&other), vec!["trailing"]);
+    assert_eq!(session::classify_tree(&other), None);
+    // Exact gate: long (2, trailing octet) bodies stay `Unknown`
+    // under the same stop with no timeline event, as do reserved
+    // command identifiers at the named length and the next named
+    // command identifier (tunnel 0x0E, a future wave's leg).
+    let long = [&body[..], &[0xAAu8][..]].concat();
+    assert_eq!(long.len(), 2);
+    for (cmd, b) in [
+        (0x09u8, &long[..]),
+        (0x0Au8, &body[..]),
+        (0x0Eu8, &body[..]),
+    ] {
+        let t = chain::dissect(&wrap_aps_command(cmd, b)).unwrap();
+        assert_eq!(t.apscmd().expect("unknown leg").kind, K::Unknown);
+        assert_eq!(note_reasons(&t), vec!["trailing"]);
+        assert_eq!(session::classify_tree(&t), None);
+    }
+    // A lone command octet (empty body) refuses the leg outright but
+    // keeps the same stop.
+    let lone = chain::dissect(&wrap_aps_command(0x09, &[])).unwrap();
     assert!(lone.apscmd().is_none());
     assert_eq!(note_reasons(&lone), vec!["trailing"]);
 }
