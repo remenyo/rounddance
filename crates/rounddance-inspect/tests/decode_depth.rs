@@ -1792,3 +1792,87 @@ fn aps_switch_key_leg_names_seq() {
     assert!(lone.apscmd().is_none());
     assert_eq!(note_reasons(&lone), vec!["trailing"]);
 }
+
+// ---------------------------------------------------------------------------
+// Wave-82 track-inspect: APS tunnel (0x0E) command leg. The next
+// unnamed APS command id after wave-81's switch-key (0x09): spec Table
+// 4-31 assigns 0x0E to TUNNEL, and the wave-81 test pins it as a
+// future leg (`Unknown`). Wire shape is the destination address plus
+// the tunneled frame: an 8-octet EUI prefix with at least one tunneled
+// octet after it, so the gate is a 9-octet body minimum with the tail
+// admitted unparsed (the update-device fixed-prefix minima precedent).
+// The EUI and the tunneled bytes stay in the capture, never in the
+// node (the remove-device EUI precedent); the node is fieldless and
+// carries nothing renderable. No key material rides this command.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn aps_tunnel_leg_names_eui_prefix() {
+    use tree::ApsCmdKind as K;
+    // Destination EUI 01..08 plus one tunneled octet: synthetic
+    // identifiers, never key material, never rendered.
+    let body = [0x01u8, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0xAA];
+    assert_eq!(body.len(), 9);
+    let tree = chain::dissect(&wrap_aps_command(0x0E, &body)).unwrap();
+    let a = tree.apscmd().expect("tunnel leg");
+    assert_eq!(a.command_id, 0x0E);
+    assert_eq!(a.kind, K::Tunnel);
+    assert_eq!(a.payload_len, 10);
+    // The APS envelope still files the command identifier; no ZCL
+    // rides a command frame.
+    assert_eq!(tree.aps().expect("aps envelope").command_id, Some(0x0E));
+    assert!(tree.zcl().is_none());
+    // Stop taxonomy never moves for a named leg.
+    assert_eq!(note_reasons(&tree), vec!["trailing"]);
+    let text = report::to_text(&tree);
+    assert!(text.contains("apscmd:"), "named leg renders: {text}");
+    assert!(text.contains("tunnel"), "leg kind renders: {text}");
+    let json = report::to_json(&tree);
+    assert!(json.contains("\"apscmd\""), "json leg renders: {json}");
+    assert!(
+        json.contains("\"kind\":\"tunnel\""),
+        "json kind renders: {json}"
+    );
+    assert!(json.contains("\"cmd\":14"), "json command id: {json}");
+    // The EUI stays in the capture, never in the node.
+    assert!(
+        !json.contains("578437695752307201"),
+        "EUI never rendered: {json}"
+    );
+    assert!(
+        !text.contains("578437695752307201"),
+        "EUI never rendered: {text}"
+    );
+    // Tunnel chatter never opens a session timeline.
+    assert_eq!(session::classify_tree(&tree), None);
+    // Longer tunneled tails still name the shape (minimum gate, the
+    // update-device TLV-tail precedent).
+    let long = [&body[..], &[0xBBu8, 0xCC][..]].concat();
+    assert_eq!(long.len(), 11);
+    let t = chain::dissect(&wrap_aps_command(0x0E, &long)).unwrap();
+    assert_eq!(t.apscmd().expect("long-tail leg").kind, K::Tunnel);
+    assert_eq!(note_reasons(&t), vec!["trailing"]);
+    assert_eq!(session::classify_tree(&t), None);
+    // Exact minimum: EUI alone (8) and shorter prefixes stay
+    // `Unknown` under the same stop with no timeline event, as do
+    // reserved command identifiers at the named length and the next
+    // command identifier (0x0F, a future wave's leg).
+    let eui_only = &body[..8];
+    let short = &body[..7];
+    for (cmd, b) in [
+        (0x0Eu8, eui_only),
+        (0x0Eu8, short),
+        (0x0Au8, &body[..]),
+        (0x0Fu8, &body[..]),
+    ] {
+        let t = chain::dissect(&wrap_aps_command(cmd, b)).unwrap();
+        assert_eq!(t.apscmd().expect("unknown leg").kind, K::Unknown);
+        assert_eq!(note_reasons(&t), vec!["trailing"]);
+        assert_eq!(session::classify_tree(&t), None);
+    }
+    // A lone command octet (empty body) refuses the leg outright but
+    // keeps the same stop.
+    let lone = chain::dissect(&wrap_aps_command(0x0E, &[])).unwrap();
+    assert!(lone.apscmd().is_none());
+    assert_eq!(note_reasons(&lone), vec!["trailing"]);
+}

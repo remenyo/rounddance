@@ -1,5 +1,5 @@
-//! APS transport-key, update-device, remove-device, request-key, and
-//! switch-key command dissector: names the join legs the chain used to
+//! APS transport-key, update-device, remove-device, request-key,
+//! switch-key, and tunnel command dissector: names the join legs the chain used to
 //! abandon at `trailing`.
 //!
 //! Every other stack layer already earns a named sub-leg (MAC command,
@@ -18,9 +18,12 @@
 //! gate with no TLV tail, the request-key command (`0x08`, the
 //! device-to-Trust-Center key request) by its 1-octet key type plus
 //! the 8-octet partner address alone: an exact 9-octet body gate with
-//! no TLV tail, and the switch-key command (`0x09`, the
+//! no TLV tail, the switch-key command (`0x09`, the
 //! Trust-Center-to-device key-switch order) by its 1-octet sequence
-//! number alone: an exact 1-octet body gate with no TLV tail. Key bytes are never rendered — the transport-key
+//! number alone: an exact 1-octet body gate with no TLV tail, and the
+//! tunnel command (`0x0E`, the tunneled-frame carrier) by its 8-octet
+//! destination address prefix with at least one tunneled octet after
+//! it: a 9-octet body minimum gate with the tail admitted unparsed. Key bytes are never rendered — the transport-key
 //! node carries the key type alone, exactly as Touchlink order bodies
 //! keep wrapped keys sealed; the update-device, remove-device, and
 //! request-key EUIs stay in the capture (the network-report EPID
@@ -46,6 +49,9 @@ pub const CMD_REQUEST_KEY: u8 = 0x08;
 
 /// APS switch-key command identifier (Table 4-31).
 pub const CMD_SWITCH_KEY: u8 = 0x09;
+
+/// APS tunnel command identifier (Table 4-31).
+pub const CMD_TUNNEL: u8 = 0x0E;
 
 /// Standard key type: network key (Table 4-9; 33-octet descriptor).
 pub const KEY_TYPE_NETWORK: u8 = 0x01;
@@ -141,6 +147,18 @@ pub fn decode(cmd_id: u8, buf: &[u8]) -> Result<(ApsCmdNode, usize), ApsCmdError
         CMD_SWITCH_KEY => {
             if len == 1 {
                 ApsCmdKind::SwitchKey { key_seq: buf[0] }
+            } else {
+                ApsCmdKind::Unknown
+            }
+        }
+        // Tunnel: the destination address (8 octets) plus the tunneled
+        // frame (at least one octet, variable length), so the gate is
+        // a 9-octet body minimum with the tail admitted unparsed — the
+        // update-device TLV-tail precedent. The EUI and the tunneled
+        // bytes stay in the capture, never in the node.
+        CMD_TUNNEL => {
+            if len >= 9 {
+                ApsCmdKind::Tunnel
             } else {
                 ApsCmdKind::Unknown
             }
