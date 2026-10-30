@@ -11,7 +11,7 @@
 //! MAC command payloads ([`mac`](crate::mac)), NWK command payloads
 //! on unsecured as well as verified-open legs ([`nwkcmd`](crate::nwkcmd)),
 //! the transport-key, update-device, remove-device, request-key,
-//! switch-key, tunnel, and verify-key APS command payloads on unsecured as well as verified-open legs
+//! switch-key, tunnel, verify-key, and confirm-key APS command payloads on unsecured as well as verified-open legs
 //! ([`apscmd`](crate::apscmd)),
 //! the Touchlink envelope on broadcast-PAN outers
 //! ([`touchlink`](crate::touchlink)), the ZDO envelope on profile

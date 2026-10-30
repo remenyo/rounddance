@@ -1,5 +1,5 @@
 //! APS transport-key, update-device, remove-device, request-key,
-//! switch-key, tunnel, and verify-key command dissector: names the join legs the chain used to
+//! switch-key, tunnel, verify-key, and confirm-key command dissector: names the join legs the chain used to
 //! abandon at `trailing`.
 //!
 //! Every other stack layer already earns a named sub-leg (MAC command,
@@ -27,12 +27,17 @@
 //! and the verify-key command (`0x0F`, the joiner's link-key
 //! verification) by its 1-octet key type plus the 8-octet source
 //! address plus the 16-octet initiator hash alone: an exact 25-octet
-//! body gate with no TLV tail. Key bytes are never rendered — the transport-key
+//! body gate with no TLV tail, and the confirm-key command (`0x10`,
+//! the Trust Center's link-key confirmation) by its 1-octet status
+//! plus the 1-octet key type plus the 8-octet destination address
+//! alone: an exact 10-octet body gate with no TLV tail. Key bytes are never rendered — the transport-key
 //! node carries the key type alone, exactly as Touchlink order bodies
 //! keep wrapped keys sealed; the update-device, remove-device, and
 //! request-key EUIs stay in the capture (the network-report EPID
 //! precedent), and so do the verify-key source EUI and hash (the hash
-//! is a key-derived verifier, never rendered). Status, key-type, and hash
+//! is a key-derived verifier, never rendered) and the confirm-key
+//! destination EUI (no key material rides that command at all).
+//! Status, key-type, and hash
 //! values are never validated (the
 //! network-status precedent). Reserved key types on the variable-shape
 //! transport-key command and every other command identifier file as
@@ -61,6 +66,9 @@ pub const CMD_TUNNEL: u8 = 0x0E;
 
 /// APS verify-key command identifier (Table 4-31).
 pub const CMD_VERIFY_KEY: u8 = 0x0F;
+
+/// APS confirm-key command identifier (Table 4-31).
+pub const CMD_CONFIRM_KEY: u8 = 0x10;
 
 /// Standard key type: network key (Table 4-9; 33-octet descriptor).
 pub const KEY_TYPE_NETWORK: u8 = 0x01;
@@ -182,6 +190,24 @@ pub fn decode(cmd_id: u8, buf: &[u8]) -> Result<(ApsCmdNode, usize), ApsCmdError
         CMD_VERIFY_KEY => {
             if len == 25 {
                 ApsCmdKind::VerifyKey { key_type: buf[0] }
+            } else {
+                ApsCmdKind::Unknown
+            }
+        }
+        // Confirm-key: the status (1 octet) plus the key type (1
+        // octet) plus the destination address (8 octets), no TLV
+        // tail, so the gate is exact — the request-key exact-gate
+        // precedent. The destination EUI stays in the capture, never
+        // in the node (the update-device EUI precedent); the node
+        // carries the status plus the key type, both unvalidated —
+        // the update-device status precedent for the result code, the
+        // request-key key-type precedent for the type.
+        CMD_CONFIRM_KEY => {
+            if len == 10 {
+                ApsCmdKind::ConfirmKey {
+                    status: buf[0],
+                    key_type: buf[1],
+                }
             } else {
                 ApsCmdKind::Unknown
             }

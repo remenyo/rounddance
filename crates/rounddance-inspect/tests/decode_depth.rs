@@ -1977,3 +1977,109 @@ fn aps_verify_key_leg_names_key_type() {
     assert!(lone.apscmd().is_none());
     assert_eq!(note_reasons(&lone), vec!["trailing"]);
 }
+
+// ---------------------------------------------------------------------------
+// Wave-85: APS confirm-key (0x10) named. Status + key type over the
+// spec-fixed shape; the destination EUI stays in the capture, never
+// in the node. Values are never validated; there is no key material
+// in this command at all.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn aps_confirm_key_leg_names_status_key_type() {
+    use tree::ApsCmdKind as K;
+    // Status 0x00 plus key type 0x04 plus destination EUI 01..08: the
+    // fixed 10-octet body (status + type + address, no TLV tail).
+    let body = vec![0x00u8, 0x04, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
+    assert_eq!(body.len(), 10);
+    let tree = chain::dissect(&wrap_aps_command(0x10, &body)).unwrap();
+    let a = tree.apscmd().expect("confirm-key leg");
+    assert_eq!(a.command_id, 0x10);
+    assert_eq!(
+        a.kind,
+        K::ConfirmKey {
+            status: 0x00,
+            key_type: 0x04
+        }
+    );
+    assert_eq!(a.payload_len, 11);
+    // The APS envelope still files the command identifier; no ZCL
+    // rides a command frame.
+    assert_eq!(tree.aps().expect("aps envelope").command_id, Some(0x10));
+    assert!(tree.zcl().is_none());
+    // Stop taxonomy never moves for a named leg.
+    assert_eq!(note_reasons(&tree), vec!["trailing"]);
+    let text = report::to_text(&tree);
+    assert!(text.contains("apscmd:"), "named leg renders: {text}");
+    assert!(text.contains("confirm-key"), "leg kind renders: {text}");
+    assert!(
+        text.contains("status=0x00"),
+        "status renders, EUI bytes never do: {text}"
+    );
+    assert!(
+        text.contains("keytype=0x04"),
+        "key type renders, EUI bytes never do: {text}"
+    );
+    let json = report::to_json(&tree);
+    assert!(json.contains("\"apscmd\""), "json leg renders: {json}");
+    assert!(
+        json.contains("\"kind\":\"confirm-key\""),
+        "json kind renders: {json}"
+    );
+    assert!(json.contains("\"cmd\":16"), "json command id: {json}");
+    assert!(json.contains("\"status\":0"), "json status: {json}");
+    assert!(json.contains("\"key_type\":4"), "json key type: {json}");
+    // The 8-octet destination EUI stays in the capture, never in the
+    // node.
+    assert!(
+        !json.contains("578437695752307201"),
+        "EUI never rendered: {json}"
+    );
+    assert!(
+        !text.contains("578437695752307201"),
+        "EUI never rendered: {text}"
+    );
+    // Confirm chatter never opens a session timeline.
+    assert_eq!(session::classify_tree(&tree), None);
+    // Values are never validated: an out-of-range status plus a type
+    // outside the transport-key named set still names the shape (the
+    // reserved-status precedent of the update-device leg).
+    let mut other = body.clone();
+    other[0] = 0x07;
+    other[1] = 0x02;
+    let o = chain::dissect(&wrap_aps_command(0x10, &other)).unwrap();
+    assert_eq!(
+        o.apscmd().expect("unvalidated-value leg").kind,
+        K::ConfirmKey {
+            status: 0x07,
+            key_type: 0x02
+        }
+    );
+    assert_eq!(note_reasons(&o), vec!["trailing"]);
+    assert_eq!(session::classify_tree(&o), None);
+    // Exact gate: short (9) and long (11, trailing octet) bodies stay
+    // `Unknown` under the same stop with no timeline event, as do
+    // reserved command identifiers at the named length and the next
+    // named command identifier (relay-downstream 0x11, a future
+    // wave's leg).
+    let short = &body[..9];
+    let long = [&body[..], &[0xBBu8][..]].concat();
+    assert_eq!(long.len(), 11);
+    for (cmd, b) in [
+        (0x10u8, short),
+        (0x10u8, &long[..]),
+        (0x01u8, &body[..]),
+        (0x0Au8, &body[..]),
+        (0x11u8, &body[..]),
+    ] {
+        let t = chain::dissect(&wrap_aps_command(cmd, b)).unwrap();
+        assert_eq!(t.apscmd().expect("unknown leg").kind, K::Unknown);
+        assert_eq!(note_reasons(&t), vec!["trailing"]);
+        assert_eq!(session::classify_tree(&t), None);
+    }
+    // A lone command octet (empty body) refuses the leg outright but
+    // keeps the same stop.
+    let lone = chain::dissect(&wrap_aps_command(0x10, &[])).unwrap();
+    assert!(lone.apscmd().is_none());
+    assert_eq!(note_reasons(&lone), vec!["trailing"]);
+}

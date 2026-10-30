@@ -108,7 +108,7 @@ pub struct ApsNode {
 /// APS command payload summary: the named sub-dissector for APS
 /// command frames, on unsecured as well as verified-open legs.
 /// The transport-key, update-device, remove-device, request-key,
-/// switch-key, tunnel, and verify-key commands earn shaped names (key type over the live and
+/// switch-key, tunnel, verify-key, and confirm-key commands earn shaped names (key type over the live and
 /// spec-agreed fixed shapes, key bytes stay sealed, never rendered;
 /// device status + short over the spec-agreed fixed prefix, the 8-octet
 /// EUI stays in the capture; the remove-device EUI alone stays in the
@@ -117,7 +117,8 @@ pub struct ApsNode {
 /// sequence alone names its shape, no addresses ride it; the tunnel
 /// destination EUI plus tunneled bytes stay in the capture, never in
 /// the node; the verify-key source EUI plus hash stay in the capture,
-/// never in the node); anything
+/// never in the node; the confirm-key destination EUI stays in the
+/// capture, never in the node); anything
 /// else files as `Unknown` with its
 /// command identifier, never a guess.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -202,6 +203,22 @@ pub enum ApsCmdKind {
     /// form.
     VerifyKey {
         /// Verified key type (first body octet).
+        key_type: u8,
+    },
+    /// Confirm-key command: the 1-octet status plus the 1-octet key
+    /// type plus the 8-octet destination address stay fixed (no TLV
+    /// tail), so the exact 10-octet body gates the name. The
+    /// destination EUI stays in the capture, never in the node —
+    /// the update-device EUI precedent; the node carries the status
+    /// plus the key type — the update-device status precedent for the
+    /// result code, the request-key key-type precedent for the type.
+    /// Both values are the stack's, never validated here — the
+    /// update-device status precedent. No key material rides this
+    /// command at all.
+    ConfirmKey {
+        /// Result status (first body octet).
+        status: u8,
+        /// Confirmed key type (second body octet).
         key_type: u8,
     },
     /// None of the named shapes: identifier filed, payload unparsed.
