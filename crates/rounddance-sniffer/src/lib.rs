@@ -31,9 +31,10 @@
 //! v1 bytes frozen as its prefix), and pcap-out in two link types —
 //! the untouched 195 writer and the radio-header variant ([`radio`]).
 //! Per-run worker lease IDs are pure derivations ([`lease`]): no
-//! arbitrator calls. Live capture ([`live`]) opens the lab nRF
-//! sniffer over serial (passive RX only, channel-gated, Drop parks
-//! the hardware); the port lease itself stays an operator step.
+//! arbitrator calls from the library. Live capture ([`live`]) opens
+//! the lab nRF sniffer over serial (passive RX only, channel-gated,
+//! Drop parks the hardware); the `rd-sniff` binary holds the real
+//! arbitrator port lease around the run.
 //!
 //! The decode path (dissect + fold) is the `no_std` +
 //! `#![forbid(unsafe_code)]` core of `rounddance-inspect`; the

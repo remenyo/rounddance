@@ -13,13 +13,23 @@
 //! Live discipline (structural): the run is RX-only — the only
 //! serial writes are shell text lines (`sleep` / `shell echo off` /
 //! `channel N` / `receive`); the listener's `Drop` parks the sniffer
-//! back to sleep before any file IO. The port lease itself is an
-//! operator step (`lab-arbitrator reserve` on a `/dev/serial/by-id`
-//! path); the run stamps the same per-run worker lease ID as
-//! offline runs (default worker `w2-live` for live captures).
+//! back to sleep before any file IO. The port lease is real: the
+//! binary reserves the canonical port through the lab arbitrator
+//! under the stable `--worker` owner before opening, and releases
+//! it after the hardware is parked and before file IO (the
+//! open-failure path releases too). A held, quarantined, or
+//! otherwise unreservable port refuses with exit 1 and the port is
+//! never touched; usage errors stay exit 2 without arbitrator
+//! contact. The run stamps the same per-run worker lease ID as
+//! offline runs (default worker `w2-live` for live captures, derived
+//! from the stable `--worker` base so replays match).
 //! Reproduce a live run from its radio pcap with the same
 //! `--channel/--tag/--worker/--lease-seq/--net-key/--key-seq`: the
 //! text and JSON reports are byte-identical (live == file).
+//!
+//! Knobs: `RD_SNIFF_ARBITRATOR_BIN` overrides the arbitrator CLI path
+//! (default `lab-arbitrator`, falling back to `arbitrator`); the CLI
+//! itself reads `ARBITRATOR_STATE` for its lease file.
 //!
 //! Usage:
 //! ```text
@@ -38,6 +48,9 @@ use rounddance_inspect::{keys::KeySlots, pcap, sniffer::ReplayListener};
 use rounddance_sniffer::{lease::lease_id_for_run, run};
 use std::fs::File;
 use std::io::{BufWriter, Write};
+
+#[path = "rd-sniff/lease_guard.rs"]
+mod lease_guard;
 
 // ---------------------------------------------------------------------------
 // Raw serial port (unix only): 115200 8N1 raw, VTIME-paced reads.
@@ -374,6 +387,7 @@ fn main() {
             &keys,
             &tag,
             lease,
+            &worker,
             &out,
             text_name,
             json_name,
@@ -442,6 +456,12 @@ fn main() {
 
 /// Passive live capture for `secs` seconds, then the shared outputs.
 ///
+/// The run holds a real arbitrator lease: `reserve` on the canonical
+/// port runs before the port opens (a held port refuses here, exit 1,
+/// port untouched), and `release` runs after the listener is dropped
+/// (hardware parked, port closed) but before file IO — including the
+/// open-failure path, so no path leaks the lease.
+///
 /// The time-bounded poll loop folds every frame through the same
 /// [`run::RunReport::push_frame`] leg as the offline paths (text
 /// feeds carry no timestamps, so live `ts_us` is the 1-based frame
@@ -458,6 +478,7 @@ fn run_live(
     keys: &KeySlots,
     tag: &str,
     lease: u64,
+    worker_base: &str,
     out: &str,
     text_name: Option<String>,
     json_name: Option<String>,
@@ -468,8 +489,36 @@ fn run_live(
     use rounddance_sniffer::live::NrfListener;
     use std::time::{Duration, Instant};
 
-    let serial = RawSerial::open(port_path).unwrap_or_else(|e| fail(&e));
-    let mut li = NrfListener::open(serial, channel).unwrap_or_else(|e| fail(&e));
+    // Real lease first: no port opens without one. The owner is the
+    // stable `--worker` base (see `lease_guard`).
+    let lease_port = lease_guard::lease_port(port_path);
+    let owner = lease_guard::lease_owner(worker_base);
+    let purpose = format!("rd-sniff live ch{channel} tag={tag}");
+    let mut guard = match lease_guard::Guard::acquire(
+        &lease_port,
+        &owner,
+        &purpose,
+        lease_guard::lease_timeout_secs(secs),
+    ) {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("rd-sniff: no port lease, refusing to open {port_path}: {e}");
+            eprintln!("rd-sniff: see lab-arbitrator status; reserve --port {lease_port} first");
+            std::process::exit(1);
+        }
+    };
+    let serial = RawSerial::open(port_path).unwrap_or_else(|e| {
+        if let Err(r) = guard.release() {
+            eprintln!("rd-sniff: lease release failed: {r}");
+        }
+        fail(&e)
+    });
+    let mut li = NrfListener::open(serial, channel).unwrap_or_else(|e| {
+        if let Err(r) = guard.release() {
+            eprintln!("rd-sniff: lease release failed: {r}");
+        }
+        fail(&e)
+    });
     eprintln!("live: {port_path} ch{channel} {secs}s tag={tag}");
     let mut rep = run::RunReport::new(tag, channel, lease, keys);
     let mut buf = [0u8; 256];
@@ -504,6 +553,12 @@ fn run_live(
         }
     }
     drop(li);
+    // Release the lease while the port is closed but before file IO,
+    // so even an emit failure cannot leak it. A failed release warns
+    // but keeps the run's exit code (the capture itself completed).
+    if let Err(r) = guard.release() {
+        eprintln!("rd-sniff: warning: lease release failed: {r}");
+    }
     emit(
         &rep,
         out,
@@ -524,6 +579,7 @@ fn run_live(
     _keys: &KeySlots,
     _tag: &str,
     _lease: u64,
+    _worker_base: &str,
     _out: &str,
     _text_name: Option<String>,
     _json_name: Option<String>,

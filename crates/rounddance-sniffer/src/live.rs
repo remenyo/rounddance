@@ -25,9 +25,11 @@
 //!   (errors ignored — teardown never panics), like the reference.
 //! * Lease discipline: capture runs stamp the same per-run worker
 //!   lease IDs as offline runs
-//!   ([`lease_id_for_run`](crate::lease::lease_id_for_run)); the
-//!   arbitrator port lease itself stays an operator step (no
-//!   arbitrator calls from this crate).
+//!   ([`lease_id_for_run`](crate::lease::lease_id_for_run)); the port
+//!   lease itself is real — the `rd-sniff` binary reserves the
+//!   canonical port under the stable `--worker` owner before opening
+//!   and releases it after parking (no arbitrator calls from this
+//!   library module).
 //!
 //! Portability: this module is `std`-gated (host side) and
 //! `#![forbid(unsafe_code)]`-clean — it is generic over any

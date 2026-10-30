@@ -8,8 +8,9 @@
 //! hardware either (`--live` without `--port` is a usage error; a
 //! missing port fails fast without hanging).
 //!
-//! Live (needs `RD_SNIFF_LIVE_PORT`, run under an arbitrator port
-//! lease): `live_capture_matches_its_radio_file` captures N seconds
+//! Live (needs `RD_SNIFF_LIVE_PORT`; the binary acquires its own
+//! per-run arbitrator lease — do NOT pre-reserve the port, an outer
+//! lease would contend and the run would refuse): `live_capture_matches_its_radio_file` captures N seconds
 //! of air with the shipped `rd-sniff --live` binary, then replays
 //! the run's radio pcap through the offline leg and asserts
 //! byte-identical reports. Empty air passes structurally (0 frames
@@ -228,8 +229,9 @@ fn live_usage_errors_need_no_hardware() {
 /// Live conformance: capture air with the shipped binary, replay the
 /// run's radio pcap, assert byte-identical reports.
 ///
-/// Needs `RD_SNIFF_LIVE_PORT` (run under an arbitrator port lease);
-/// without it the test skips. Knobs: `RD_SNIFF_LIVE_CHANNEL`
+/// Needs `RD_SNIFF_LIVE_PORT` (the binary acquires its own per-run
+/// lease — do NOT pre-reserve the port); without it the test skips.
+/// Knobs: `RD_SNIFF_LIVE_CHANNEL`
 /// (default 25), `RD_SNIFF_LIVE_SECS` (default 20),
 /// `RD_SNIFF_LIVE_TAG` (default `liveconf`),
 /// `RD_SNIFF_LIVE_WORKER` (default `sniff-w2`). Empty air passes
