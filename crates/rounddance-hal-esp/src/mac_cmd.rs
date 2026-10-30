@@ -114,6 +114,23 @@ pub const fn gratuitous_due(last_ms: u64, now_ms: u64, interval_ms: u64) -> bool
     now_ms.wrapping_sub(last_ms) >= interval_ms
 }
 
+/// Orientation-insensitive EUI equality for allow-list / short-table
+/// lookups: matches when `b` equals `a` byte-for-byte, or the byte
+/// reverse of `a`. 802.15.4 radiates long addresses LSB-first, so the
+/// same EUI appears display-order in NCP tooling and reversed on air;
+/// both spellings must key to the same admitted entry. A reversed
+/// collision between two distinct admitted EUIs would need crafted
+/// addresses and is not a concern for an explicit allow-list.
+#[must_use]
+pub fn eui_matches(a: &[u8; 8], b: &[u8; 8]) -> bool {
+    if a == b {
+        return true;
+    }
+    let mut rev = *a;
+    rev.reverse();
+    &rev == b
+}
+
 /// Codec / responder failures (bounded + fallible throughout, D5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MacCmdError {
@@ -608,10 +625,17 @@ impl CoordAssoc {
         self.allowed = [None; MAX_ALLOW];
     }
 
-    /// Whether `eui` is allow-listed.
+    /// Whether `eui` is allow-listed. Comparison is orientation-insensitive
+    /// (see [`eui_matches`]): 802.15.4 radiates long addresses LSB-first,
+    /// so the NCP-reported display order (`34:8d:13:ff:fe:11:49:6d`)
+    /// arrives on air reversed (`6d:49:11:fe:ff:13:8d:34`) — rung-3
+    /// proved a byte-exact check deafens the coordinator to real joiners.
     #[must_use]
     pub fn is_allowed(&self, eui: &[u8; 8]) -> bool {
-        self.allowed.iter().any(|slot| slot.as_ref() == Some(eui))
+        self.allowed.iter().any(|slot| match slot {
+            Some(a) => eui_matches(a, eui),
+            None => false,
+        })
     }
 
     /// Pending beacon answers (saturating counter).

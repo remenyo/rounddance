@@ -30,7 +30,9 @@
 //! Requirement IDs: corpus role/commission IDs are reused inline;
 //! `RD-APP-C6-*` rows are repo-minted (MINTED-pending-confirm).
 
-use crate::mac_cmd::{CoordAssoc, Incoming as MacIncoming, MacCmdError, SUPERFRAME_ASSOC_PERMIT};
+use crate::mac_cmd::{
+    eui_matches, CoordAssoc, Incoming as MacIncoming, MacCmdError, SUPERFRAME_ASSOC_PERMIT,
+};
 use rounddance_aps::{decode_data, DataDest, DataHeader, DeliveryMode, FrameControl as ApsFc};
 use rounddance_commission::{
     BeaconSurveyEntry, ChannelMask, FormationConfig, FormationState, InstallCode, JoinError,
@@ -86,6 +88,12 @@ pub const TC_EUI: [u8; 8] = [0xa0, 0xf2, 0x62, 0xff, 0xfe, 0x86, 0x7f, 0x68];
 /// Joiner long address: [`JOINER_BASE_MAC`] expanded the same way
 /// (`a0:f2:62:ff:fe:85:97:a4` on the air).
 pub const JOINER_EUI: [u8; 8] = [0xa0, 0xf2, 0x62, 0xff, 0xfe, 0x85, 0x97, 0xa4];
+/// Rung-3 MG24 joiner long address on the air
+/// (`34:8d:13:ff:fe:11:49:6d`): NCP-side scanner that selects C601
+/// post-network_init and sends 4x assoc-req with this EUI.
+pub const MG24_EUI: [u8; 8] = [0x34, 0x8d, 0x13, 0xff, 0xfe, 0x11, 0x49, 0x6d];
+/// Short address assigned to the MG24 at association.
+pub const MG24_SHORT: u16 = 0x0002;
 /// Joiner MAC capability octet: end device, mains powered, receiver
 /// stays on while idle, short address requested (OTA-proven).
 pub const MAC_CAPS: u8 = 0x8c;
@@ -238,6 +246,13 @@ pub struct CoordinatorApp {
     machine: CoordinatorMachine,
     tc: TrustCenter,
     assoc: CoordAssoc,
+    /// Extra EUI→short admissions beyond [`JOINER_EUI`]/[`JOINER_SHORT`]
+    /// (rung-3 MG24 leg). [`admit_joiner`](CoordinatorApp::admit_joiner)
+    /// stays byte-identical and implicit (`JOINER_SHORT` fallback in
+    /// [`take_assoc_rsp`](CoordinatorApp::take_assoc_rsp)); this table
+    /// only carries `admit_extra` entries so the assoc response can
+    /// echo the right short per latched EUI.
+    extra_shorts: [Option<([u8; 8], u16)>; 8],
     mac_seq: u8,
     nwk_seq: u8,
     aps_counter: u8,
@@ -260,6 +275,7 @@ impl CoordinatorApp {
             machine: CoordinatorMachine::new(AgingPolicy::default()),
             tc: TrustCenter::new(),
             assoc,
+            extra_shorts: [None; 8],
             mac_seq: 0,
             nwk_seq: 0,
             aps_counter: 0,
@@ -346,6 +362,63 @@ impl CoordinatorApp {
             .map_err(AppError::Join)?;
         let _ = self.assoc.allow(JOINER_EUI);
         log.log("C6APP ADMIT ieee=a0f262fffe8597a4 short=0x0001");
+        Ok(())
+    }
+
+    /// Admit an extra joiner at both layers (child table + Trust Center).
+    ///
+    /// Mirrors [`CoordinatorApp::admit_joiner`] for the rung-3 MG24 leg
+    /// (EUI `34:8d:13:ff:fe:11:49:6d`, short `0x0002`): child-table
+    /// admit + Trust-Center admit with [`JoinMethod::InstallCode`] +
+    /// MAC [`CoordAssoc::allow`](crate::mac_cmd::CoordAssoc::allow) +
+    /// `C6APP ADMIT ieee=<hex> short=....` log line. The short is
+    /// remembered so [`CoordinatorApp::take_assoc_rsp`] echoes the
+    /// right assigned short per latched EUI (97A4 keeps its
+    /// `JOINER_SHORT` fallback; co-admission holds both EUIs).
+    pub fn admit_extra<L: SerialLog>(
+        &mut self,
+        log: &mut L,
+        eui: [u8; 8],
+        short: u16,
+    ) -> Result<(), AppError> {
+        if self.state() != CoordinatorState::Formed || !self.machine.permit_open() {
+            return Err(AppError::BadRole);
+        }
+        let ieee = u64::from_le_bytes(eui);
+        self.machine
+            .admit_child(short, ieee, false, 0)
+            .map_err(|_| AppError::BadRole)?;
+        self.tc
+            .admit(ieee, short, JoinMethod::InstallCode, 100)
+            .map_err(AppError::Join)?;
+        let _ = self.assoc.allow(eui);
+        if !self.extra_shorts.contains(&Some((eui, short))) {
+            if let Some(slot) = self.extra_shorts.iter_mut().find(|s| s.is_none()) {
+                *slot = Some((eui, short));
+            }
+        }
+        let mut line = [0u8; 64];
+        let mut n = 0usize;
+        for &b in b"C6APP ADMIT ieee=".iter() {
+            line[n] = b;
+            n += 1;
+        }
+        for &b in eui.iter() {
+            line[n] = HEX[(b >> 4) as usize];
+            line[n + 1] = HEX[(b & 0x0f) as usize];
+            n += 2;
+        }
+        for &b in b" short=0x".iter() {
+            line[n] = b;
+            n += 1;
+        }
+        for shift in [12u16, 8, 4, 0] {
+            line[n] = HEX[((short >> shift) & 0x0f) as usize];
+            n += 1;
+        }
+        if let Ok(s) = core::str::from_utf8(&line[..n]) {
+            log.log(s);
+        }
         Ok(())
     }
 
@@ -439,8 +512,10 @@ impl CoordinatorApp {
 
     /// Build the pending association-response into `out` (consumes the
     /// pending answer; `Ok(0)` when idle). Always success status with
-    /// the assigned joiner short: denied requests never pend, so no
-    /// failure response is radiated.
+    /// the assigned short for the latched EUI: denied requests never
+    /// pend, so no failure response is radiated. The 97A4 joiner keeps
+    /// [`JOINER_SHORT`]; extra admissions (rung-3 MG24) echo their
+    /// admitted short from the `admit_extra` table.
     ///
     /// # Errors
     ///
@@ -451,7 +526,17 @@ impl CoordinatorApp {
             return Ok(0);
         }
         let seq = self.take_mac_seq();
-        self.assoc.take_assoc_rsp(seq, JOINER_SHORT, 0x00, out)
+        let short = match self.assoc.device_eui() {
+            Some(eui) => self
+                .extra_shorts
+                .iter()
+                .flatten()
+                .find(|(a, _)| eui_matches(a, &eui))
+                .map(|(_, s)| *s)
+                .unwrap_or(JOINER_SHORT),
+            None => JOINER_SHORT,
+        };
+        self.assoc.take_assoc_rsp(seq, short, 0x00, out)
     }
 
     /// Build one gratuitous beacon into `out` (unsolicited, does not

@@ -203,3 +203,41 @@ fn coord_assoc_still_gates_permit_allow_deny_directly() {
     // Beacon leg stays independent of assoc state.
     assert_eq!(assoc.take_beacon(0x5a, &EXT_PAN, &mut out).unwrap(), 0);
 }
+
+/// Rung-3 air-order regression: the MG24 NCP radiates its EUI LSB-first
+/// (`6d 49 11 fe ff 13 8d 34`), the byte-reverse of the NCP-reported
+/// display order (`34:8d:13:ff:fe:11:49:6d`). The allow-list must admit
+/// either orientation of an explicitly admitted EUI — a byte-exact
+/// check deafened the coordinator to all 4 real assoc-reqs.
+///
+/// Captured verbatim from `~/hwscratch/w89-rung3-admit/` (ch15, 90 s):
+/// `23 c8 49 01 c6 00 00 ff ff 6d4911feff138d34 01 8c`.
+#[test]
+fn admit_extra_answers_air_order_mg24_assoc_req() {
+    let mut air = [0u8; 19];
+    air[..9].copy_from_slice(&[0x23, 0xc8, 0x49, 0x01, 0xc6, 0x00, 0x00, 0xff, 0xff]);
+    air[9..17].copy_from_slice(&[0x6d, 0x49, 0x11, 0xfe, 0xff, 0x13, 0x8d, 0x34]);
+    air[17..19].copy_from_slice(&[0x01, 0x8c]);
+    let mut app = formed_app();
+    let mut log = app::NullLog;
+    // Unadmitted: silent, both orientations.
+    app.on_mac_psdu(&air);
+    let mut out = [0u8; 32];
+    assert_eq!(app.take_assoc_rsp(&mut out).unwrap(), 0);
+    // Admit by display order, answer the air order.
+    app.open_permit(&mut log, 600_000).unwrap();
+    app.admit_extra(&mut log, app::MG24_EUI, app::MG24_SHORT)
+        .unwrap();
+    app.on_mac_psdu(&air);
+    let n = app.take_assoc_rsp(&mut out).unwrap();
+    assert_eq!(n, 19);
+    assert_eq!(out[15], MAC_ASSOC_RSP);
+    assert_eq!(u16::from_le_bytes([out[16], out[17]]), app::MG24_SHORT);
+    // A never-admitted EUI stays silent in both orientations.
+    let mut app2 = formed_app();
+    let mut foreign = air;
+    foreign[9..17].copy_from_slice(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]);
+    app2.open_permit(&mut log, 600_000).unwrap();
+    app2.on_mac_psdu(&foreign);
+    assert_eq!(app2.take_assoc_rsp(&mut out).unwrap(), 0);
+}
