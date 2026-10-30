@@ -2177,7 +2177,126 @@ fn aps_relay_downstream_leg_names_tlv_minima() {
         (0x11u8, &confirm_shaped[..]),
         (0x01u8, &body[..]),
         (0x0Au8, &body[..]),
-        (0x12u8, &body[..]),
+        // Wave-88 promotion: relay-upstream (0x12) now names the same
+        // TLV minima, so the relay body under 0x12 resolves to
+        // RelayUpstream (same stop, still no timeline event).
+    ] {
+        let t = chain::dissect(&wrap_aps_command(cmd, b)).unwrap();
+        assert_eq!(t.apscmd().expect("unknown leg").kind, K::Unknown);
+        assert_eq!(note_reasons(&t), vec!["trailing"]);
+        assert_eq!(session::classify_tree(&t), None);
+    }
+    let promoted = chain::dissect(&wrap_aps_command(0x12, &body)).unwrap();
+    assert_eq!(
+        promoted.apscmd().expect("promoted leg").kind,
+        K::RelayUpstream
+    );
+    assert_eq!(note_reasons(&promoted), vec!["trailing"]);
+    assert_eq!(session::classify_tree(&promoted), None);
+    // A lone command octet (empty body) refuses the leg outright but
+    // keeps the same stop.
+    let lone = chain::dissect(&wrap_aps_command(0x11, &[])).unwrap();
+    assert!(lone.apscmd().is_none());
+    assert_eq!(note_reasons(&lone), vec!["trailing"]);
+}
+
+// ---------------------------------------------------------------------------
+// Wave-88: APS relay-upstream (0x12) named. One or more Zigbee core
+// TLVs (tag + length + value of length + 1) with at least one Relay
+// Message TLV (tag 0: 8-octet destination EUI + >=1 relayed octet).
+// The EUI and the relayed bytes stay in the capture, never in the
+// node; unknown tags ride in any order. Anything else stays
+// `Unknown` under the same stop.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn aps_relay_upstream_leg_names_tlv_minima() {
+    use tree::ApsCmdKind as K;
+    // Relay Message TLV: tag 0x00, length 0x08 (value 9 = EUI
+    // 01..08 + one relayed octet 0xAA). Single-TLV body, 11 octets.
+    let body = vec![
+        0x00u8, 0x08, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0xAA,
+    ];
+    assert_eq!(body.len(), 11);
+    let tree = chain::dissect(&wrap_aps_command(0x12, &body)).unwrap();
+    let a = tree.apscmd().expect("relay-upstream leg");
+    assert_eq!(a.command_id, 0x12);
+    assert_eq!(a.kind, K::RelayUpstream);
+    assert_eq!(a.payload_len, 12);
+    // The APS envelope still files the command identifier; no ZCL
+    // rides a command frame.
+    assert_eq!(tree.aps().expect("aps envelope").command_id, Some(0x12));
+    assert!(tree.zcl().is_none());
+    // Stop taxonomy never moves for a named leg.
+    assert_eq!(note_reasons(&tree), vec!["trailing"]);
+    let text = report::to_text(&tree);
+    assert!(text.contains("apscmd:"), "named leg renders: {text}");
+    assert!(text.contains("relay-upstream"), "leg kind renders: {text}");
+    let json = report::to_json(&tree);
+    assert!(json.contains("\"apscmd\""), "json leg renders: {json}");
+    assert!(
+        json.contains("\"kind\":\"relay-upstream\""),
+        "json kind renders: {json}"
+    );
+    assert!(json.contains("\"cmd\":18"), "json command id: {json}");
+    // The 8-octet destination EUI stays in the capture, never in the
+    // node; the relayed byte is never rendered either.
+    assert!(
+        !json.contains("578437695752307201"),
+        "EUI never rendered: {json}"
+    );
+    assert!(
+        !text.contains("578437695752307201"),
+        "EUI never rendered: {text}"
+    );
+    // Relay chatter never opens a session timeline.
+    assert_eq!(session::classify_tree(&tree), None);
+    // TLV order never matters and unknown tags ride along: the relay
+    // TLV second after a global tag still names the shape.
+    let mut reordered = vec![0x40u8, 0x00, 0xBB];
+    reordered.extend_from_slice(&body);
+    let r = chain::dissect(&wrap_aps_command(0x12, &reordered)).unwrap();
+    assert_eq!(r.apscmd().expect("reordered leg").kind, K::RelayUpstream);
+    assert_eq!(note_reasons(&r), vec!["trailing"]);
+    assert_eq!(session::classify_tree(&r), None);
+    // A longer relay value (multi-octet relayed message) still names
+    // the shape: the value minimum admits longer values.
+    let long_body = vec![
+        0x00u8, 0x09, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0xAA, 0xCC,
+    ];
+    let l = chain::dissect(&wrap_aps_command(0x12, &long_body)).unwrap();
+    assert_eq!(l.apscmd().expect("long-value leg").kind, K::RelayUpstream);
+    assert_eq!(note_reasons(&l), vec!["trailing"]);
+    assert_eq!(session::classify_tree(&l), None);
+    // The sibling relay id keeps its own name: the same TLV body
+    // under 0x11 still names relay-downstream, never upstream.
+    let s = chain::dissect(&wrap_aps_command(0x11, &body)).unwrap();
+    assert_eq!(s.apscmd().expect("sibling leg").kind, K::RelayDownstream);
+    assert_eq!(note_reasons(&s), vec!["trailing"]);
+    assert_eq!(session::classify_tree(&s), None);
+    // Misses stay `Unknown` under the same stop with no timeline
+    // event: truncated value (length promises 9, only 8 present),
+    // short relay value (length 7: EUI alone, no relayed octet),
+    // trailing garbage past a complete TLV, a body with no tag-0
+    // TLV, reserved identifiers at the relay shape, the confirm-key
+    // fixed shape under 0x12, and beyond-table id 0x13 at the relay
+    // shape (no next assigned leg remains).
+    let truncated = &reordered[3..13];
+    assert_eq!(truncated.len(), 10);
+    let short = [0x00u8, 0x07, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
+    let mut garbage = body.clone();
+    garbage.push(0xFF);
+    let no_tag0 = [0x01u8, 0x00, 0xBB];
+    let confirm_shaped = [0x00u8, 0x04, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
+    for (cmd, b) in [
+        (0x12u8, truncated),
+        (0x12u8, &short[..]),
+        (0x12u8, &garbage[..]),
+        (0x12u8, &no_tag0[..]),
+        (0x12u8, &confirm_shaped[..]),
+        (0x01u8, &body[..]),
+        (0x0Au8, &body[..]),
+        (0x13u8, &body[..]),
     ] {
         let t = chain::dissect(&wrap_aps_command(cmd, b)).unwrap();
         assert_eq!(t.apscmd().expect("unknown leg").kind, K::Unknown);
@@ -2186,7 +2305,7 @@ fn aps_relay_downstream_leg_names_tlv_minima() {
     }
     // A lone command octet (empty body) refuses the leg outright but
     // keeps the same stop.
-    let lone = chain::dissect(&wrap_aps_command(0x11, &[])).unwrap();
+    let lone = chain::dissect(&wrap_aps_command(0x12, &[])).unwrap();
     assert!(lone.apscmd().is_none());
     assert_eq!(note_reasons(&lone), vec!["trailing"]);
 }

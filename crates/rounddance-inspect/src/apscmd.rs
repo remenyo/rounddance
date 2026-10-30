@@ -1,5 +1,5 @@
 //! APS transport-key, update-device, remove-device, request-key,
-//! switch-key, tunnel, verify-key, confirm-key, and relay-downstream command dissector: names the join legs the chain used to
+//! switch-key, tunnel, verify-key, confirm-key, relay-downstream, and relay-upstream command dissector: names the join legs the chain used to
 //! abandon at `trailing`.
 //!
 //! Every other stack layer already earns a named sub-leg (MAC command,
@@ -35,7 +35,9 @@
 //! through a parent router) by one or more Zigbee core TLVs with at
 //! least one Relay Message TLV (local tag 0: the 8-octet destination
 //! address plus the relayed message, at least one octet): a TLV-walk
-//! minima gate with exact consumption. Key bytes are never rendered — the transport-key
+//! minima gate with exact consumption, and the relay-upstream command
+//! (`0x12`, the device-to-parent message relay) by the same TLV-walk
+//! minima gate: at least one Relay Message TLV with exact consumption. Key bytes are never rendered — the transport-key
 //! node carries the key type alone, exactly as Touchlink order bodies
 //! keep wrapped keys sealed; the update-device, remove-device, and
 //! request-key EUIs stay in the capture (the network-report EPID
@@ -43,8 +45,9 @@
 //! is a key-derived verifier, never rendered) and the confirm-key
 //! destination EUI (no key material rides that command at all) and
 //! the relay-downstream destination EUI plus relayed bytes (the
-//! tunnel carrier precedent: a relayed APS message, never rendered).
-//! Status, key-type, and hash
+//! tunnel carrier precedent: a relayed APS message, never rendered)
+//! and the relay-upstream destination EUI plus relayed bytes (the
+//! same tunnel carrier precedent). Status, key-type, and hash
 //! values are never validated (the
 //! network-status precedent). Reserved key types on the variable-shape
 //! transport-key command and every other command identifier file as
@@ -79,6 +82,9 @@ pub const CMD_CONFIRM_KEY: u8 = 0x10;
 
 /// APS relay-downstream command identifier (Table 4-31).
 pub const CMD_RELAY_DOWNSTREAM: u8 = 0x11;
+
+/// APS relay-upstream command identifier (Table 4-31).
+pub const CMD_RELAY_UPSTREAM: u8 = 0x12;
 
 /// Standard key type: network key (Table 4-9; 33-octet descriptor).
 pub const KEY_TYPE_NETWORK: u8 = 0x01;
@@ -270,6 +276,20 @@ pub fn decode(cmd_id: u8, buf: &[u8]) -> Result<(ApsCmdNode, usize), ApsCmdError
         CMD_RELAY_DOWNSTREAM => {
             if relay_shape_ok(buf) {
                 ApsCmdKind::RelayDownstream
+            } else {
+                ApsCmdKind::Unknown
+            }
+        }
+        // Relay-upstream: the same one-or-more core TLVs with at
+        // least one Relay Message TLV minima as relay-downstream
+        // (the device-to-parent relay direction) — the
+        // relay-downstream leg precedent. The destination EUI and
+        // the relayed bytes stay in the capture, never in the node
+        // (the tunnel carrier precedent), so the node is fieldless;
+        // values are never validated.
+        CMD_RELAY_UPSTREAM => {
+            if relay_shape_ok(buf) {
+                ApsCmdKind::RelayUpstream
             } else {
                 ApsCmdKind::Unknown
             }

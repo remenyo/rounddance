@@ -1582,6 +1582,7 @@ fn apscmd_text(k: &ApsCmdKind) -> String {
             format!("confirm-key status={status:#04x} keytype={key_type:#04x}")
         }
         ApsCmdKind::RelayDownstream => String::from("relay-downstream"),
+        ApsCmdKind::RelayUpstream => String::from("relay-upstream"),
         ApsCmdKind::Unknown => String::from("unknown"),
     }
 }
@@ -1605,6 +1606,7 @@ fn apscmd_json(n: &ApsCmdNode) -> String {
             format!(",\"status\":{status},\"key_type\":{key_type}"),
         ),
         ApsCmdKind::RelayDownstream => ("relay-downstream", String::new()),
+        ApsCmdKind::RelayUpstream => ("relay-upstream", String::new()),
         ApsCmdKind::Unknown => ("unknown", String::new()),
     };
     format!(
