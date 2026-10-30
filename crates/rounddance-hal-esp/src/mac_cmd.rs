@@ -17,6 +17,11 @@
 //! * Frames out (coordinator TX): beacon (MAC beacon, 26 B:
 //!   superframe `0xCF0F` + empty GTS/pending + 15 B network payload),
 //!   association-response (`0x02`, 19 B: assigned short + status).
+//! * Pacing: solicited answers via the pending flags plus gratuitous
+//!   beacons every [`GRATUITOUS_BEACON_INTERVAL_MS`] ms while serving
+//!   unassociated ([`gratuitous_due`]); the superframe permit bit stays
+//!   set while serving (OTA pin `0xCF0F`) — the window gates assoc
+//!   answers, not beacons.
 //! * State ([`CoordAssoc`]): pending-beacon counter + pending-assoc
 //!   flag + latched device EUI, gated only by an explicit permit bit
 //!   and a bounded allow-list the application maintains next to its
@@ -27,15 +32,20 @@
 //!
 //! # How the radio paths carry these
 //!
-//! * ESP: board code drives the [`Driver`](crate::driver::Driver)
-//!   directly in promiscuous mode (broadcast beacon-requests never
-//!   pass the hardware filter — scratch `main.rs` stays promiscuous
-//!   on the coordinator for exactly this reason) and feeds received
-//!   PSDUs to [`classify`]/[`CoordAssoc`]. [`EspAdapter`](crate::adapter::EspAdapter)
-//!   still routes only short-short data + inter-PAN and counts
-//!   command frames in `rx_dropped` (see `adapter.rs` `dispatch_rx`);
-//!   routing command frames into the SAP queues is rung-2 firmware
-//!   work, not this codec.
+//! * ESP: board code enables promiscuous on the coordinator
+//!   (broadcast beacon-requests never pass the hardware filter —
+//!   scratch `main.rs` stays promiscuous on the coordinator for
+//!   exactly this reason), feeds received PSDUs from
+//!   [`EspAdapter`](crate::adapter::EspAdapter) `poll_mac_indication`
+//!   to [`classify`]/[`CoordAssoc`], and radiates answers plus
+//!   gratuitous beacons via `transmit_mac` (single-flight through the
+//!   same adapter queues as data, so no direct-`Driver` race).
+//!   Driving the [`Driver`](crate::driver::Driver) seam directly
+//!   remains possible on bare hardware, but firmware uses the adapter
+//!   queues so command and data TX share backpressure.
+//!   [`EspAdapter`](crate::adapter::EspAdapter)
+//!   routes command PSDUs to the MAC queue and counts only
+//!   non-command / full-queue frames in `rx_dropped`.
 //! * RCP: the scripted peer already carries arbitrary PSDUs
 //!   (`EmulatedRcp::queue_rx`, `peer.rs`) and latches association
 //!   shorts from the response shape (SHORT-SNOOP, `peer.rs`), with
@@ -85,6 +95,21 @@ pub const ASSOC_RSP_LEN: usize = 19;
 pub const BEACON_PAYLOAD_LEN: usize = 15;
 /// Largest coordinator allow-list (distinct EUIs, application-held).
 pub const MAX_ALLOW: usize = 8;
+
+/// Gratuitous-beacon interval in caller ms while serving unassociated:
+/// the OTA leg re-beacons every 2000 ms when no answer is owed and no
+/// joiner has latched yet (`rd-c6join` Serve `beacon-grat`, TX gap
+/// 2000 ms), so a passive sniffer sees unsolicited beacons.
+pub const GRATUITOUS_BEACON_INTERVAL_MS: u64 = 2000;
+
+/// True when a gratuitous beacon is due: at least `interval_ms` caller
+/// ms since `last_ms` (wrapping-subtract, so a wrapping clock stays
+/// safe). The caller also gates on unassociated (`dev_eui.is_none()`
+/// in the OTA Serve leg) — this helper is pure timing.
+#[must_use]
+pub const fn gratuitous_due(last_ms: u64, now_ms: u64, interval_ms: u64) -> bool {
+    now_ms.wrapping_sub(last_ms) >= interval_ms
+}
 
 /// Codec / responder failures (bounded + fallible throughout, D5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

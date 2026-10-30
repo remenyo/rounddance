@@ -12,8 +12,8 @@
 use rounddance_commission::{BeaconSurveyEntry, InstallCode, SteeringState, UNSECURED_VENDOR_CMD};
 use rounddance_hal_esp::{
     app::{
-        role_from_mac, AppRole, CoordinatorApp, JoinerApp, APP_CHANNEL, APP_PAN, COORD_MAC_LAST,
-        COORD_SHORT, JOINER_MAC_LAST, JOINER_SHORT, MAC_CAPS, UNASSOC_SHORT, ZCL_ENDPOINT,
+        role_from_mac, AppRole, CoordinatorApp, JoinerApp, APP_CHANNEL, APP_PAN, COORD_BASE_MAC,
+        COORD_SHORT, JOINER_BASE_MAC, JOINER_SHORT, MAC_CAPS, UNASSOC_SHORT, ZCL_ENDPOINT,
     },
     driver::RxFrame,
     EspAdapter, MockDriver, SerialLog,
@@ -58,15 +58,10 @@ struct FullStack {
 
 impl FullStack {
     fn new() -> Self {
-        // Role selection refuses before any radio is touched.
-        assert_eq!(
-            role_from_mac(&[0xa0, 0xf2, 0x62, 0xff, 0xfe, COORD_MAC_LAST]),
-            Some(AppRole::Coordinator)
-        );
-        assert_eq!(
-            role_from_mac(&[0xa0, 0xf2, 0x62, 0xff, 0xfe, JOINER_MAC_LAST]),
-            Some(AppRole::Joiner)
-        );
+        // Role selection refuses before any radio is touched (full
+        // base-MAC compare on the verified lab pair).
+        assert_eq!(role_from_mac(&COORD_BASE_MAC), Some(AppRole::Coordinator));
+        assert_eq!(role_from_mac(&JOINER_BASE_MAC), Some(AppRole::Joiner));
 
         let mut coord_adapter = EspAdapter::new(MockDriver::new());
         coord_adapter.set_pan_id(APP_PAN);
@@ -302,8 +297,7 @@ fn c6_standalone_replays_deterministically() {
 #[test]
 fn c6_standalone_unknown_unit_refuses_role() {
     assert_eq!(role_from_mac(&[0xa0, 0xf2, 0x62, 0xff, 0xfe, 0x00]), None);
-    assert_eq!(
-        role_from_mac(&[0xa0, 0xf2, 0x62, 0xff, 0xfe, 0x86]),
-        Some(AppRole::Coordinator)
-    );
+    assert_eq!(role_from_mac(&[0xa0, 0xf2, 0x62, 0xff, 0xfe, 0x86]), None);
+    assert_eq!(role_from_mac(&COORD_BASE_MAC), Some(AppRole::Coordinator));
+    assert_eq!(role_from_mac(&JOINER_BASE_MAC), Some(AppRole::Joiner));
 }

@@ -79,7 +79,7 @@ pub mod ffi;
 pub mod mac_cmd;
 pub mod mock;
 
-pub use adapter::{EspAdapter, EspError, MAX_TX_POWER_DBM};
+pub use adapter::{EspAdapter, EspError, MacIndication, MAX_TX_POWER_DBM};
 pub use app::{AppError, AppRole, CoordinatorApp, JoinerApp, SerialLog};
 pub use driver::{Driver, DriverError, RxFrame, TxEvent, TxFail};
 pub use mock::MockDriver;

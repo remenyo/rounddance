@@ -21,14 +21,16 @@
 //! * channel 15, PAN `0xC601`, TX `+10` dBm (standing cap);
 //! * coordinator short `0x0000`, joiner short `0x0001` (placeholder
 //!   `0xFFFF` until association, as on device);
-//! * role from the unit MAC last octet (`0x86` coordinator,
-//!   `0x85` joiner — the two OTA-proven units); anything else refuses
+//! * role from the full 6-octet unit base MAC: coordinator
+//!   `a0:f2:62:86:7f:68` (healthy lab C6 7F68, efuse-verified),
+//!   joiner `a0:f2:62:85:97:a4` (lab C6 97A4); anything else refuses
 //!   to start before touching the radio, exactly like the scratch
-//!   image did.
+//!   image did (which gated on the last octet of a now-absent pair).
 //!
 //! Requirement IDs: corpus role/commission IDs are reused inline;
 //! `RD-APP-C6-*` rows are repo-minted (MINTED-pending-confirm).
 
+use crate::mac_cmd::{CoordAssoc, Incoming as MacIncoming, MacCmdError, SUPERFRAME_ASSOC_PERMIT};
 use rounddance_aps::{decode_data, DataDest, DataHeader, DeliveryMode, FrameControl as ApsFc};
 use rounddance_commission::{
     BeaconSurveyEntry, ChannelMask, FormationConfig, FormationState, InstallCode, JoinError,
@@ -60,16 +62,30 @@ pub const COORD_SHORT: u16 = 0x0000;
 pub const JOINER_SHORT: u16 = 0x0001;
 /// Short address placeholder before association.
 pub const UNASSOC_SHORT: u16 = 0xFFFF;
-/// Unit-MAC last octet selecting the coordinator role (OTA-proven).
-pub const COORD_MAC_LAST: u8 = 0x86;
-/// Unit-MAC last octet selecting the joiner role (OTA-proven).
-pub const JOINER_MAC_LAST: u8 = 0x85;
+/// Unit-MAC last octet selecting the coordinator role (low byte of
+/// [`COORD_BASE_MAC`]; kept for log/discipline continuity, NOT used
+/// for selection — selection compares the full base MAC).
+pub const COORD_MAC_LAST: u8 = 0x68;
+/// Unit-MAC last octet selecting the joiner role (low byte of
+/// [`JOINER_BASE_MAC`]; see above).
+pub const JOINER_MAC_LAST: u8 = 0xa4;
+/// Coordinator unit base MAC (healthy lab C6 7F68): `esptool
+/// read-mac` BASE MAC `a0:f2:62:86:7f:68` (efuse, verified under
+/// lease; USB by-id MAC matches BASE MAC). Preferred coordinator per
+/// LADDER rung 2 (healthy unit for first light).
+pub const COORD_BASE_MAC: [u8; 6] = [0xa0, 0xf2, 0x62, 0x86, 0x7f, 0x68];
+/// Joiner unit base MAC (lab C6 97A4): `esptool read-mac` BASE MAC
+/// `a0:f2:62:85:97:a4` (efuse, verified under lease).
+pub const JOINER_BASE_MAC: [u8; 6] = [0xa0, 0xf2, 0x62, 0x85, 0x97, 0xa4];
 /// Extended PAN identifier carried on the formed network.
 pub const EXT_PAN_ID: [u8; 8] = [0x43, 0x36, 0x4a, 0x4f, 0x49, 0x4e, 0x30, 0x31];
-/// Coordinator long address (OTA-proven unit EUI).
-pub const TC_EUI: [u8; 8] = [0xa0, 0xf2, 0x62, 0xff, 0xfe, 0xff, 0xfe, 0x86];
-/// Joiner long address (OTA-proven unit EUI).
-pub const JOINER_EUI: [u8; 8] = [0xa0, 0xf2, 0x62, 0xff, 0xfe, 0xff, 0xfe, 0x85];
+/// Coordinator long address: [`COORD_BASE_MAC`] expanded with the
+/// proven `ff:fe` rule (matches `esptool read-mac` EUI
+/// `a0:f2:62:ff:fe:86:7f:68`).
+pub const TC_EUI: [u8; 8] = [0xa0, 0xf2, 0x62, 0xff, 0xfe, 0x86, 0x7f, 0x68];
+/// Joiner long address: [`JOINER_BASE_MAC`] expanded the same way
+/// (`a0:f2:62:ff:fe:85:97:a4` on the air).
+pub const JOINER_EUI: [u8; 8] = [0xa0, 0xf2, 0x62, 0xff, 0xfe, 0x85, 0x97, 0xa4];
 /// Joiner MAC capability octet: end device, mains powered, receiver
 /// stays on while idle, short address requested (OTA-proven).
 pub const MAC_CAPS: u8 = 0x8c;
@@ -108,19 +124,25 @@ pub enum AppRole {
     Joiner,
 }
 
-/// Select the role from a unit MAC.
+/// Select the role from a unit base MAC (full 6-octet compare).
 ///
 ///
-/// Mirrors the OTA proof: the coordinator unit's base-MAC last octet
-/// is `0x86`, the joiner's is `0x85`; any other unit refuses to
-/// start before touching the radio. Firmware may override this with
-/// its own selection, but the default is the proven pair.
+/// Mirrors the OTA proof's shape (coordinator vs joiner by unit), but
+/// retargeted to the real lab units: the OTA pair's last-octet rule
+/// (`0x86`/`0x85`) matches no lab efuse MAC (all eight lab units
+/// verified absent that octet), so the gate now compares the full
+/// base MAC against [`COORD_BASE_MAC`] (healthy 7F68, preferred per
+/// LADDER) and [`JOINER_BASE_MAC`] (97A4). Any other unit refuses
+/// before touching the radio. Firmware may override this with its
+/// own selection, but the default is the verified lab pair.
 #[must_use]
 pub fn role_from_mac(mac: &[u8; 6]) -> Option<AppRole> {
-    match mac[5] {
-        COORD_MAC_LAST => Some(AppRole::Coordinator),
-        JOINER_MAC_LAST => Some(AppRole::Joiner),
-        _ => None,
+    if mac == &COORD_BASE_MAC {
+        Some(AppRole::Coordinator)
+    } else if mac == &JOINER_BASE_MAC {
+        Some(AppRole::Joiner)
+    } else {
+        None
     }
 }
 
@@ -215,6 +237,8 @@ pub enum AppError {
 pub struct CoordinatorApp {
     machine: CoordinatorMachine,
     tc: TrustCenter,
+    assoc: CoordAssoc,
+    mac_seq: u8,
     nwk_seq: u8,
     aps_counter: u8,
     tx_counter: FrameCounter,
@@ -230,9 +254,13 @@ impl CoordinatorApp {
     /// New unformed coordinator.
     #[must_use]
     pub fn new() -> Self {
+        let mut assoc = CoordAssoc::new();
+        assoc.provision(APP_PAN, COORD_SHORT);
         Self {
             machine: CoordinatorMachine::new(AgingPolicy::default()),
             tc: TrustCenter::new(),
+            assoc,
+            mac_seq: 0,
             nwk_seq: 0,
             aps_counter: 0,
             tx_counter: FrameCounter::new(100, 4),
@@ -297,6 +325,7 @@ impl CoordinatorApp {
         self.machine
             .open_permit(window_ms)
             .map_err(|_| AppError::BadRole)?;
+        self.assoc.set_permit(true);
         log.log("C6APP PERMIT open (allow-list 1/1)");
         Ok(())
     }
@@ -315,8 +344,135 @@ impl CoordinatorApp {
         self.tc
             .admit(joiner_ieee(), JOINER_SHORT, JoinMethod::InstallCode, 100)
             .map_err(AppError::Join)?;
-        log.log("C6APP ADMIT ieee=a0f262fffffeff85 short=0x0001");
+        let _ = self.assoc.allow(JOINER_EUI);
+        log.log("C6APP ADMIT ieee=a0f262fffe8597a4 short=0x0001");
         Ok(())
+    }
+
+    /// True while the roles permit window is open (child-table gate).
+    #[must_use]
+    pub fn permit_open(&self) -> bool {
+        self.machine.permit_open()
+    }
+
+    /// True while the MAC responder permit bit is set (mirrors
+    /// [`CoordinatorApp::open_permit`] / [`CoordinatorApp::tick`]).
+    #[must_use]
+    pub fn is_mac_permit(&self) -> bool {
+        self.assoc.permit()
+    }
+
+    /// Whether `eui` is in the MAC responder allow-list (mirrors the
+    /// Trust-Center / child-table admission from
+    /// [`CoordinatorApp::admit_joiner`]).
+    #[must_use]
+    pub fn is_mac_allowed(&self, eui: &[u8; 8]) -> bool {
+        self.assoc.is_allowed(eui)
+    }
+
+    /// Whether an association response is currently owed.
+    #[must_use]
+    pub fn assoc_pending(&self) -> bool {
+        self.assoc.assoc_pending()
+    }
+
+    /// Pending beacon-answer count.
+    #[must_use]
+    pub fn beacon_pending(&self) -> u32 {
+        self.assoc.pending_beacon()
+    }
+
+    /// Whether a joiner EUI has latched (associated at the MAC leg).
+    #[must_use]
+    pub fn is_associated(&self) -> bool {
+        self.assoc.device_eui().is_some()
+    }
+
+    /// Advance the permit window and child aging, keeping the MAC
+    /// responder permit bit in sync (closed on expiry).
+    pub fn tick(&mut self, now_ms: u64, elapsed_ms: u64) {
+        self.machine.tick(now_ms, elapsed_ms);
+        self.assoc.set_permit(self.machine.permit_open());
+    }
+
+    fn take_mac_seq(&mut self) -> u8 {
+        let s = self.mac_seq;
+        self.mac_seq = self.mac_seq.wrapping_add(1);
+        s
+    }
+
+    /// Feed one inbound MAC-command PSDU to the responder: beacon-req
+    /// pends a beacon, allow-listed assoc-req under an open window
+    /// latches + pends a response (denied with no response otherwise),
+    /// long poll re-arms for the latched EUI. Returns the
+    /// classification for the serial-log leg.
+    pub fn on_mac_psdu(&mut self, psdu: &[u8]) -> MacIncoming {
+        let inc = crate::mac_cmd::classify(psdu);
+        match inc {
+            MacIncoming::BeaconReq { .. } => self.assoc.on_beacon_req(),
+            MacIncoming::AssocReq(ref req) => {
+                let _ = self.assoc.on_assoc_req(req);
+            }
+            MacIncoming::DataPoll(ref poll) => {
+                let _ = self.assoc.on_data_poll(poll);
+            }
+            MacIncoming::Other => {}
+        }
+        inc
+    }
+
+    /// Build one pending beacon answer into `out` (consumes one
+    /// pending; `Ok(0)` when idle). Sequence comes from the app MAC
+    /// counter; PAN/short/ext-PAN are the provisioned app identity.
+    ///
+    /// # Errors
+    ///
+    /// [`MacCmdError::BufferTooSmall`] when an answer is owed but
+    /// `out` is short.
+    pub fn take_beacon(&mut self, out: &mut [u8]) -> Result<usize, MacCmdError> {
+        if self.assoc.pending_beacon() == 0 {
+            return Ok(0);
+        }
+        let seq = self.take_mac_seq();
+        self.assoc.take_beacon(seq, &EXT_PAN_ID, out)
+    }
+
+    /// Build the pending association-response into `out` (consumes the
+    /// pending answer; `Ok(0)` when idle). Always success status with
+    /// the assigned joiner short: denied requests never pend, so no
+    /// failure response is radiated.
+    ///
+    /// # Errors
+    ///
+    /// [`MacCmdError::BufferTooSmall`] when an answer is owed but
+    /// `out` is short.
+    pub fn take_assoc_rsp(&mut self, out: &mut [u8]) -> Result<usize, MacCmdError> {
+        if !self.assoc.assoc_pending() {
+            return Ok(0);
+        }
+        let seq = self.take_mac_seq();
+        self.assoc.take_assoc_rsp(seq, JOINER_SHORT, 0x00, out)
+    }
+
+    /// Build one gratuitous beacon into `out` (unsolicited, does not
+    /// consume the solicited pending count). Firmware calls this when
+    /// [`crate::mac_cmd::gratuitous_due`] fires while unassociated so
+    /// a passive sniffer sees beacons with no solicitation.
+    ///
+    /// # Errors
+    ///
+    /// [`MacCmdError::BufferTooSmall`] when `out` holds fewer than
+    /// the beacon length.
+    pub fn build_gratuitous_beacon(&mut self, out: &mut [u8]) -> Result<usize, MacCmdError> {
+        let seq = self.take_mac_seq();
+        crate::mac_cmd::build_beacon(
+            seq,
+            APP_PAN,
+            COORD_SHORT,
+            SUPERFRAME_ASSOC_PERMIT,
+            &EXT_PAN_ID,
+            out,
+        )
     }
 
     /// Run the install-code key exchange for the admitted joiner.

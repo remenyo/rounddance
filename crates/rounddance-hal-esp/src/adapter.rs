@@ -18,7 +18,8 @@
 //! destination PAN: frames for our PAN go to the PAN indication queue,
 //! everything else to the inter-PAN queue.
 
-use crate::driver::{Driver, DriverError, RxFrame, TxEvent, TxFail, MAX_AIR_FRAME};
+use crate::driver::{Driver, DriverError, RxFrame, TxEvent, TxFail, MAX_AIR_FRAME, MAX_PSDU};
+use crate::mac_cmd::{self, Incoming as MacIncoming};
 use core::array::from_fn;
 use core::fmt;
 use rounddance_mac_sap::{
@@ -45,6 +46,9 @@ const TX_SLOTS: usize = 4;
 const CONFIRM_DEPTH: usize = 8;
 /// Per-path pending-indication queue depth.
 const INDICATION_DEPTH: usize = 8;
+
+/// Pending MAC-command indication queue depth.
+const MAC_QUEUE_DEPTH: usize = 8;
 
 /// Adapter-level errors (outside the SAP error taxonomy: construction /
 /// provisioning failures, not per-frame states).
@@ -254,6 +258,47 @@ fn map_mgmt_err(e: DriverError) -> MacError {
     }
 }
 
+/// One received MAC-command PSDU (beacon-request / assoc-request /
+/// long data poll) with per-frame meters.
+///
+/// The PSDU is the exact on-air command bytes (`Len`-stripped, tail
+/// meters excluded); upper layers feed it to
+/// [`mac_cmd::classify`](crate::mac_cmd::classify) / [`CoordinatorApp`](crate::app::CoordinatorApp).
+#[derive(Clone, Copy, Debug)]
+pub struct MacIndication {
+    psdu: [u8; MAX_PSDU],
+    len: usize,
+    channel: u8,
+    rssi: i8,
+    lqi: u8,
+}
+
+impl MacIndication {
+    /// Exact on-air command PSDU bytes.
+    #[must_use]
+    pub fn psdu(&self) -> &[u8] {
+        &self.psdu[..self.len]
+    }
+
+    /// Arrival channel number (11-26).
+    #[must_use]
+    pub fn channel_number(&self) -> u8 {
+        self.channel
+    }
+
+    /// Reception RSSI in dBm.
+    #[must_use]
+    pub fn rssi(&self) -> i8 {
+        self.rssi
+    }
+
+    /// Reception LQI.
+    #[must_use]
+    pub fn lqi(&self) -> u8 {
+        self.lqi
+    }
+}
+
 /// The MAC SAP over an injectable [`Driver`].
 ///
 /// Bounded and fallible throughout: 4 TX slots, 8-deep confirm /
@@ -281,6 +326,8 @@ pub struct EspAdapter<D: Driver> {
     interpan_confirms_len: usize,
     interpan_indications: [Option<InterPanIndication>; INDICATION_DEPTH],
     interpan_indications_len: usize,
+    mac_queue: [Option<MacIndication>; MAC_QUEUE_DEPTH],
+    mac_len: usize,
     /// Submit-time driver faults that left the frame queued
     /// (backpressure with an explanation — see `pump`).
     submit_faults: u32,
@@ -315,6 +362,8 @@ impl<D: Driver> EspAdapter<D> {
             interpan_confirms_len: 0,
             interpan_indications: from_fn(|_| None),
             interpan_indications_len: 0,
+            mac_queue: [None; MAC_QUEUE_DEPTH],
+            mac_len: 0,
             submit_faults: 0,
             rx_dropped: 0,
         }
@@ -446,6 +495,15 @@ impl<D: Driver> EspAdapter<D> {
         if self.interpan_indications_len < INDICATION_DEPTH {
             self.interpan_indications[self.interpan_indications_len] = Some(ind);
             self.interpan_indications_len += 1;
+        } else {
+            self.rx_dropped += 1;
+        }
+    }
+
+    fn push_mac_indication(&mut self, ind: MacIndication) {
+        if self.mac_len < MAC_QUEUE_DEPTH {
+            self.mac_queue[self.mac_len] = Some(ind);
+            self.mac_len += 1;
         } else {
             self.rx_dropped += 1;
         }
@@ -594,6 +652,30 @@ impl<D: Driver> EspAdapter<D> {
             }
             return;
         }
+        // MAC-command leg (coordinator RX): strip Len+2, classify the
+        // PSDU, surface matches on the MAC queue. Non-command bytes
+        // and overfull queues count as dropped, as before.
+        if !buf.is_empty() {
+            let len = buf[0] as usize;
+            if len >= 2 {
+                let psdu_len = len - 2;
+                if psdu_len > 0 && psdu_len <= MAX_PSDU && buf.len() > psdu_len {
+                    let psdu = &buf[1..1 + psdu_len];
+                    if !matches!(mac_cmd::classify(psdu), MacIncoming::Other) {
+                        let mut raw = [0u8; MAX_PSDU];
+                        raw[..psdu_len].copy_from_slice(psdu);
+                        self.push_mac_indication(MacIndication {
+                            psdu: raw,
+                            len: psdu_len,
+                            channel: rx.channel,
+                            rssi: rx.rssi,
+                            lqi: rx.lqi,
+                        });
+                        return;
+                    }
+                }
+            }
+        }
         self.rx_dropped += 1;
     }
 
@@ -610,6 +692,8 @@ impl<D: Driver> EspAdapter<D> {
         self.interpan_confirms_len = 0;
         self.interpan_indications = from_fn(|_| None);
         self.interpan_indications_len = 0;
+        self.mac_queue = [None; MAC_QUEUE_DEPTH];
+        self.mac_len = 0;
     }
 }
 
@@ -833,5 +917,69 @@ impl<D: Driver> EspAdapter<D> {
         // from a checked `Channel` or the default constant.
         let ch = Channel::new(self.channel).map_err(|_| MacError::RadioFault)?;
         self.set_channel(ch)
+    }
+
+    /// Enable/disable promiscuous (unfiltered) receive. The coordinator
+    /// enables this after init: broadcast beacon-requests never pass
+    /// the hardware filter. Forwards to the driver when live.
+    ///
+    /// # Errors
+    ///
+    /// [`MacError::NotReady`] when the radio is down.
+    pub fn set_promiscuous(&mut self, enable: bool) -> Result<(), MacError> {
+        if !self.inited {
+            return Err(MacError::NotReady);
+        }
+        self.driver.set_promiscuous(enable).map_err(map_mgmt_err)
+    }
+
+    /// Queue one raw MAC-command PSDU for transmission (Len+2 wrapped,
+    /// single-flight through the same slots as data, so command and
+    /// data TX share backpressure). Confirms arrive via the normal
+    /// `poll_confirm` queue. The caller owns the MAC sequence inside
+    /// the PSDU (the adapter does not rewrite it).
+    ///
+    /// # Errors
+    ///
+    /// [`MacError::NotReady`] when down, [`MacError::FrameTooLong`]
+    /// for an empty/oversize PSDU, [`MacError::QueueFull`] when no TX
+    /// slot is free.
+    pub fn transmit_mac(&mut self, psdu: &[u8]) -> Result<TxHandle, MacError> {
+        if !self.inited {
+            return Err(MacError::NotReady);
+        }
+        if psdu.is_empty() || psdu.len() > MAX_PSDU {
+            return Err(MacError::FrameTooLong);
+        }
+        let free = self.pan_slots.iter().position(|s| s.is_none());
+        let Some(idx) = free else {
+            return Err(MacError::QueueFull);
+        };
+        let handle = self.take_handle();
+        let mut frame = [0u8; MAX_AIR_FRAME];
+        frame[0] = (psdu.len() + 2) as u8;
+        frame[1..1 + psdu.len()].copy_from_slice(psdu);
+        let len = 1 + psdu.len();
+        self.pan_slots[idx] = Some(PanSlot { handle, frame, len });
+        self.pump();
+        Ok(handle)
+    }
+
+    /// Take the oldest pending MAC-command indication, if any.
+    pub fn poll_mac_indication(&mut self) -> Option<MacIndication> {
+        self.pump();
+        if self.mac_len == 0 {
+            return None;
+        }
+        let ind = self.mac_queue[0].take();
+        self.mac_queue.rotate_left(1);
+        self.mac_len -= 1;
+        ind
+    }
+
+    /// Pending MAC-command indication count.
+    #[must_use]
+    pub fn mac_pending(&self) -> usize {
+        self.mac_len
     }
 }

@@ -103,17 +103,23 @@ install-code join → DeviceAnnce → secured ZCL Toggle sequence, now
 composed from repo crates (`roles`, `commission`, `nwk`, `aps`,
 `security`, `zdo`, `zcl`) over `EspAdapter`.
 
-- Role selection: `role_from_mac` maps the OTA-proven pair (MAC last
-  octet `0x86` coordinator, `0x85` joiner); anything else refuses
-  before touching the radio. `eui_from_mac` expands the base MAC with
-  the proven `ff:fe` rule.
+- Role selection: `role_from_mac` compares the full 6-octet base MAC
+  against the verified lab pair (coordinator `a0:f2:62:86:7f:68`,
+  healthy 7F68; joiner `a0:f2:62:85:97:a4`, 97A4 — both `esptool
+  read-mac` efuse-confirmed); anything else refuses before touching
+  the radio. `eui_from_mac` expands the base MAC with the proven
+  `ff:fe` rule (matches `read-mac` EUI output).
 - Serial-log discipline: `SerialLog` trait (`&str` lines, task
   context only) + `log_air` (bounded 512 B line with full air
   bytes). Host tests collect lines; firmware implements the trait
   over UART/USB.
 - `CoordinatorApp`: formation (centralized, fixed PAN `0xC601`) →
-  permit window → child-table + Trust-Center admit → MMO-KDF key
-  exchange → secured Toggle builder → Default Response verifier.
+  permit window (MAC responder permit synced via `tick`) →
+  child-table + Trust-Center + MAC allow-list admit → MMO-KDF key
+  exchange → secured Toggle builder → Default Response verifier; MAC
+  leg via `on_mac_psdu` / `take_beacon` / `take_assoc_rsp` /
+  `build_gratuitous_beacon` (gratuitous pacing
+  `GRATUITOUS_BEACON_INTERVAL_MS = 2000 ms` while unassociated).
 - `JoinerApp`: beacon survey → candidate → assoc (short `0x0001`
   assigned post-assoc, `0xFFFF` before) → wave-23 unsecured-vendor
   tolerance → key → verify → announced → DeviceAnnce → live On/Off
@@ -140,8 +146,8 @@ MAC-association primitives: the beacon/assoc command codec plus the
 coordinator pending-answer responder live in `src/mac_cmd.rs` with
 OTA-pinned host vectors (`tests/mac_assoc.rs`); the join leg above
 still starts at the steering survey with the coordinator's beacon
-ingested. What remains driver-level follow-up is routing command
-frames through `EspAdapter` (it still counts them in `rx_dropped` —
-see the `adapter_drops_command_frames_today_carry_gap` pin): board
-code drives the `Driver` seam directly in promiscuous mode until
-that routing lands.
+ingested. Command frames route through `EspAdapter` (MAC queue via
+`poll_mac_indication`, raw TX via `transmit_mac`, promiscuous RX via
+`set_promiscuous` — the rung-2 `adapter_routes_…_closed_gap` pin);
+firmware (`fw/rd-coord`) drives that path with gratuitous beacons
+while unassociated (`tests/coord_radiate.rs`, 7 tests).

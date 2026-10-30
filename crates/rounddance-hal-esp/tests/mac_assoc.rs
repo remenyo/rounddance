@@ -331,10 +331,10 @@ fn joiner_handoff_values_from_air() {
 }
 
 #[test]
-fn adapter_drops_command_frames_today_carry_gap() {
-    // Pins the rung-2 integration point: EspAdapter routes only
-    // short-short data (0x41/0x61) + inter-PAN (0x01) and counts
-    // beacon/assoc command frames as dropped (adapter.rs dispatch_rx).
+fn adapter_routes_command_frames_to_mac_queue_closed_gap() {
+    // Closed rung-2 gap (MVP FIX): EspAdapter routes MAC-command
+    // PSDUs (beacon-req here) to the MAC queue instead of dropping
+    // them; data indications stay empty and `rx_dropped` stays 0.
     let mut a = EspAdapter::new(MockDriver::new());
     a.set_pan_id(PAN);
     a.set_short_addr(COORD);
@@ -346,7 +346,9 @@ fn adapter_drops_command_frames_today_carry_gap() {
     a.driver_mut()
         .inject_rx(&[RxFrame::from_slice(&len2, 15, -40, 200).unwrap()]);
     assert!(a.poll_indication().is_none());
-    assert_eq!(a.rx_dropped(), 1);
+    let ind = a.poll_mac_indication().expect("beacon-req routes");
+    assert_eq!(ind.psdu(), &air);
+    assert_eq!(a.rx_dropped(), 0);
 }
 
 struct NullLog;
