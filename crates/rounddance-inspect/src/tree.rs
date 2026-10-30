@@ -108,7 +108,7 @@ pub struct ApsNode {
 /// APS command payload summary: the named sub-dissector for APS
 /// command frames, on unsecured as well as verified-open legs.
 /// The transport-key, update-device, remove-device, request-key,
-/// switch-key, and tunnel commands earn shaped names (key type over the live and
+/// switch-key, tunnel, and verify-key commands earn shaped names (key type over the live and
 /// spec-agreed fixed shapes, key bytes stay sealed, never rendered;
 /// device status + short over the spec-agreed fixed prefix, the 8-octet
 /// EUI stays in the capture; the remove-device EUI alone stays in the
@@ -116,7 +116,8 @@ pub struct ApsNode {
 /// shape, the 8-octet partner EUI stays in the capture; the switch-key
 /// sequence alone names its shape, no addresses ride it; the tunnel
 /// destination EUI plus tunneled bytes stay in the capture, never in
-/// the node); anything
+/// the node; the verify-key source EUI plus hash stay in the capture,
+/// never in the node); anything
 /// else files as `Unknown` with its
 /// command identifier, never a guess.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -188,6 +189,21 @@ pub enum ApsCmdKind {
     /// so the node carries no address bytes and the tail rides
     /// unparsed — the update-device TLV-tail precedent.
     Tunnel,
+    /// Verify-key command: the 1-octet key type plus the 8-octet
+    /// source address plus the 16-octet initiator hash stay fixed
+    /// (no TLV tail), so the exact 25-octet body gates the name. The
+    /// source EUI and the hash stay in the capture, never in the node
+    /// — the update-device EUI precedent for the address, the
+    /// transport-key sealed-key precedent for the hash (a key-derived
+    /// verifier, never rendered); the node carries the key type alone
+    /// — the request-key key-type precedent. Key-type values are the
+    /// stack's, never validated here — the update-device status
+    /// precedent. No key material rides this command in renderable
+    /// form.
+    VerifyKey {
+        /// Verified key type (first body octet).
+        key_type: u8,
+    },
     /// None of the named shapes: identifier filed, payload unparsed.
     Unknown,
 }

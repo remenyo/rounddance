@@ -1252,6 +1252,9 @@ fn apscmd_text(k: &ApsCmdKind) -> String {
             format!("switch-key seq={key_seq:#04x}")
         }
         ApsCmdKind::Tunnel => String::from("tunnel"),
+        ApsCmdKind::VerifyKey { key_type } => {
+            format!("verify-key keytype={key_type:#04x}")
+        }
         ApsCmdKind::Unknown => String::from("unknown"),
     }
 }
@@ -1269,6 +1272,7 @@ fn apscmd_json(n: &ApsCmdNode) -> String {
         ApsCmdKind::RequestKey { key_type } => ("request-key", format!(",\"key_type\":{key_type}")),
         ApsCmdKind::SwitchKey { key_seq } => ("switch-key", format!(",\"key_seq\":{key_seq}")),
         ApsCmdKind::Tunnel => ("tunnel", String::new()),
+        ApsCmdKind::VerifyKey { key_type } => ("verify-key", format!(",\"key_type\":{key_type}")),
         ApsCmdKind::Unknown => ("unknown", String::new()),
     };
     format!(

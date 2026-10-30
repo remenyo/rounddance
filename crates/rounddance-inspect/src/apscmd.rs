@@ -1,5 +1,5 @@
 //! APS transport-key, update-device, remove-device, request-key,
-//! switch-key, and tunnel command dissector: names the join legs the chain used to
+//! switch-key, tunnel, and verify-key command dissector: names the join legs the chain used to
 //! abandon at `trailing`.
 //!
 //! Every other stack layer already earns a named sub-leg (MAC command,
@@ -20,14 +20,20 @@
 //! the 8-octet partner address alone: an exact 9-octet body gate with
 //! no TLV tail, the switch-key command (`0x09`, the
 //! Trust-Center-to-device key-switch order) by its 1-octet sequence
-//! number alone: an exact 1-octet body gate with no TLV tail, and the
+//! number alone: an exact 1-octet body gate with no TLV tail, the
 //! tunnel command (`0x0E`, the tunneled-frame carrier) by its 8-octet
 //! destination address prefix with at least one tunneled octet after
-//! it: a 9-octet body minimum gate with the tail admitted unparsed. Key bytes are never rendered — the transport-key
+//! it: a 9-octet body minimum gate with the tail admitted unparsed,
+//! and the verify-key command (`0x0F`, the joiner's link-key
+//! verification) by its 1-octet key type plus the 8-octet source
+//! address plus the 16-octet initiator hash alone: an exact 25-octet
+//! body gate with no TLV tail. Key bytes are never rendered — the transport-key
 //! node carries the key type alone, exactly as Touchlink order bodies
 //! keep wrapped keys sealed; the update-device, remove-device, and
 //! request-key EUIs stay in the capture (the network-report EPID
-//! precedent). Status and key-type values are never validated (the
+//! precedent), and so do the verify-key source EUI and hash (the hash
+//! is a key-derived verifier, never rendered). Status, key-type, and hash
+//! values are never validated (the
 //! network-status precedent). Reserved key types on the variable-shape
 //! transport-key command and every other command identifier file as
 //! [`ApsCmdKind::Unknown`] with the identifier, never a guess. Only an
@@ -52,6 +58,9 @@ pub const CMD_SWITCH_KEY: u8 = 0x09;
 
 /// APS tunnel command identifier (Table 4-31).
 pub const CMD_TUNNEL: u8 = 0x0E;
+
+/// APS verify-key command identifier (Table 4-31).
+pub const CMD_VERIFY_KEY: u8 = 0x0F;
 
 /// Standard key type: network key (Table 4-9; 33-octet descriptor).
 pub const KEY_TYPE_NETWORK: u8 = 0x01;
@@ -159,6 +168,20 @@ pub fn decode(cmd_id: u8, buf: &[u8]) -> Result<(ApsCmdNode, usize), ApsCmdError
         CMD_TUNNEL => {
             if len >= 9 {
                 ApsCmdKind::Tunnel
+            } else {
+                ApsCmdKind::Unknown
+            }
+        }
+        // Verify-key: the key type (1 octet) plus the source address
+        // (8 octets) plus the initiator hash (16 octets), no TLV tail,
+        // so the gate is exact — the request-key exact-gate precedent.
+        // The source EUI and the hash stay in the capture, never in the
+        // node (the hash is a key-derived verifier, never rendered);
+        // the node carries the key type alone, unvalidated — the
+        // request-key key-type precedent.
+        CMD_VERIFY_KEY => {
+            if len == 25 {
+                ApsCmdKind::VerifyKey { key_type: buf[0] }
             } else {
                 ApsCmdKind::Unknown
             }
