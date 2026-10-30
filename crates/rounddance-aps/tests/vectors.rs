@@ -7,11 +7,11 @@
 
 use rounddance_aps::{
     decode_ack, decode_command, decode_data, peek_frame_type, plan_transmit, rx_timeout_ticks,
-    AckAddr, AckExpect, AckHeader, AckInfo, ApsError, ApsStatus, BindingDst, BindingEntry,
+    AckAddr, AckExpect, AckHeader, AckInfo, AddrMap, ApsError, ApsStatus, BindingDst, BindingEntry,
     BindingTable, CommandHeader, DataDest, DataHeader, DeliveryMode, DupRejectTable, ExtHeader,
     FeedOutcome, FragError, Fragmentation, Fragmentation as Frag, FrameControl, FrameType,
-    GroupTable, PeerFragCaps, Reassembler, RetrySession, RetryVerdict, TxBlocks, TxPlan,
-    MAX_BINDINGS, MAX_FRAME_RETRIES, MAX_GROUPS,
+    GroupTable, PeerFragCaps, Reassembler, ResolvedDst, RetrySession, RetryVerdict, TxBlocks,
+    TxPlan, MAX_ADDR_MAP, MAX_BINDINGS, MAX_FRAME_RETRIES, MAX_GROUPS,
 };
 
 // 05-3474-23-22511-01/07/09/10/11/12/16: minimal unicast data frame.
@@ -736,4 +736,177 @@ fn vector_group_table_05_3474_23_22451_01() {
     assert_eq!(table.remove_exact(0x1234, 0x01), ApsStatus::InvalidGroup);
     table.clear();
     assert!(table.is_empty());
+}
+
+// 05-3474-23-22411-09: discovery address map — note/lookup/refresh,
+// forget, and bounded eviction under overflow.
+#[test]
+fn vector_addr_map_05_3474_23_22411_09() {
+    let mut map = AddrMap::new();
+    assert!(map.is_empty());
+    assert_eq!(map.lookup(0x0012_4B00_0000_0002), None);
+
+    // Discovery outcomes populate the cache.
+    map.note(0x0012_4B00_0000_0002, 0x1234);
+    map.note(0x0012_4B00_0000_0003, 0x5678);
+    assert_eq!(map.len(), 2);
+    assert_eq!(map.lookup(0x0012_4B00_0000_0002), Some(0x1234));
+
+    // Re-announce with a new short refreshes in place (no growth).
+    map.note(0x0012_4B00_0000_0002, 0x4321);
+    assert_eq!(map.len(), 2);
+    assert_eq!(map.lookup(0x0012_4B00_0000_0002), Some(0x4321));
+
+    // Forget drops the pair; unknown pairs report false.
+    assert!(map.forget(0x0012_4B00_0000_0003));
+    assert!(!map.forget(0x0012_4B00_0000_0003));
+    assert_eq!(map.lookup(0x0012_4B00_0000_0003), None);
+    assert_eq!(map.len(), 1);
+
+    // Overflow evicts the oldest pair; the cache never grows past
+    // its declared budget and the newest pair is always present.
+    for i in 0..(MAX_ADDR_MAP as u64 + 2) {
+        map.note(0x0012_4B00_1000_0000 + i, 0x2000 + i as u16);
+    }
+    assert_eq!(map.len(), MAX_ADDR_MAP);
+    assert_eq!(
+        map.lookup(0x0012_4B00_1000_0000 + MAX_ADDR_MAP as u64 + 1),
+        Some(0x2000 + MAX_ADDR_MAP as u16 + 1)
+    );
+    assert_eq!(map.lookup(0x0012_4B00_1000_0000), None);
+}
+
+// 05-3474-23-22411-10: indirect dispatch — mixed known/unknown/group
+// entries resolve against the discovery cache; unknown shorts are
+// reported for follow-on discovery, and the confirm pins pin down
+// the indirect-transmit decision table.
+#[test]
+fn vector_indirect_dispatch_05_3474_23_22411_10() {
+    const SRC: u64 = 0x0012_4B00_0000_0001;
+    const KNOWN: u64 = 0x0012_4B00_0000_0002;
+    const UNKNOWN: u64 = 0x0012_4B00_0000_0003;
+    let mut binding = BindingTable::new();
+    let mut addrs = AddrMap::new();
+    addrs.note(KNOWN, 0x1234);
+
+    // No matching entries at all: NO_BOUND_DEVICE.
+    let empty = binding.plan_indirect(&addrs, true, SRC, 0x01, 0x0006);
+    assert_eq!(empty.confirm(), ApsStatus::NoBoundDevice);
+    assert!(empty.resolved().is_empty());
+    assert!(empty.unresolved().is_empty());
+
+    // Device without a binding table cannot do indirect: NOT_SUPPORTED.
+    let unsupported = binding.plan_indirect(&addrs, false, SRC, 0x01, 0x0006);
+    assert_eq!(unsupported.confirm(), ApsStatus::NotSupported);
+
+    assert_eq!(
+        binding.bind(BindingEntry {
+            src_ieee: SRC,
+            src_endpoint: 0x01,
+            cluster_id: 0x0006,
+            dst: BindingDst::Unicast {
+                dst_ieee: KNOWN,
+                dst_endpoint: 0x01,
+            },
+        }),
+        ApsStatus::Success
+    );
+    assert_eq!(
+        binding.bind(BindingEntry {
+            src_ieee: SRC,
+            src_endpoint: 0x01,
+            cluster_id: 0x0006,
+            dst: BindingDst::Unicast {
+                dst_ieee: UNKNOWN,
+                dst_endpoint: 0x02,
+            },
+        }),
+        ApsStatus::Success
+    );
+    assert_eq!(
+        binding.bind(BindingEntry {
+            src_ieee: SRC,
+            src_endpoint: 0x01,
+            cluster_id: 0x0006,
+            dst: BindingDst::Group { group_addr: 0xABCD },
+        }),
+        ApsStatus::Success
+    );
+
+    // Partial success: known unicast + group resolve; the unknown
+    // short is listed for targeted discovery (IEEE_addr_req).
+    let plan = binding.plan_indirect(&addrs, true, SRC, 0x01, 0x0006);
+    assert_eq!(plan.confirm(), ApsStatus::Success);
+    assert_eq!(plan.resolved().len(), 2);
+    assert!(plan.resolved().contains(&ResolvedDst::Unicast {
+        ieee: KNOWN,
+        nwk: 0x1234,
+        endpoint: 0x01,
+    }));
+    assert!(plan
+        .resolved()
+        .contains(&ResolvedDst::Group { group_addr: 0xABCD }));
+    assert_eq!(plan.unresolved(), &[UNKNOWN]);
+
+    // Once discovery resolves the missing short, the re-plan
+    // succeeds fully with nothing left to discover.
+    addrs.note(UNKNOWN, 0x5678);
+    let full = binding.plan_indirect(&addrs, true, SRC, 0x01, 0x0006);
+    assert_eq!(full.confirm(), ApsStatus::Success);
+    assert_eq!(full.resolved().len(), 3);
+    assert!(full.unresolved().is_empty());
+
+    // Other clusters still have no entries: NO_BOUND_DEVICE.
+    let other = binding.plan_indirect(&addrs, true, SRC, 0x01, 0x9999);
+    assert_eq!(other.confirm(), ApsStatus::NoBoundDevice);
+}
+
+// 05-3474-23-22411-10 edge pins: entries with no resolvable short at
+// all confirm NO_SHORT_ADDRESS (resolution is hop-agnostic: a cached
+// short far beyond radio range still resolves — multi-hop path
+// repair is the NWK layer's job); removing the entry flips the same
+// key back to NO_BOUND_DEVICE (invalid-binding removal path).
+#[test]
+fn vector_indirect_dispatch_edges_05_3474_23_22411_10() {
+    const SRC: u64 = 0x0012_4B00_0000_0001;
+    const FAR: u64 = 0x0012_4B00_0000_0009;
+    let mut binding = BindingTable::new();
+    let mut addrs = AddrMap::new();
+    let entry = BindingEntry {
+        src_ieee: SRC,
+        src_endpoint: 0x01,
+        cluster_id: 0x0006,
+        dst: BindingDst::Unicast {
+            dst_ieee: FAR,
+            dst_endpoint: 0x01,
+        },
+    };
+    assert_eq!(binding.bind(entry), ApsStatus::Success);
+
+    // Matched but unresolvable: NO_SHORT_ADDRESS, discovery pending.
+    let stuck = binding.plan_indirect(&addrs, true, SRC, 0x01, 0x0006);
+    assert_eq!(stuck.confirm(), ApsStatus::NoShortAddress);
+    assert!(stuck.resolved().is_empty());
+    assert_eq!(stuck.unresolved(), &[FAR]);
+
+    // Hop-agnostic resolution: a cached short needs no neighbor
+    // knowledge; the plan emits it and the NWK layer route-discovers.
+    addrs.note(FAR, 0x9ABC);
+    let via = binding.plan_indirect(&addrs, true, SRC, 0x01, 0x0006);
+    assert_eq!(via.confirm(), ApsStatus::Success);
+    assert_eq!(
+        via.resolved(),
+        &[ResolvedDst::Unicast {
+            ieee: FAR,
+            nwk: 0x9ABC,
+            endpoint: 0x01,
+        }]
+    );
+
+    // Unbind removes the entry; absent re-removal is INVALID_BINDING
+    // and the key plans NO_BOUND_DEVICE again.
+    assert_eq!(binding.unbind(&entry), ApsStatus::Success);
+    assert_eq!(binding.unbind(&entry), ApsStatus::InvalidBinding);
+    let gone = binding.plan_indirect(&addrs, true, SRC, 0x01, 0x0006);
+    assert_eq!(gone.confirm(), ApsStatus::NoBoundDevice);
 }

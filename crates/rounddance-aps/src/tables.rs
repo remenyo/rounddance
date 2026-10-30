@@ -1,7 +1,10 @@
 //! Binding and group table stubs: typed structures with declared
 //! capacity budgets, insert/remove/lookup, and the confirm statuses the
-//! primitives produce. Full bind-manager behavior (discovery-driven
-//! binding, multi-hop resolution) is a later wave; structures now.
+//! primitives produce. The indirect-transmit bind-manager decision
+//! (discovery-fed address resolution plus per-destination fan-out
+//! planning) lives here too; on-air discovery exchanges and route
+//! repair stay with the ZDO/NWK layers (see residue note on
+//! [`AddrMap`]).
 //!
 //! Paraphrase-level model of doc `05-3474-23` R23.2 §§2.2.4.3
 //! (binding), 2.2.4.5 (group management), and 2.2.8.3 (group table).
@@ -24,6 +27,12 @@ pub const MAX_BINDINGS: usize = 16;
 ///
 /// Requirement `05-3474-23-22451-01`.
 pub const MAX_GROUPS: usize = 8;
+
+/// Discovery address-map capacity in long-to-short pairs (declared
+/// budget; resolution state only — the spec fixes no size).
+///
+/// Requirement `05-3474-23-22411-09`.
+pub const MAX_ADDR_MAP: usize = 16;
 
 /// Binding destination: unicast device address or group address, from
 /// the bind-request destination parameters (§2.2.4.3.1.1).
@@ -290,5 +299,320 @@ impl GroupTable {
     pub fn clear(&mut self) {
         self.entries = [None; MAX_GROUPS];
         self.len = 0;
+    }
+}
+
+/// One discovery-learned long-to-short pair.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AddrPair {
+    /// 64-bit extended address the pair was learned for.
+    ieee: u64,
+    /// Last reported 16-bit network address for that device.
+    nwk: u16,
+}
+
+/// Bounded long-to-short address cache fed by discovery outcomes.
+///
+/// Paraphrase-level model of the §2.2.4.1.1.3 network-address mapping
+/// (anchor p0064-L1658-L1690): binding entries name unicast targets
+/// by long address, but frames go out by short address, so the
+/// indirect-transmit decision consults this cache. The caller records
+/// discovery outcomes here (`Device_annce`, `IEEE_addr_rsp` /
+/// `NWK_addr_rsp` successes surface through the ZDO layer); this
+/// table only stores them.
+///
+/// Residue (deliberately out of scope, cause noted): the on-air
+/// discovery exchanges themselves, their timeouts/retries, and
+/// multi-hop path repair all live one layer down (ZDO discovery, NWK
+/// route discovery, which the APS always leaves enabled — see the SAP
+/// note in [`crate::retry`]). A cached short is hop-agnostic: nearby
+/// and multi-hop targets resolve identically.
+///
+/// Eviction is a declared-budget policy, not spec text: a repeated
+/// report refreshes the pair in place; a new long address takes an
+/// empty slot; a full map overwrites the oldest slot (ring).
+///
+/// Requirement `05-3474-23-22411-09`.
+#[derive(Clone, Copy, Debug)]
+pub struct AddrMap {
+    entries: [Option<AddrPair>; MAX_ADDR_MAP],
+    len: usize,
+    next: usize,
+}
+
+impl Default for AddrMap {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AddrMap {
+    /// Empty map.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            entries: [None; MAX_ADDR_MAP],
+            len: 0,
+            next: 0,
+        }
+    }
+
+    /// Pairs currently held.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Whether the map holds nothing.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Short address last reported for `ieee`, if any.
+    #[must_use]
+    pub const fn lookup(&self, ieee: u64) -> Option<u16> {
+        let mut i = 0;
+        while i < MAX_ADDR_MAP {
+            if let Some(pair) = self.entries[i] {
+                if pair.ieee == ieee {
+                    return Some(pair.nwk);
+                }
+            }
+            i += 1;
+        }
+        None
+    }
+
+    /// Record a discovery outcome: refresh in place when the long
+    /// address is already cached, fill an empty slot, or overwrite
+    /// the oldest slot when full (never grows past [`MAX_ADDR_MAP`]).
+    pub fn note(&mut self, ieee: u64, nwk: u16) {
+        let mut i = 0;
+        while i < MAX_ADDR_MAP {
+            if let Some(pair) = self.entries[i] {
+                if pair.ieee == ieee {
+                    self.entries[i] = Some(AddrPair { ieee, nwk });
+                    return;
+                }
+            }
+            i += 1;
+        }
+        if self.len < MAX_ADDR_MAP {
+            let mut j = 0;
+            while j < MAX_ADDR_MAP {
+                if self.entries[j].is_none() {
+                    self.entries[j] = Some(AddrPair { ieee, nwk });
+                    self.len += 1;
+                    return;
+                }
+                j += 1;
+            }
+        } else {
+            self.entries[self.next % MAX_ADDR_MAP] = Some(AddrPair { ieee, nwk });
+            self.next = (self.next + 1) % MAX_ADDR_MAP;
+        }
+    }
+
+    /// Drop the pair for `ieee`. Returns `true` when something was
+    /// removed.
+    pub fn forget(&mut self, ieee: u64) -> bool {
+        let mut i = 0;
+        while i < MAX_ADDR_MAP {
+            if let Some(pair) = self.entries[i] {
+                if pair.ieee == ieee {
+                    self.entries[i] = None;
+                    self.len -= 1;
+                    return true;
+                }
+            }
+            i += 1;
+        }
+        false
+    }
+}
+
+/// One resolved indirect destination: a binding entry whose network
+/// address is known, ready to hand down with route discovery enabled.
+///
+/// Requirement `05-3474-23-22411-10`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResolvedDst {
+    /// Unicast target: long address plus its resolved short and the
+    /// destination endpoint from the binding entry.
+    Unicast {
+        /// 64-bit extended address from the binding entry.
+        ieee: u64,
+        /// Resolved 16-bit network address.
+        nwk: u16,
+        /// Destination endpoint from the binding entry.
+        endpoint: u8,
+    },
+    /// Group target: no short address is needed.
+    Group {
+        /// 16-bit group identifier from the binding entry.
+        group_addr: u16,
+    },
+}
+
+/// Indirect-transmit dispatch plan: the resolved fan-out plus the
+/// long addresses still needing discovery and the confirm the
+/// indirect request reports.
+///
+/// Built by [`BindingTable::plan_indirect`]; arrays are dense in
+/// `[0, len)` and bounded by [`MAX_BINDINGS`].
+///
+/// Requirement `05-3474-23-22411-10`.
+#[derive(Clone, Copy, Debug)]
+pub struct IndirectPlan {
+    dests: [ResolvedDst; MAX_BINDINGS],
+    dest_len: usize,
+    needs: [u64; MAX_BINDINGS],
+    need_len: usize,
+    confirm: ApsStatus,
+}
+
+impl Default for IndirectPlan {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl IndirectPlan {
+    /// Empty plan: nothing resolved, nothing pending, confirm carries
+    /// `NO_BOUND_DEVICE` until [`BindingTable::plan_indirect`] fills
+    /// it in.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            dests: [ResolvedDst::Group { group_addr: 0 }; MAX_BINDINGS],
+            dest_len: 0,
+            needs: [0; MAX_BINDINGS],
+            need_len: 0,
+            confirm: ApsStatus::NoBoundDevice,
+        }
+    }
+
+    /// Confirm the indirect request reports (`SUCCESS`,
+    /// `NO_BOUND_DEVICE`, `NO_SHORT_ADDRESS`, or `NOT_SUPPORTED`).
+    #[must_use]
+    pub const fn confirm(&self) -> ApsStatus {
+        self.confirm
+    }
+
+    /// Resolved destinations, in binding-table order.
+    #[must_use]
+    pub fn resolved(&self) -> &[ResolvedDst] {
+        let n = if self.dest_len < MAX_BINDINGS {
+            self.dest_len
+        } else {
+            MAX_BINDINGS
+        };
+        self.dests.split_at(n).0
+    }
+
+    /// Long addresses with a matching entry but no cached short:
+    /// the caller should run targeted discovery (`IEEE_addr_req`)
+    /// for these, record the outcome via [`AddrMap::note`], and
+    /// re-plan.
+    #[must_use]
+    pub fn unresolved(&self) -> &[u64] {
+        let n = if self.need_len < MAX_BINDINGS {
+            self.need_len
+        } else {
+            MAX_BINDINGS
+        };
+        self.needs.split_at(n).0
+    }
+}
+
+impl BindingTable {
+    /// Plan one indirect (binding-mode) transmit (§2.2.4.1.1.3, anchor
+    /// p0064-L1658-L1690): fan out over every entry matching
+    /// (`src_ieee`, `src_endpoint`, `cluster_id`), resolve each
+    /// unicast entry through the discovery-fed [`AddrMap`], and pass
+    /// group entries through unresolved (they need no short).
+    ///
+    /// Decision table (confirms are the Table 2-29 values from
+    /// [`ApsStatus`]):
+    /// * device holds no binding table (`binding_supported == false`)
+    ///   → `NOT_SUPPORTED`, empty plan;
+    /// * no entry matches → `NO_BOUND_DEVICE`, empty plan;
+    /// * entries match and at least one resolves → `SUCCESS` with the
+    ///   resolved fan-out; unresolvable longs are additionally listed
+    ///   by [`IndirectPlan::unresolved`] for follow-on discovery;
+    /// * entries match but none resolves → `NO_SHORT_ADDRESS` with
+    ///   every long listed for discovery.
+    ///
+    /// Resolution is hop-agnostic on purpose: a cached short may name
+    /// a neighbor or a multi-hop target — the NWK layer (which the
+    /// APS always asks to route-discover) owns the path. Nothing
+    /// here touches the radio; the caller transmits the resolved
+    /// destinations and runs discovery for the rest.
+    ///
+    /// Requirement `05-3474-23-22411-10`.
+    #[must_use]
+    pub fn plan_indirect(
+        &self,
+        addrs: &AddrMap,
+        binding_supported: bool,
+        src_ieee: u64,
+        src_endpoint: u8,
+        cluster_id: u16,
+    ) -> IndirectPlan {
+        let mut plan = IndirectPlan::new();
+        if !binding_supported {
+            plan.confirm = ApsStatus::NotSupported;
+            return plan;
+        }
+        let mut matched = false;
+        for entry in self.entries.iter().flatten() {
+            if entry.src_ieee != src_ieee
+                || entry.src_endpoint != src_endpoint
+                || entry.cluster_id != cluster_id
+            {
+                continue;
+            }
+            matched = true;
+            match entry.dst {
+                BindingDst::Group { group_addr } => {
+                    if plan.dest_len < MAX_BINDINGS {
+                        plan.dests[plan.dest_len] = ResolvedDst::Group { group_addr };
+                        plan.dest_len += 1;
+                    }
+                }
+                BindingDst::Unicast {
+                    dst_ieee,
+                    dst_endpoint,
+                } => match addrs.lookup(dst_ieee) {
+                    Some(nwk) => {
+                        if plan.dest_len < MAX_BINDINGS {
+                            plan.dests[plan.dest_len] = ResolvedDst::Unicast {
+                                ieee: dst_ieee,
+                                nwk,
+                                endpoint: dst_endpoint,
+                            };
+                            plan.dest_len += 1;
+                        }
+                    }
+                    None => {
+                        if plan.need_len < MAX_BINDINGS
+                            && !plan.needs[..plan.need_len].contains(&dst_ieee)
+                        {
+                            plan.needs[plan.need_len] = dst_ieee;
+                            plan.need_len += 1;
+                        }
+                    }
+                },
+            }
+        }
+        plan.confirm = if !matched {
+            ApsStatus::NoBoundDevice
+        } else if plan.dest_len == 0 {
+            ApsStatus::NoShortAddress
+        } else {
+            ApsStatus::Success
+        };
+        plan
     }
 }

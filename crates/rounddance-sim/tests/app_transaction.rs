@@ -15,8 +15,9 @@
 //! determinism).
 
 use rounddance_aps::{
-    ack_for, parse_ack, ApsStatus, DataDest, DataHeader, DeliveryMode, FrameControl, RetrySession,
-    RetryVerdict, SecureDataLink,
+    ack_for, parse_ack, AddrMap, ApsStatus, BindingDst, BindingEntry, BindingTable, DataDest,
+    DataHeader, DeliveryMode, FrameControl, ResolvedDst, RetrySession, RetryVerdict,
+    SecureDataLink,
 };
 use rounddance_mac_sap::{
     Channel, FramePayload, MacAddress, MacDataSap as _, MacMgmtSap as _, TxOptions, TxRequest,
@@ -32,9 +33,9 @@ use rounddance_zcl::behavior::{Ctx, EventQueue};
 use rounddance_zcl::frame::{Direction, FrameType, Header as ZclHeader};
 use rounddance_zcl::{general, onoff, DispatchOutcome, Endpoint, ReportingEngine, ZclStatus};
 use rounddance_zdo::{
-    BindDstMode, BindEntry, BindManager, BindRsp, MatchDescReq, MatchDescRsp, MgmtLqiReq,
-    MgmtLqiRsp, NeighborEntry, PendingTable, ZdpStatus, CLUSTER_BIND_REQ, CLUSTER_MATCH_DESC_REQ,
-    CLUSTER_MGMT_LQI_REQ,
+    BindDstMode, BindEntry, BindManager, BindRsp, DeviceAnnce, MatchDescReq, MatchDescRsp,
+    MgmtLqiReq, MgmtLqiRsp, NeighborEntry, PendingTable, ZdpStatus, CLUSTER_BIND_REQ,
+    CLUSTER_DEVICE_ANNCE, CLUSTER_MATCH_DESC_REQ, CLUSTER_MGMT_LQI_REQ,
 };
 
 const PAN: u16 = 0x1a2b;
@@ -792,4 +793,81 @@ fn app_transaction_replays_deterministically() {
     assert_eq!(t1, t2);
     assert_eq!(r1, r2);
     assert_eq!(r1, sent);
+}
+
+// 05-3474-23-22411-09/10 over the scripted medium: B's Device_annce
+// feeds A's discovery address map, A's bound unicast entry resolves
+// to B's short, and the resolved frame rides a route-discovery-enabled
+// NWK envelope (multi-hop capable) B receives intact.
+#[test]
+fn indirect_dispatch_resolves_after_discovery_annce() {
+    // A binds its On/Off client at B's endpoint (unicast, by long).
+    let mut binding = BindingTable::new();
+    let entry = BindingEntry {
+        src_ieee: IEEE_A,
+        src_endpoint: APP_EP,
+        cluster_id: onoff::CLUSTER_ID,
+        dst: BindingDst::Unicast {
+            dst_ieee: IEEE_B,
+            dst_endpoint: APP_EP,
+        },
+    };
+    assert_eq!(binding.bind(entry), ApsStatus::Success);
+
+    // Before any discovery the entry matches but has no short:
+    // NO_SHORT_ADDRESS with B's long listed for IEEE_addr discovery.
+    let addrs = AddrMap::new();
+    let stuck = binding.plan_indirect(&addrs, true, IEEE_A, APP_EP, onoff::CLUSTER_ID);
+    assert_eq!(stuck.confirm(), ApsStatus::NoShortAddress);
+    assert_eq!(stuck.unresolved(), &[IEEE_B]);
+
+    // B announces; A decodes the air frame and records the outcome.
+    let annce = DeviceAnnce {
+        tsn: 0x61,
+        nwk_addr: NODE_B,
+        ieee: IEEE_B,
+        capability: 0x8e,
+    };
+    let mut abuf = [0u8; DeviceAnnce::LEN];
+    let an = annce.encode_into(&mut abuf).unwrap();
+    let air = trip(
+        0xB201,
+        NODE_B,
+        NODE_A,
+        &npdu(
+            NODE_B,
+            NODE_A,
+            &zdp_apdu(CLUSTER_DEVICE_ANNCE, 0x40, &abuf[..an]),
+        ),
+    );
+    let got = nwk_decode(&air).unwrap();
+    let aps = rounddance_aps::decode_data(got.payload).unwrap();
+    let seen = DeviceAnnce::decode(aps.payload).unwrap();
+    assert_eq!(seen.ieee, IEEE_B);
+    let mut addrs = addrs;
+    addrs.note(seen.ieee, seen.nwk_addr);
+
+    // The re-plan resolves to B's short with nothing left to discover.
+    let plan = binding.plan_indirect(&addrs, true, IEEE_A, APP_EP, onoff::CLUSTER_ID);
+    assert_eq!(plan.confirm(), ApsStatus::Success);
+    assert_eq!(
+        plan.resolved(),
+        &[ResolvedDst::Unicast {
+            ieee: IEEE_B,
+            nwk: NODE_B,
+            endpoint: APP_EP,
+        }]
+    );
+    assert!(plan.unresolved().is_empty());
+
+    // The resolved short rides the medium intact.
+    let mut toggle = [0u8; 8];
+    let tn = onoff::client::toggle(0x62, &mut toggle).unwrap();
+    let sent = npdu(
+        NODE_A,
+        NODE_B,
+        &zcl_apdu(onoff::CLUSTER_ID, 0x41, &toggle[..tn]),
+    );
+    let leg = trip(0xB202, NODE_A, NODE_B, &sent);
+    assert_eq!(leg, sent);
 }

@@ -45,7 +45,10 @@ pub use retry::{
 };
 pub use secure::{ack_for, parse_ack, SecureDataLink};
 pub use status::{ApsStatus, StatusError};
-pub use tables::{BindingDst, BindingEntry, BindingTable, GroupTable, MAX_BINDINGS, MAX_GROUPS};
+pub use tables::{
+    AddrMap, BindingDst, BindingEntry, BindingTable, GroupTable, IndirectPlan, ResolvedDst,
+    MAX_ADDR_MAP, MAX_BINDINGS, MAX_GROUPS,
+};
 
 /// Crate identifier.
 #[must_use]
