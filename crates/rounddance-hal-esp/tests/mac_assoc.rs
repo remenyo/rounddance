@@ -42,9 +42,11 @@ fn ota_poll_long() -> [u8; 18] {
 fn ota_beacon() -> [u8; 26] {
     let mut b = [0u8; 26];
     b[..14].copy_from_slice(&[
-        0x00, 0x80, 0x5a, 0x01, 0xc6, 0x00, 0x00, 0x0f, 0xcf, 0x00, 0x00, 0x00, 0x02, 0x8c,
+        0x00, 0x80, 0x5a, 0x01, 0xc6, 0x00, 0x00, 0xff, 0xcf, 0x00, 0x00, 0x00, 0x02, 0x8c,
     ]);
     b[14..22].copy_from_slice(&EXT_PAN);
+    // Beacon-payload TxOffset FFFFFF (nonbeacon-network marker) + update id 00.
+    b[22..25].copy_from_slice(&[0xff, 0xff, 0xff]);
     b
 }
 
@@ -140,7 +142,7 @@ fn parsers_round_trip_ota_vectors() {
     assert_eq!(bi.seq, 0x5a);
     assert_eq!(bi.src_pan, PAN);
     assert_eq!(bi.src_short, COORD);
-    assert!(bi.assoc_permit, "OTA superframe 0xCF0F permits");
+    assert!(bi.assoc_permit, "OTA superframe 0xCFFF permits");
     assert_eq!(bi.superframe, SUPERFRAME_ASSOC_PERMIT);
     let payload = &ota_beacon()[bi.payload_off..];
     assert!(mac_cmd::beacon_payload_is_ours(payload, &EXT_PAN));

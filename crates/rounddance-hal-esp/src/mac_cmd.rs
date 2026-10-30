@@ -15,12 +15,12 @@
 //!   long data-request poll (`0x04`, long source, 18 B — the fetch
 //!   edge `main.rs` uses to re-arm a pending association answer).
 //! * Frames out (coordinator TX): beacon (MAC beacon, 26 B:
-//!   superframe `0xCF0F` + empty GTS/pending + 15 B network payload),
+//!   superframe `0xCFFF` + empty GTS/pending + 15 B network payload),
 //!   association-response (`0x02`, 19 B: assigned short + status).
 //! * Pacing: solicited answers via the pending flags plus gratuitous
 //!   beacons every [`GRATUITOUS_BEACON_INTERVAL_MS`] ms while serving
 //!   unassociated ([`gratuitous_due`]); the superframe permit bit stays
-//!   set while serving (OTA pin `0xCF0F`) — the window gates assoc
+//!   set while serving (OTA pin `0xCFFF`) — the window gates assoc
 //!   answers, not beacons.
 //! * State ([`CoordAssoc`]): pending-beacon counter + pending-assoc
 //!   flag + latched device EUI, gated only by an explicit permit bit
@@ -75,10 +75,13 @@ pub const MAC_BEACON_REQ: u8 = 0x07;
 pub const MAC_CAPS: u8 = 0x8c;
 
 /// Beacon superframe on the OTA leg: beacon order 15, superframe order
-/// 0, final slot `0xf`, PAN-coordinator set, association permitted.
+/// 15, final slot `0xf`, PAN-coordinator set, association permitted.
 /// The permit bit (bit 15) is part of the value the application passes
 /// to [`build_beacon`]; this constant is the open-window OTA pin.
-pub const SUPERFRAME_ASSOC_PERMIT: u16 = 0xCF0F;
+/// BO=15/SO=15 is the standard nonbeacon-network shape the Ember scan
+/// parser requires: the pre-fix `0xCF0F` (SO=0) mixed nonbeacon markers
+/// (BO=15) with beaconed-network fields and was dropped (rung-3 §2).
+pub const SUPERFRAME_ASSOC_PERMIT: u16 = 0xCFFF;
 
 /// Beacon-request PSDU length (broadcast short pair, no source).
 pub const BEACON_REQ_LEN: usize = 8;
@@ -369,7 +372,9 @@ pub fn parse_data_poll_long(psdu: &[u8]) -> Option<DataPoll> {
 /// Layout: `FC 00 80 | seq | src pan | src short | superframe |
 /// GTS 00 | pending 00 | payload[15]`. The payload is the OTA shape
 /// (marker `0x00`, stack `0x02`, caps [`MAC_CAPS`], `ext_pan`,
-/// 3-octet offset `0x00`, update id `0x00`).
+/// 3-octet offset `0xFF`, update id `0x00`). The `0xFF` offset is the
+/// standard nonbeacon-network marker the Ember scan parser requires:
+/// the pre-fix `0x00` offset was dropped alongside SO=0 (rung-3 §2).
 ///
 /// # Errors
 ///
@@ -398,9 +403,9 @@ pub fn build_beacon(
     out[12] = 0x02;
     out[13] = MAC_CAPS;
     out[14..22].copy_from_slice(ext_pan);
-    out[22] = 0x00;
-    out[23] = 0x00;
-    out[24] = 0x00;
+    out[22] = 0xff;
+    out[23] = 0xff;
+    out[24] = 0xff;
     out[25] = 0x00;
     Ok(BEACON_LEN)
 }
