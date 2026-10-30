@@ -108,7 +108,7 @@ pub struct ApsNode {
 /// APS command payload summary: the named sub-dissector for APS
 /// command frames, on unsecured as well as verified-open legs.
 /// The transport-key, update-device, remove-device, request-key,
-/// switch-key, tunnel, verify-key, and confirm-key commands earn shaped names (key type over the live and
+/// switch-key, tunnel, verify-key, confirm-key, and relay-downstream commands earn shaped names (key type over the live and
 /// spec-agreed fixed shapes, key bytes stay sealed, never rendered;
 /// device status + short over the spec-agreed fixed prefix, the 8-octet
 /// EUI stays in the capture; the remove-device EUI alone stays in the
@@ -118,7 +118,9 @@ pub struct ApsNode {
 /// destination EUI plus tunneled bytes stay in the capture, never in
 /// the node; the verify-key source EUI plus hash stay in the capture,
 /// never in the node; the confirm-key destination EUI stays in the
-/// capture, never in the node); anything
+/// capture, never in the node; the relay-downstream destination EUI
+/// plus relayed bytes stay in the capture, never in the node);
+/// anything
 /// else files as `Unknown` with its
 /// command identifier, never a guess.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -221,6 +223,19 @@ pub enum ApsCmdKind {
         /// Confirmed key type (second body octet).
         key_type: u8,
     },
+    /// Relay-downstream command: one or more Zigbee core TLVs (tag +
+    /// length + value of length + 1) with at least one Relay Message
+    /// TLV (local tag 0: the 8-octet destination EUI plus the relayed
+    /// message, at least one octet) stay fixed, so the TLV-walk
+    /// minima gates the name — the update-device TLV-tail precedent
+    /// for admitting unknown tags, the Direct-envelope
+    /// exact-consumption precedent for refusing trailing garbage.
+    /// The destination EUI and the relayed bytes stay in the capture,
+    /// never in the node — the tunnel carrier precedent; the node is
+    /// fieldless. Values are never validated — the update-device
+    /// status precedent. No key material rides this command in
+    /// renderable form.
+    RelayDownstream,
     /// None of the named shapes: identifier filed, payload unparsed.
     Unknown,
 }

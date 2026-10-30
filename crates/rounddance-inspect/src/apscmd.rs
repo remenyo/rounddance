@@ -1,5 +1,5 @@
 //! APS transport-key, update-device, remove-device, request-key,
-//! switch-key, tunnel, verify-key, and confirm-key command dissector: names the join legs the chain used to
+//! switch-key, tunnel, verify-key, confirm-key, and relay-downstream command dissector: names the join legs the chain used to
 //! abandon at `trailing`.
 //!
 //! Every other stack layer already earns a named sub-leg (MAC command,
@@ -30,13 +30,20 @@
 //! body gate with no TLV tail, and the confirm-key command (`0x10`,
 //! the Trust Center's link-key confirmation) by its 1-octet status
 //! plus the 1-octet key type plus the 8-octet destination address
-//! alone: an exact 10-octet body gate with no TLV tail. Key bytes are never rendered — the transport-key
+//! alone: an exact 10-octet body gate with no TLV tail, and the
+//! relay-downstream command (`0x11`, the Trust Center's message relay
+//! through a parent router) by one or more Zigbee core TLVs with at
+//! least one Relay Message TLV (local tag 0: the 8-octet destination
+//! address plus the relayed message, at least one octet): a TLV-walk
+//! minima gate with exact consumption. Key bytes are never rendered — the transport-key
 //! node carries the key type alone, exactly as Touchlink order bodies
 //! keep wrapped keys sealed; the update-device, remove-device, and
 //! request-key EUIs stay in the capture (the network-report EPID
 //! precedent), and so do the verify-key source EUI and hash (the hash
 //! is a key-derived verifier, never rendered) and the confirm-key
-//! destination EUI (no key material rides that command at all).
+//! destination EUI (no key material rides that command at all) and
+//! the relay-downstream destination EUI plus relayed bytes (the
+//! tunnel carrier precedent: a relayed APS message, never rendered).
 //! Status, key-type, and hash
 //! values are never validated (the
 //! network-status precedent). Reserved key types on the variable-shape
@@ -70,6 +77,9 @@ pub const CMD_VERIFY_KEY: u8 = 0x0F;
 /// APS confirm-key command identifier (Table 4-31).
 pub const CMD_CONFIRM_KEY: u8 = 0x10;
 
+/// APS relay-downstream command identifier (Table 4-31).
+pub const CMD_RELAY_DOWNSTREAM: u8 = 0x11;
+
 /// Standard key type: network key (Table 4-9; 33-octet descriptor).
 pub const KEY_TYPE_NETWORK: u8 = 0x01;
 /// Standard key type: application link key (Table 4-9; 25-octet fixed
@@ -85,6 +95,41 @@ pub const KEY_TYPE_TC_LINK: u8 = 0x04;
 pub enum ApsCmdError {
     /// No payload octets at all.
     Empty,
+}
+
+/// Relay Message TLV tag (local scope): the relayed message plus
+/// its destination.
+const RELAY_MSG_TAG: u8 = 0x00;
+/// Minimum Relay Message TLV value: the 8-octet destination EUI plus
+/// at least one relayed octet.
+const RELAY_MSG_MIN_VALUE: usize = 9;
+
+/// True when `buf` is exactly one or more complete Zigbee core TLVs
+/// containing at least one minimum Relay Message TLV. Truncated tag,
+/// truncated length, truncated value, trailing garbage past a
+/// complete chain, a chain with no Relay Message TLV, and a Relay
+/// Message value shorter than the EUI plus one octet all miss —
+/// never a guess.
+fn relay_shape_ok(buf: &[u8]) -> bool {
+    let mut rest = buf;
+    let mut seen = false;
+    loop {
+        if rest.is_empty() {
+            return seen;
+        }
+        if rest.len() < 2 {
+            return false;
+        }
+        let tag = rest[0];
+        let value_len = rest[1] as usize + 1;
+        let Some(value) = rest.get(2..2 + value_len) else {
+            return false;
+        };
+        if tag == RELAY_MSG_TAG && value.len() >= RELAY_MSG_MIN_VALUE {
+            seen = true;
+        }
+        rest = &rest[2 + value_len..];
+    }
 }
 
 /// Dissect one APS command body (the octets past the header command
@@ -208,6 +253,23 @@ pub fn decode(cmd_id: u8, buf: &[u8]) -> Result<(ApsCmdNode, usize), ApsCmdError
                     status: buf[0],
                     key_type: buf[1],
                 }
+            } else {
+                ApsCmdKind::Unknown
+            }
+        }
+        // Relay-downstream: one or more Zigbee core TLVs (Annex I:
+        // 1-octet tag, 1-octet length, value of length + 1 octets)
+        // with at least one Relay Message TLV (local tag 0: the
+        // 8-octet destination EUI plus the relayed message, at least
+        // one octet) — the update-device TLV-tail precedent for
+        // admitting unknown tags in any order, the Direct-envelope
+        // exact-consumption precedent for refusing trailing garbage.
+        // The destination EUI and the relayed bytes stay in the
+        // capture, never in the node (the tunnel carrier precedent),
+        // so the node is fieldless; values are never validated.
+        CMD_RELAY_DOWNSTREAM => {
+            if relay_shape_ok(buf) {
+                ApsCmdKind::RelayDownstream
             } else {
                 ApsCmdKind::Unknown
             }
