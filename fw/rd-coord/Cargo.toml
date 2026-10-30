@@ -1,0 +1,28 @@
+[package]
+name = "rd-coord"
+version = "0.1.0"
+edition = "2021"
+resolver = "2"
+
+[[bin]]
+name = "rd-coord"
+harness = false # do not use the built-in cargo test harness
+
+[dependencies]
+esp-idf-sys = { version = "0.38", features = ["native"] }
+esp-idf-hal = "0.47"
+esp-idf-svc = "0.53"
+rounddance-hal-esp = { path = "../../crates/rounddance-hal-esp", features = ["esp"] }
+rounddance-mac-sap = { path = "../../crates/rounddance-mac-sap" }
+
+[build-dependencies]
+embuild = "0.33.5"
+
+[profile.release]
+opt-level = "s"
+
+[profile.dev]
+debug = true
+opt-level = "z"
+
+[workspace]
