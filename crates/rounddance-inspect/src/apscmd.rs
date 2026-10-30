@@ -1,5 +1,5 @@
-//! APS transport-key, update-device, and remove-device command
-//! dissector: names the join legs the chain used to abandon at
+//! APS transport-key, update-device, remove-device, and request-key
+//! command dissector: names the join legs the chain used to abandon at
 //! `trailing`.
 //!
 //! Every other stack layer already earns a named sub-leg (MAC command,
@@ -12,17 +12,21 @@
 //! Center status report) by its status + short over the spec Fig 4-13
 //! fixed prefix: the 8-octet device address, the 2-octet device short
 //! address, and the 1-octet status, with optional R23 JoinerTLVs after
-//! them, so only the 11-octet fixed prefix gates the name, and the
+//! them, so only the 11-octet fixed prefix gates the name, the
 //! remove-device command (`0x07`, the Trust-Center-to-router removal
 //! order) by its 8-octet device address alone: an exact 8-octet body
-//! gate with no TLV tail. Key bytes are never rendered — the
-//! transport-key node carries the key type alone, exactly as Touchlink
-//! order bodies keep wrapped keys sealed; the update-device and
-//! remove-device EUIs stay in the capture (the network-report EPID
-//! precedent). Status semantics are never validated (the
-//! network-status precedent). Reserved key types and every other
-//! command identifier file as [`ApsCmdKind::Unknown`] with the
-//! identifier, never a guess. Only an empty payload refuses outright.
+//! gate with no TLV tail, and the request-key command (`0x08`, the
+//! device-to-Trust-Center key request) by its 1-octet key type plus
+//! the 8-octet partner address alone: an exact 9-octet body gate with
+//! no TLV tail. Key bytes are never rendered — the transport-key
+//! node carries the key type alone, exactly as Touchlink order bodies
+//! keep wrapped keys sealed; the update-device, remove-device, and
+//! request-key EUIs stay in the capture (the network-report EPID
+//! precedent). Status and key-type values are never validated (the
+//! network-status precedent). Reserved key types on the variable-shape
+//! transport-key command and every other command identifier file as
+//! [`ApsCmdKind::Unknown`] with the identifier, never a guess. Only an
+//! empty payload refuses outright.
 
 use crate::tree::{ApsCmdKind, ApsCmdNode};
 
@@ -34,6 +38,9 @@ pub const CMD_UPDATE_DEVICE: u8 = 0x06;
 
 /// APS remove-device command identifier (Table 4-31).
 pub const CMD_REMOVE_DEVICE: u8 = 0x07;
+
+/// APS request-key command identifier (Table 4-31).
+pub const CMD_REQUEST_KEY: u8 = 0x08;
 
 /// Standard key type: network key (Table 4-9; 33-octet descriptor).
 pub const KEY_TYPE_NETWORK: u8 = 0x01;
@@ -104,6 +111,19 @@ pub fn decode(cmd_id: u8, buf: &[u8]) -> Result<(ApsCmdNode, usize), ApsCmdError
         CMD_REMOVE_DEVICE => {
             if len == 8 {
                 ApsCmdKind::RemoveDevice
+            } else {
+                ApsCmdKind::Unknown
+            }
+        }
+        // Request-key: the key type plus the partner address alone
+        // (1 + 8 octets, no TLV tail), so the gate is exact. The
+        // partner EUI stays in the capture, never in the node; the
+        // key type rides the node unvalidated (the update-device
+        // status precedent — the fixed length needs no type gate,
+        // and no key material rides this command).
+        CMD_REQUEST_KEY => {
+            if len == 9 {
+                ApsCmdKind::RequestKey { key_type: buf[0] }
             } else {
                 ApsCmdKind::Unknown
             }

@@ -1613,3 +1613,100 @@ fn aps_remove_device_leg_names_eui_shape() {
     assert!(lone.apscmd().is_none());
     assert_eq!(note_reasons(&lone), vec!["trailing"]);
 }
+
+// ---------------------------------------------------------------------------
+// Wave-80 track-inspect: APS request-key (0x08) command leg. The next
+// unnamed APS command id after wave-79's remove-device (0x07): spec Table
+// 4-31 assigns 0x08 to REQUEST_KEY, and the wave-79 test pins it as a
+// future leg (`Unknown`). Wire shape is a 1-octet key type plus the
+// 8-octet partner device address alone — a fixed 9-octet body (10-octet
+// payload with the command octet), so the gate is exact. The partner EUI
+// stays in the capture (the network-report EPID and update/remove-device
+// EUI precedents); the node carries the key type alone (the transport-key
+// key-type precedent). Key-type values are the stack's, never validated
+// here (the update-device status precedent — the length is fixed, so no
+// structural gate needs the type); no key material rides this command, so
+// no key bytes can ever render.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn aps_request_key_leg_names_key_type() {
+    use tree::ApsCmdKind as K;
+    // Synthetic: key type 0x01 + EUI 01..08: identifier bytes only,
+    // never key material, never rendered.
+    let mut body = vec![0x01u8];
+    body.extend_from_slice(&[0x01u8, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]);
+    assert_eq!(body.len(), 9);
+    let tree = chain::dissect(&wrap_aps_command(0x08, &body)).unwrap();
+    let a = tree.apscmd().expect("request-key leg");
+    assert_eq!(a.command_id, 0x08);
+    assert_eq!(a.kind, K::RequestKey { key_type: 0x01 });
+    assert_eq!(a.payload_len, 10);
+    // The APS envelope still files the command identifier; no ZCL
+    // rides a command frame.
+    assert_eq!(tree.aps().expect("aps envelope").command_id, Some(0x08));
+    assert!(tree.zcl().is_none());
+    // Stop taxonomy never moves for a named leg.
+    assert_eq!(note_reasons(&tree), vec!["trailing"]);
+    let text = report::to_text(&tree);
+    assert!(text.contains("apscmd:"), "named leg renders: {text}");
+    assert!(text.contains("request-key"), "leg kind renders: {text}");
+    assert!(
+        text.contains("keytype=0x01"),
+        "key type renders, partner EUI never does: {text}"
+    );
+    let json = report::to_json(&tree);
+    assert!(json.contains("\"apscmd\""), "json leg renders: {json}");
+    assert!(
+        json.contains("\"kind\":\"request-key\""),
+        "json kind renders: {json}"
+    );
+    assert!(json.contains("\"cmd\":8"), "json command id: {json}");
+    assert!(json.contains("\"key_type\":1"), "json key type: {json}");
+    // The 8-octet partner EUI stays in the capture, never in the node.
+    assert!(
+        !json.contains("578437695752307201"),
+        "EUI never rendered: {json}"
+    );
+    assert!(
+        !text.contains("578437695752307201"),
+        "EUI never rendered: {text}"
+    );
+    // Request chatter never opens a session timeline.
+    assert_eq!(session::classify_tree(&tree), None);
+    // Key-type values are never validated: a type outside the
+    // transport-key named set still names the shape (the reserved-status
+    // precedent of the update-device leg).
+    let mut other = body.clone();
+    other[0] = 0x02;
+    let o = chain::dissect(&wrap_aps_command(0x08, &other)).unwrap();
+    assert_eq!(
+        o.apscmd().expect("unvalidated-type leg").kind,
+        K::RequestKey { key_type: 0x02 }
+    );
+    assert_eq!(note_reasons(&o), vec!["trailing"]);
+    assert_eq!(session::classify_tree(&o), None);
+    // Exact gate: short (8) and long (10, trailing octet) bodies stay
+    // `Unknown` under the same stop with no timeline event, as do
+    // reserved command identifiers at the named length and the next
+    // command identifier (switch-key 0x09, a future wave's leg).
+    let short = &body[..8];
+    let long = [&body[..], &[0xAAu8][..]].concat();
+    assert_eq!(long.len(), 10);
+    for (cmd, b) in [
+        (0x08u8, short),
+        (0x08u8, &long[..]),
+        (0x01u8, &body[..]),
+        (0x09u8, &[0x00u8][..]),
+    ] {
+        let t = chain::dissect(&wrap_aps_command(cmd, b)).unwrap();
+        assert_eq!(t.apscmd().expect("unknown leg").kind, K::Unknown);
+        assert_eq!(note_reasons(&t), vec!["trailing"]);
+        assert_eq!(session::classify_tree(&t), None);
+    }
+    // A lone command octet (empty body) refuses the leg outright but
+    // keeps the same stop.
+    let lone = chain::dissect(&wrap_aps_command(0x08, &[])).unwrap();
+    assert!(lone.apscmd().is_none());
+    assert_eq!(note_reasons(&lone), vec!["trailing"]);
+}

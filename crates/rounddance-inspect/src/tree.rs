@@ -107,12 +107,13 @@ pub struct ApsNode {
 
 /// APS command payload summary: the named sub-dissector for APS
 /// command frames, on unsecured as well as verified-open legs.
-/// The transport-key, update-device, and remove-device commands earn
-/// shaped names (key type over the live and spec-agreed fixed shapes,
-/// key bytes stay sealed, never rendered; device status + short over
-/// the spec-agreed fixed prefix, the 8-octet EUI stays in the capture;
-/// the remove-device EUI alone stays in the capture, never in the
-/// node); anything else files as `Unknown` with its
+/// The transport-key, update-device, remove-device, and request-key
+/// commands earn shaped names (key type over the live and spec-agreed
+/// fixed shapes, key bytes stay sealed, never rendered; device status +
+/// short over the spec-agreed fixed prefix, the 8-octet EUI stays in the
+/// capture; the remove-device EUI alone stays in the capture, never in
+/// the node; the request-key type alone names its shape, the 8-octet
+/// partner EUI stays in the capture); anything else files as `Unknown` with its
 /// command identifier, never a guess.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ApsCmdNode {
@@ -154,6 +155,18 @@ pub enum ApsCmdKind {
     /// precedent. The shape is the address alone (no short, no
     /// status, no TLV tail), so the node carries no address bytes.
     RemoveDevice,
+    /// Request-key command: the 1-octet key type plus the 8-octet
+    /// partner address stay fixed (no TLV tail), so the exact 9-octet
+    /// body gates the name. The partner EUI stays in the capture,
+    /// never in the node — the update-device EUI precedent; the node
+    /// carries the key type alone — the transport-key precedent.
+    /// Key-type values are the stack's, never validated here — the
+    /// update-device status precedent. No key material rides this
+    /// command.
+    RequestKey {
+        /// Requested key type (first body octet).
+        key_type: u8,
+    },
     /// None of the named shapes: identifier filed, payload unparsed.
     Unknown,
 }

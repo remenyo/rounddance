@@ -1245,6 +1245,9 @@ fn apscmd_text(k: &ApsCmdKind) -> String {
             )
         }
         ApsCmdKind::RemoveDevice => String::from("remove-device"),
+        ApsCmdKind::RequestKey { key_type } => {
+            format!("request-key keytype={key_type:#04x}")
+        }
         ApsCmdKind::Unknown => String::from("unknown"),
     }
 }
@@ -1259,6 +1262,7 @@ fn apscmd_json(n: &ApsCmdNode) -> String {
             format!(",\"status\":{status},\"short\":{short_addr}"),
         ),
         ApsCmdKind::RemoveDevice => ("remove-device", String::new()),
+        ApsCmdKind::RequestKey { key_type } => ("request-key", format!(",\"key_type\":{key_type}")),
         ApsCmdKind::Unknown => ("unknown", String::new()),
     };
     format!(
