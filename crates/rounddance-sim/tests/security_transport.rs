@@ -87,7 +87,7 @@ fn encoded_npdu(dst: u16, secured: &[u8]) -> Vec<u8> {
     out
 }
 
-fn loopback_deliver(seed: u64, npdu: &[u8]) -> Vec<u8> {
+fn loopback_deliver(seed: u64, npdu: &[u8]) -> (Vec<String>, Vec<u8>) {
     let mut radio = ScriptedRadio::new(
         Seed(seed),
         vec![ScriptAction::Delay {
@@ -108,12 +108,13 @@ fn loopback_deliver(seed: u64, npdu: &[u8]) -> Vec<u8> {
     radio.run_until_idle(16);
     let confirm = radio.poll_confirm().expect("script always confirms");
     assert_eq!(confirm.status, TxStatus::Delivered);
-    radio
+    let wire = radio
         .poll_indication()
         .expect("delivery implies indication")
         .msdu
         .as_slice()
-        .to_vec()
+        .to_vec();
+    (radio.trace_lines().to_vec(), wire)
 }
 
 // 05-3474-23-446-01 + 05-3474-23-4311-01 + 05-3474-23-4312-01 + 05-3474-23-451-01: secured frame end to end — A secures with
@@ -126,13 +127,56 @@ fn secured_frame_end_to_end_two_node() {
     let mut rx = ReplayTable::<8>::new();
 
     let secured = secured_frame(&keys, &mut tx, &[0xDE, 0xAD, 0xBE, 0xEF]).unwrap();
-    let received = loopback_deliver(0x5EC0, &encoded_npdu(NODE_B, &secured));
+    let (_, received) = loopback_deliver(0x5EC0, &encoded_npdu(NODE_B, &secured));
     assert_eq!(received, encoded_npdu(NODE_B, &secured));
 
     let npdu = nwk_decode(&received).unwrap();
     assert_eq!(npdu.header.dst_addr, NODE_B);
     let payload = accept_frame(&keys, &mut rx, IEEE_B, npdu.payload).unwrap();
     assert_eq!(payload, vec![0xDE, 0xAD, 0xBE, 0xEF]);
+}
+
+// 05-3474-23-446-01 + 05-3474-23-4311-01 + 05-3474-23-4312-01 + 05-3474-23-451-01
+// (matrix): secured transport is timing-independent. Four seeds incl.
+// the 0/u64::MAX edges — per-seed double runs replay the identical
+// trace + wire, and every seed preserves the exact octets end to end
+// with the same payload validating on receipt (same
+// timing-vs-decision split as the commission-join matrix: Delay jitter
+// moves `queued_us` timestamps, never the key/counter decision — the
+// naive cross-seed trace pin fails on those timestamps only).
+#[test]
+fn secured_transport_matrix_seeds_share_wire_and_payload() {
+    const SEEDS: [u64; 4] = [0x0000, 0x5EC0, 0xBEEF, u64::MAX];
+    const PAYLOAD: &[u8] = &[0xDE, 0xAD, 0xBE, 0xEF];
+    for &seed in &SEEDS {
+        // Fresh key/counter per run so counter values never drift
+        // across seeds; every seed secures the identical bytes.
+        let sent = {
+            let keys = KeySet::new(NetworkKey::new([0x77; NETWORK_KEY_LEN], 1));
+            let mut tx = FrameCounter::new(0, 4);
+            let secured = secured_frame(&keys, &mut tx, PAYLOAD).unwrap();
+            encoded_npdu(NODE_B, &secured)
+        };
+        let (trace_a, rx_a) = loopback_deliver(seed, &sent);
+        let (trace_b, rx_b) = loopback_deliver(seed, &sent);
+        assert_eq!(trace_a, trace_b, "per-seed trace replay, seed {seed:#x}");
+        assert_eq!(rx_a, rx_b, "per-seed wire replay, seed {seed:#x}");
+        assert_eq!(rx_a, sent, "medium preserves octets, seed {seed:#x}");
+        assert!(
+            trace_a
+                .iter()
+                .any(|l| l.contains("confirm handle=0 status=Delivered")),
+            "trace records delivery, seed {seed:#x}"
+        );
+        // Receive-side validation resolves the same key and recovers
+        // the same payload on every seed.
+        let npdu = nwk_decode(&rx_a).unwrap();
+        assert_eq!(npdu.header.dst_addr, NODE_B, "nwk dst pin, seed {seed:#x}");
+        let keys = KeySet::new(NetworkKey::new([0x77; NETWORK_KEY_LEN], 1));
+        let mut rx = ReplayTable::<8>::new();
+        let payload = accept_frame(&keys, &mut rx, IEEE_B, npdu.payload).unwrap();
+        assert_eq!(payload, PAYLOAD, "cross-seed payload pin, seed {seed:#x}");
+    }
 }
 
 // 05-3474-23-4312-01: replay attack — captured bytes replayed by an
@@ -145,7 +189,7 @@ fn replay_attack_rejected_fresh_advances() {
     let mut rx = ReplayTable::<8>::new();
 
     let first = secured_frame(&keys, &mut tx, b"cmd-on").unwrap();
-    let captured = loopback_deliver(0xBEEF, &encoded_npdu(NODE_B, &first));
+    let (_, captured) = loopback_deliver(0xBEEF, &encoded_npdu(NODE_B, &first));
     let npdu = nwk_decode(&captured).unwrap();
     accept_frame(&keys, &mut rx, IEEE_B, npdu.payload).unwrap();
 
