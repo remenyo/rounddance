@@ -164,3 +164,61 @@ fn nwk_scenario_replays_deterministically() {
         &[0xDE, 0xAD, 0xBE, 0xEF]
     );
 }
+
+// 05-3474-23-3213-01 + 05-3474-23-3211-03/04/05 + 05-3474-23-366-01
+// (matrix): NWK loopback transport is timing-independent. Four seeds
+// incl. the 0/u64::MAX edges — per-seed double runs replay the
+// identical trace + wire, and every seed preserves the exact octets
+// end to end with identical decoded fields (same timing-vs-decision
+// split as the secured-transport matrix: Delay jitter moves
+// `queued_us` timestamps, never the header/payload decision — the
+// naive cross-seed trace pin fails on those timestamps only). The
+// jitter-only script matches the loopback functional precedent; the
+// MaybeDrop leg stays per-seed-only under
+// `nwk_scenario_replays_deterministically` because drop decisions
+// diverge cross-seed by design.
+#[test]
+fn nwk_transport_matrix_seeds_share_wire_and_fields() {
+    use DiscoverRoute::Enable;
+    const SEEDS: [u64; 4] = [0x0000, 0x1234, 0xBEEF, u64::MAX];
+    const PAYLOAD: &[u8] = &[0xDE, 0xAD, 0xBE, 0xEF];
+    let script = || {
+        vec![ScriptAction::Delay {
+            base_us: 320,
+            jitter_us: 100,
+        }]
+    };
+    for &seed in &SEEDS {
+        let sent = encoded_npdu(NODE_B, PAYLOAD);
+        let (trace_a, rx_a) = loopback_deliver(seed, &sent, script());
+        let (trace_b, rx_b) = loopback_deliver(seed, &sent, script());
+        assert_eq!(trace_a, trace_b, "per-seed trace replay, seed {seed:#x}");
+        assert_eq!(rx_a, rx_b, "per-seed wire replay, seed {seed:#x}");
+        assert_eq!(rx_a, sent, "medium preserves octets, seed {seed:#x}");
+        assert!(
+            trace_a
+                .iter()
+                .any(|l| l.contains("confirm handle=0 status=Delivered")),
+            "trace records delivery, seed {seed:#x}"
+        );
+        let decoded = decode(&rx_a).unwrap();
+        assert_eq!(
+            decoded.header.dst_addr, NODE_B,
+            "nwk dst pin, seed {seed:#x}"
+        );
+        assert_eq!(
+            decoded.header.src_addr, NODE_A,
+            "nwk src pin, seed {seed:#x}"
+        );
+        assert_eq!(decoded.header.radius, 3, "nwk radius pin, seed {seed:#x}");
+        assert_eq!(decoded.header.seq, 0x42, "nwk seq pin, seed {seed:#x}");
+        assert_eq!(
+            decoded.header.control.discover_route, Enable,
+            "nwk discover-route pin, seed {seed:#x}"
+        );
+        assert_eq!(
+            decoded.payload, PAYLOAD,
+            "cross-seed payload pin, seed {seed:#x}"
+        );
+    }
+}
