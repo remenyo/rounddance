@@ -1832,3 +1832,122 @@ corpus writes; wording in code/tests is paraphrase only (D1).
 | Requirement ID | State | Implementing code | Verifying test |
 |----------------|-------|-------------------|----------------|
 | RD-COMPAT-12 | implemented + verified, CONFIRMED (sweep-54) | `ti::{MtDecoder, MtOutcome, MtDropReason}`: streaming byte pump (`push_byte -> Option<MtOutcome>`, at most one outcome per byte) over the wave-61 wire shape — silent pre-SOF skip, `BadLen` on `LEN > MAX_MT_PAYLOAD`, `BadFcs` on XOR-fold mismatch, re-arm at next `SOF`, saturating `dropped` / `consecutive_bad` meters cleared on a good frame | `compat/tests/ti_vectors.rs` 5 new tests (19 total): hand-computed byte pin (`FE 03 24 01 AA 10 FE 62`, FCS oracle: independent python3 XOR-fold, SOF-valued data octet pinned as data) + split-feed reassembly at 5 chunkings vs one-shot `decode` + noise-skip / `BadLen`-drop / re-arm with meter reset + `BadFcs`-drop / re-arm + back-to-back in-order frames |
+
+## Wave-83 traceability — offline sniffer runs (`rounddance-sniffer`)
+
+Offline only (no serial, no lab hardware): the sniffer crate funnels
+every offline input — listener replay, pcap/pcapng packets, and the
+streaming byte pipe for replay parity — through the single
+dissect+fold path, renders per-frame trees plus session text and
+session v2 JSON, and writes pcap-out in the untouched 195 bare-frame
+link type plus the 147 radio-header variant. Per-run worker lease IDs
+are pure derivations (no arbitrator calls offline); the w82 ch25/ch20
+captures are the golden inputs (verbatim frame vectors; corpus hashes
++ census as metadata only). 6 repo-minted IDs (`RD-SNIFF-01..06`),
+MINTED-pending-confirm. The work order named `RD-SNIFF-01..12`; only
+01..06 were staged (`~/hwscratch/w83/track-sniffer/SUMMARY.md` §6) —
+no 07..12 staged text exists, so nothing beyond 01..06 is minted here
+and no IDs are invented. Wording in code/tests is paraphrase only
+(D1).
+
+| Requirement ID | State | Implementing code | Verifying test |
+|----------------|-------|-------------------|----------------|
+| RD-SNIFF-01 | implemented + verified | `sniffer/src/run.rs`: `run_listener` / `run_packets` / `run_stream` — every offline input funnels through one dissect+fold path (Listener or pcap packets; stream pipe for replay parity) | `sniffer/tests/offline_run.rs::listener_and_stream_folds_are_byte_identical` |
+| RD-SNIFF-02 | implemented + verified | `run.rs`: `text_report` / `json_report` — reports render per-frame trees plus session text and session v2 JSON (v1 bytes as prefix, timelines appended); no payload/key bytes | `sniffer/tests/offline_run.rs::reports_carry_run_envelope_and_v2_session` |
+| RD-SNIFF-03 | implemented + verified | `run.rs`: `write_pcap_195` / `write_pcap_radio` / `read_pcap_radio`; `radio.rs` — pcap-out in two link types: untouched 195 bare frames plus 147 radio-header variant (4-octet header: version/channel/RSSI/LQI) with a validating reader | `sniffer/tests/offline_run.rs::pcap_out_round_trips_both_dlts` |
+| RD-SNIFF-04 | implemented + verified | `sniffer/src/lease.rs`: `lease_id_for_run` / `lease_id_hex` — per-run worker lease IDs are pure derivations of (worker, tag, channel, seq); no arbitrator calls offline | `sniffer/tests/offline_run.rs::lease_id_matches_independent_fnv` |
+| RD-SNIFF-05 | implemented + verified | `inspect report.rs`: `session_to_json_v2` / `session_v2_from_json`; `session.rs`: `restore_v2` / `set_keys` — session v2 snapshot (v1 document plus timeline table); strict loader restores devices/networks/sec/timelines; v1 loader refuses v2 at the schema gate | `sniffer/tests/offline_run.rs::session_v2_schema_pins_and_load_gates` + `::session_v2_round_trips_nonempty_timelines` |
+| RD-SNIFF-06 | implemented + verified | `sniffer/tests/ota_vectors.rs` — w82 ch25/ch20 captures are the golden inputs (verbatim frame vectors; corpus hashes + census as metadata only) | `sniffer/tests/ota_vectors.rs` 6 tests: `beacon_request_names_maccmd_and_files_quirk_unknown`, `mg21_beacon_names_pan_and_coordinator_source`, `mg21_maintenance_frame_is_nwk_sealed_not_plaintext`, `foreign_mac_secured_frame_stops_outside_nwk_domain`, `ch20_scan_traffic_is_beacon_req_only`, `captured_corpus_pins_w82` |
+
+## Wave-85 traceability — live nRF front-end + lease guard (`rounddance-sniffer`)
+
+6 repo-minted IDs (`RD-SNIFF-07..12`), MINTED-pending-confirm. Row 10 as
+staged claimed leases stay an operator step; the lease-guard implementation
+supersedes that half: the binary acquires via subprocess (stable worker
+owner — per-run pid owners wedge the arbitrator FIFO until 1h TTL, proven
+e2e), per-run identity stays in the reserve purpose + report lease ID.
+
+| RD-SNIFF-07 | implemented + verified | `sniffer/src/live.rs`: `FrontEnd`/`NrfListener`/`check_channel` — serial open + shell handshake, Framer/parse_line pipe with replay-identical semantics, staged frame handoff, Drop parks hardware with sleep; channel gate 11..=26 before any port write; RX-only by construction | `sniffer/tests/live_conformance.rs::next_frame_delivers_received_lines_and_skips_noise`, `channel_gate_*`, `drop_parks_hardware_with_sleep` |
+| RD-SNIFF-08 | implemented + verified | `src/bin/rd-sniff.rs`: `--live`, `run_live`, `RawSerial`; `run.rs`: `run_radio_packets` + public `new`/`push_frame` — time-bounded poll loop over the shared fold leg with ordinal timestamps, post-deadline drain, park-before-IO, same 4 outputs; radio-pcap input replays a run | `sniffer/tests/live_lease.rs::live_usage_errors_need_no_hardware`, `sniffer/tests/live_conformance.rs::radio_file_replay_is_report_identical` |
+| RD-SNIFF-09 | implemented + verified | Live == file conformance: same frames live vs replayed radio file render byte-identical text/JSON reports; empty air passes structurally | `sniffer/tests/live_conformance.rs::live_capture_matches_its_radio_file` (live, env-gated) |
+| RD-SNIFF-10 | implemented + verified | Per-run worker lease IDs stamped on live runs (default worker `w2-live`); the binary acquires the arbitrator lease itself via subprocess (stable worker owner per FIFO finding; per-run identity in purpose + report), lib stays offline | `sniffer/tests/live_lease.rs::live_lease_owner_is_stable_worker_base`, `live25` lease `fade87809e2043a7` reproduced by replay |
+| RD-SNIFF-11 | implemented + verified | Live runs hold a real arbitrator lease: canonical-port reserve before open, release after park and before file IO, refusal without touching the port on held/quarantined/unreservable, stable worker owner, usage errors exit before any arbitrator contact; report lease derivation unchanged | `src/bin/rd-sniff.rs::run_live`; `src/bin/rd-sniff/lease_guard.rs::Guard/lease_port/lease_owner/lease_timeout_secs` | `live_open_without_lease_must_refuse`, `live_open_failure_releases_lease`, `live_usage_errors_never_touch_arbitrator`, `live_lease_owner_is_stable_worker_base` |
+| RD-SNIFF-12 | implemented + verified | Lease lifecycle unit cover: refuse-when-held with no release, reserve/release round trip with idempotent release, Drop backstop, symlink canonicalization with missing-path fallback, timeout margin | `src/bin/rd-sniff/lease_guard.rs` unit tests (mock CLI boundary, no serial) | `acquire_refuses_when_held_and_touches_nothing_else`, `acquire_then_release_round_trip`, `drop_releases_an_unreleased_guard`, `lease_port_resolves_symlinks_and_falls_back`, `timeout_covers_run_with_margin` |
+
+## Wave-84 traceability — IEEE 802.15.4-2020 MAC SAP-anchored slice (`rounddance-mac-sap`, `rounddance-inspect` `mac.rs`)
+
+Source doc: IEEE Std 802.15.4-2020 (doc 802154, rev 2020). All wording
+is paraphrase (D1); identifiers and numeric values cited, never spec
+text. Repo-minted IDs (`RD-154-<clause>-<seq>`, dots stripped),
+one-to-one with the staged wave files (`802154-2020-<clause>-<seq>` in
+`~/hwscratch/w82-mining/requirements-wave-802154-mac-phy.md` plus
+`../w84-goal-r7/requirements-wave-802154-mac-phy-2.md`); the 2020 REV
+folds into the per-row anchor, and a future 2024 diff must reintroduce
+REV disambiguation. Anchors are PDF-page + clause (no printed line
+numbers in this extraction); `reconcile` flags from the staged files
+carry over — table/figure interiors freeze PDF-side before constants
+harden. 43 repo-minted IDs below, MINTED-pending-confirm; 10 staged
+rows held with cause (not minted): scratch-only verifiers (sole pin in
+`~/hwscratch/w84-goal-r7/verify/tests/scratch.rs`, 8 passing,
+promotable to repo tests) — `RD-154-112-01`
+(`sap_bounds_and_options`), `-7227-01` (`ack_branch_shapes`),
+`-7229-01` (`mode1_and_truncation_are_typed` +
+`nonenone_pan_tracks_version`), `-733-01` (`ack_branch_shapes`),
+`-754-01` / `-756-01` (`disassoc_and_panconflict`), `-7510-02`
+(`realign_page_form_is_length_refused`); pin-less structural
+boundaries — `-6742-01` (no NONE-with-confirm test in repo),
+`-921-01` / `-673-01` (absence boundaries: SAP carries no key
+parameters; covered positively by `RD-154-922-01` /
+`RD-154-834-01`). The 15 staged-but-not-minted items from the wave
+files stand as recorded (FFD/RFD roles, frame-pending use, ack
+encode/discipline, assoc/disassociate choreography, purge, no-ack
+classes, outgoing secure-path stamping). The w84 scratch legs
+further corroborate the mixed-pin rows below (`-7222-01`, `-7223-01`,
+`-7226-02`, `-72210-01`, `-734-01`, `-751-01`) and stay promotable
+evidence, not pins. Wording in code/tests is paraphrase only (D1).
+
+| Requirement ID | State | Implementing code | Verifying test |
+|----------------|-------|-------------------|----------------|
+| RD-154-71-01 | implemented + verified | `mac.rs::decode` extended-address walk (mode 3; anchor 802154-2020-p0162-§7.1) | `inspect/tests/decode_depth.rs::mac_command_legs_name_every_live_shape` (extended src addrs on AssocReq/DataReq legs) |
+| RD-154-61-01 | implemented + verified | `mac.rs::decode` short/broadcast address accept (anchor 802154-2020-p0058-§6.1) | `inspect/tests/decode_depth.rs::mac_command_legs_name_every_live_shape` (broadcast dst on BeaconReq/Orphan legs) |
+| RD-154-721-01 | implemented + verified | `mac.rs::decode` header walk order (FC, seq, PAN/addrs; anchor 802154-2020-p0162-§7.2.1) | `inspect/tests/goldens.rs::golden_full_chain_mac_nwk_aps_zcl` (MAC node field asserts) |
+| RD-154-7221-01 | implemented (structural) | `mac.rs` FC_* const scope (classic frames; no multipurpose/fragment/extended branch; anchor 802154-2020-p0163-§7.2.2.1, reconcile Fig 7-2 geometry) | exercised transitively by every decode test: `inspect/tests/goldens.rs::golden_full_chain_mac_nwk_aps_zcl` + `inspect/tests/decode_depth.rs::mac_command_legs_name_every_live_shape` |
+| RD-154-7222-01 | implemented + verified | `decode` frame-type dispatch (ack arm 2, command gate 3; anchor 802154-2020-p0163-§7.2.2.2, reconcile Table 7-1 interior) | `inspect/tests/decode_depth.rs::mac_command_legs_name_every_live_shape` |
+| RD-154-7223-01 | implemented + verified | `security_enabled` flag; secured outer ⇒ `command_id` None (anchor 802154-2020-p0163-§7.2.2.3) | `inspect/tests/goldens.rs::golden_captured_air_secured_nwk_stops_chain` |
+| RD-154-7225-01 | implemented + verified | `mac-sap::TxOptions::ACK` ack-request bit (anchor 802154-2020-p0164-§7.2.2.5) | `mac-sap/src/lib.rs::tx_options_bits` |
+| RD-154-7226-01 | implemented + verified | `decode` PAN-compress source-PAN elision (00/01 rule; anchor 802154-2020-p0164-§7.2.2.6) | `inspect/tests/goldens.rs::golden_full_chain_mac_nwk_aps_zcl` (compressed short→short, src PAN elided) |
+| RD-154-7226-02 | implemented + verified | `decode` version-10 PAN/address presence behavior (anchor 802154-2020-p0164-p0165-§7.2.2.6, reconcile Table 7-2 interiors) | `inspect/tests/goldens.rs::golden_full_chain_mac_nwk_aps_zcl` (v0 compress leg) |
+| RD-154-72210-01 | implemented + verified | `decode` version field; version-aware PAN rules (anchor 802154-2020-p0166-§7.2.2.10, reconcile Table 7-4 interior) | `inspect/tests/decode_depth.rs::mac_command_legs_name_every_live_shape` |
+| RD-154-723-01 | implemented + verified | `DecodedMac.seq` BSN/DSN slot (anchor 802154-2020-p0166-§7.2.3) | `inspect/tests/goldens.rs::golden_full_chain_mac_nwk_aps_zcl` (seq 0x5a assert) |
+| RD-154-724727-01 | implemented + verified | `mac.rs::mode_addr` mode-gated address walk (anchor 802154-2020-p0167-§7.2.5/§7.2.7) | `inspect/tests/goldens.rs::golden_full_chain_mac_nwk_aps_zcl` + `inspect/tests/decode_depth.rs::mac_command_legs_name_every_live_shape` (short + extended legs) |
+| RD-154-726-01 | implemented + verified | `mac-sap` `set_pan_id` state (association-fixed PAN; conflict procedure deferred; anchor 802154-2020-p0167-§7.2.6) | `sim/src/lib.rs::round_trip_trace` drives `set_pan_id` (`::replay_twice_identical_trace`) |
+| RD-154-728-01 | implemented + verified | secured-frame opacity: header stops at aux-header start (anchor 802154-2020-p0167-p0168-§7.2.8/§7.2.10) | `inspect/tests/goldens.rs::golden_captured_air_secured_nwk_stops_chain` |
+| RD-154-7322-01 | implemented + verified | data-frame generic-header decode (anchor 802154-2020-p0174-§7.3.2.1/§7.3.2.2) | `inspect/tests/goldens.rs::golden_full_chain_mac_nwk_aps_zcl` |
+| RD-154-7322-02 | implemented + verified | data seq carried in `seq` slot (anchor 802154-2020-p0175-§7.3.2.2) | `inspect/tests/goldens.rs::golden_full_chain_mac_nwk_aps_zcl` (seq 0x5a) |
+| RD-154-7322-03 | implemented + verified | MSDU passthrough (`FramePayload`; anchor 802154-2020-p0175-§7.3.2.3) | `inspect/tests/goldens.rs::golden_full_chain_mac_nwk_aps_zcl` + `sim/src/lib.rs::round_trip_trace` delivery (`::replay_twice_identical_trace`) |
+| RD-154-734-01 | implemented + verified | `command_id` first-octet read on unsecured type-3 (anchor 802154-2020-p0176-p0177-§7.3.4) | `inspect/tests/decode_depth.rs::mac_command_legs_name_every_live_shape` |
+| RD-154-751-01 | implemented + verified | `CMD_*` 0x01–0x08; all else `UnknownCommand` (anchor 802154-2020-p0238-p0239-§7.5.1, reconcile Table 7-53 interiors) | `inspect/tests/decode_depth.rs::mac_command_legs_name_every_live_shape` |
+| RD-154-752-03 | implemented + verified | `AssocReq{capabilities}` opaque octet (anchor 802154-2020-p0240-§7.5.2, reconcile Figs 7-107/7-108 geometry) | `inspect/tests/decode_depth.rs::mac_command_legs_name_every_live_shape` (capabilities 0x8c) |
+| RD-154-753-01 | implemented + verified | `AssocResp{short_addr,status}` (anchor 802154-2020-p0241-§7.5.3, reconcile Table 7-54 interior values) | `inspect/tests/decode_depth.rs::mac_command_legs_name_every_live_shape` (0xffff / 0x02) |
+| RD-154-755-01 | implemented + verified | `DataReq` zero-content (anchor 802154-2020-p0243-§7.5.5) | `inspect/tests/decode_depth.rs::mac_command_legs_name_every_live_shape` |
+| RD-154-757-01 | implemented + verified | `Orphan` zero-content (anchor 802154-2020-p0244-§7.5.7) | `inspect/tests/decode_depth.rs::mac_command_legs_name_every_live_shape` (orphan leg) |
+| RD-154-758-01 | implemented + verified | `BeaconReq` zero-content (anchor 802154-2020-p0244-§7.5.8) | `inspect/tests/decode_depth.rs::mac_command_legs_name_every_live_shape` |
+| RD-154-7510-01 | implemented + verified | `CoordRealign{pan,coord,channel,short_addr}` (anchor 802154-2020-p0245-§7.5.10, reconcile Fig 7-111 geometry) | `inspect/tests/decode_depth.rs::mac_command_legs_name_every_live_shape` (realign leg pan 0x3761) |
+| RD-154-8235-01 | implemented (structural) | join-completion addressing update via `set_short_addr` / `set_pan_id` (no associate-confirm primitive in SAP; anchor 802154-2020-p0274-p0275-§8.2.3.5) | `sim/src/lib.rs::round_trip_trace` drives setters (`::replay_twice_identical_trace`) |
+| RD-154-831-01 | implemented + verified | `mac-sap::MacDataSap` request/confirm/cancel/poll surface; adapters hal-host/ember/ti/sim (anchor 802154-2020-p0366-§8.3.1, reconcile Table 8-87 interior) | `sim/src/lib.rs::backpressure_and_cancel_hooks` + `::round_trip_trace` |
+| RD-154-832-01 | implemented + verified | `MacAddress` / `AddrMode` / `TxRequest` / `TxHandle` (anchor 802154-2020-p0367-§8.3.2) | `mac-sap/src/lib.rs::address_constructors_scope_pan` + `sim/tests/app_transaction.rs::app_transaction_replays_deterministically` + `sim/tests/aps_transport.rs::aps_loopback_decodes_identical_fields` (data path over `MacDataSap`/`MacMgmtSap`) |
+| RD-154-832-02 | implemented + verified | `TxOptions::ACK` (anchor 802154-2020-p0368-§8.3.2, reconcile Table 8-88 interior; GTS/indirect halves have no seam — held) | `mac-sap/src/lib.rs::tx_options_bits` |
+| RD-154-832-03 | implemented + verified | queue + confirm/cancel only (`tx_queue_free` / `capacity`; anchor 802154-2020-p0370-§8.3.2; contention halves adapter-side) | `sim/src/lib.rs::backpressure_and_cancel_hooks` |
+| RD-154-833-01 | implemented + verified | `TxStatus` (Delivered/NoAck/ChannelBusy/Cancelled) + `MacError` (QueueFull/FrameTooLong/…) delivery taxonomy (anchor 802154-2020-p0373-§8.3.3) | `mac-sap/src/lib.rs::error_display_is_human_readable` + `sim/src/lib.rs` Delivered/NoAck/QueueFull paths (`::replay_twice_identical_trace`, `::script_changes_trace`, `::backpressure_and_cancel_hooks`) |
+| RD-154-834-01 | implemented + verified | `RxIndication{src,lqi,timestamp_us,msdu}` + `promiscuous_mode` cap (anchor 802154-2020-p0374-p0377-§8.3.4; IE/ranging halves deferred) | `sim/src/lib.rs::round_trip_trace` round-trip indication + `::mgmt_reports_capabilities_and_scans` |
+| RD-154-835-01 | implemented + verified | `data_cancel` ⇒ `Cancelled` / `UnknownHandle` (anchor 802154-2020-p0377-§8.3.5/§8.3.6, reconcile Tables 8-91/8-92 interiors) | `sim/src/lib.rs::backpressure_and_cancel_hooks` |
+| RD-154-6743-01 | implemented + verified | ACK expectation ⇒ Delivered/NoAck close (anchor 802154-2020-p0106-p0107-§6.7.4.3) | `sim/src/lib.rs::round_trip_trace` (Delivered) + `::script_changes_trace` (NoAck) |
+| RD-154-6744-01 | implemented + verified | timeout/seq-mismatch ⇒ `NoAck` (anchor 802154-2020-p0107-p0108-§6.7.4.4; retry budget + DSN halves have no SAP fields) | `sim/src/lib.rs::script_changes_trace` |
+| RD-154-829-01 | implemented (structural) | `MacMgmtSap::reset(cold)`; cold clears addressing (anchor 802154-2020-p0294-p0295-§8.2.9; clearing unasserted) | `sim/src/lib.rs::round_trip_trace` drives `reset` (`::replay_twice_identical_trace`) |
+| RD-154-8211-01 | implemented + verified | `energy_scan` ED slice + `energy_scan` cap (anchor 802154-2020-p0076-p0078-§6.3.1 + p0298-p0300-§8.2.11.2) | `sim/src/lib.rs::mgmt_reports_capabilities_and_scans` |
+| RD-154-843-01 | implemented + verified | `set_short_addr` / `set_extended_addr` / `set_pan_id` state (anchor 802154-2020-p0379-p0380-§8.4.3, reconcile Table 8-94 interiors) | `sim/src/lib.rs::round_trip_trace` drives setters (`::replay_twice_identical_trace`) |
+| RD-154-843-02 | implemented (structural) | `MacCapabilities` + retry/backoff/response-wait/persistence notes (no retry-budget field in SAP; anchor 802154-2020-p0381-p0382-§8.4.3, reconcile Table 8-94 interiors) | `sim/src/lib.rs::mgmt_reports_capabilities_and_scans` (three caps flags asserted) |
+| RD-154-822-01 | implemented + verified | `MacError` confirm-status family (all 10 variants; anchor 802154-2020-p0269-§8.2.2) | `mac-sap/src/lib.rs::error_display_is_human_readable` |
+| RD-154-10133-01 | implemented + verified | `Channel` 11–26 range check (anchor 802154-2020-p0431-§10.1.3.3) | `mac-sap/src/lib.rs::channel_range_checked` |
+| RD-154-922-01 | implemented (structural) | SAP carries no key parameters (unsecured-only path = security-disabled MAC); level-zero passthrough shape, gated fail-closed ⇒ `Unsupported` (anchor 802154-2020-p0402-§9.2.2) | `mac-sap/src/lib.rs::error_display_is_human_readable` (`Unsupported` renders) |
+| RD-154-944-01 | implemented + verified | aux-header opacity boundary (header stops, no aux parse; anchor 802154-2020-p0413-§9.4.1, reconcile Figs 9-5/9-6 geometry) | `inspect/tests/goldens.rs::golden_captured_air_secured_nwk_stops_chain` |
