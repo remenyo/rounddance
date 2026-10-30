@@ -21,6 +21,7 @@ to build or test this crate: the host side runs entirely over
 | `src/driver.rs` | `Driver` seam (init/deinit, channel/power, single-flight TX, RX pump, ED scan) |
 | `src/adapter.rs` | `EspAdapter<D: Driver>`: queueing, failure mapping, cap, inter-PAN |
 | `src/mock.rs` | `MockDriver`: scriptable seam double (host tests, WASM) |
+| `src/mac_cmd.rs` | MAC beacon/assoc command codec + coordinator responder (host vectors; radio carry below) |
 | `src/ffi.rs` | `esp`-only: raw 15.4 symbols missing from `esp-idf-sys` 0.38, each with header cross-reference |
 | `src/esp.rs` | `esp`-only: `EspIdfDriver` (NVS-first init, ISR-flag pumps, bounded RX mailbox) |
 | `tests/adapter_mock.rs` | 26 host-side tests: queueing, mappings, cap, inter-PAN |
@@ -135,6 +136,12 @@ Extended-address data frames (SAP returns `Unsupported`), SFD
 timestamps (confirms carry `None`, capability honestly `false`), and
 sleep scheduling. Touchlink scan bursts should call
 `restore_channel()` afterwards (inter-PAN retunes per request).
-MAC-association primitives (beacon/assoc over the air) are still
-driver-level follow-up: the join leg above starts at the steering
-survey with the coordinator's beacon ingested.
+MAC-association primitives: the beacon/assoc command codec plus the
+coordinator pending-answer responder live in `src/mac_cmd.rs` with
+OTA-pinned host vectors (`tests/mac_assoc.rs`); the join leg above
+still starts at the steering survey with the coordinator's beacon
+ingested. What remains driver-level follow-up is routing command
+frames through `EspAdapter` (it still counts them in `rx_dropped` —
+see the `adapter_drops_command_frames_today_carry_gap` pin): board
+code drives the `Driver` seam directly in promiscuous mode until
+that routing lands.

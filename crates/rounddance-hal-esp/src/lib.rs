@@ -76,6 +76,7 @@ pub mod driver;
 pub mod esp;
 #[cfg(feature = "esp")]
 pub mod ffi;
+pub mod mac_cmd;
 pub mod mock;
 
 pub use adapter::{EspAdapter, EspError, MAX_TX_POWER_DBM};
