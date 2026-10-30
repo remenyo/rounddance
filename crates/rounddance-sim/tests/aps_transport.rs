@@ -266,6 +266,71 @@ fn aps_two_node_broadcast_handoff() {
     assert_eq!(aps.payload, payload.as_slice());
 }
 
+// 05-3474-23-22511-16 + 05-3474-23-3211-03/04/05
+// (matrix): APS loopback transport is timing-independent. Four seeds
+// incl. the 0/u64::MAX edges — per-seed double runs replay the
+// identical trace + wire, and every seed preserves the exact octets
+// end to end with identical decoded fields on both layers (same
+// timing-vs-decision split as the nwk-transport matrix: Delay jitter
+// moves `queued_us` timestamps, never the header/payload decision —
+// the naive cross-seed trace pin fails on those timestamps only).
+// The jitter-only script matches the loopback functional precedent;
+// the MaybeDrop leg stays per-seed-only under
+// `aps_scenario_replays_deterministically` because drop decisions
+// diverge cross-seed by design.
+#[test]
+fn aps_transport_matrix_seeds_share_wire_and_fields() {
+    const SEEDS: [u64; 4] = [0x0000, 0x1234, 0xBEEF, u64::MAX];
+    const PAYLOAD: &[u8] = &[0xDE, 0xAD, 0xBE, 0xEF];
+    let script = || {
+        vec![ScriptAction::Delay {
+            base_us: 320,
+            jitter_us: 100,
+        }]
+    };
+    for &seed in &SEEDS {
+        let apdu = encoded_apdu(0x42, None, PAYLOAD);
+        let sent = encoded_npdu(NODE_B, &apdu);
+        let (trace_a, rx_a) = loopback_deliver(seed, &sent, script());
+        let (trace_b, rx_b) = loopback_deliver(seed, &sent, script());
+        assert_eq!(trace_a, trace_b, "per-seed trace replay, seed {seed:#x}");
+        assert_eq!(rx_a, rx_b, "per-seed wire replay, seed {seed:#x}");
+        assert_eq!(rx_a, sent, "medium preserves octets, seed {seed:#x}");
+        assert!(
+            trace_a
+                .iter()
+                .any(|l| l.contains("confirm handle=0 status=Delivered")),
+            "trace records delivery, seed {seed:#x}"
+        );
+        let npdu = nwk_decode(&rx_a).unwrap();
+        assert_eq!(npdu.header.dst_addr, NODE_B, "nwk dst pin, seed {seed:#x}");
+        assert_eq!(npdu.header.src_addr, NODE_A, "nwk src pin, seed {seed:#x}");
+        let aps = decode_data(npdu.payload).unwrap();
+        assert_eq!(
+            aps.header.dest,
+            DataDest::Unicast { dst_endpoint: 0x02 },
+            "aps dest pin, seed {seed:#x}"
+        );
+        assert_eq!(
+            aps.header.cluster_id, 0x0006,
+            "aps cluster pin, seed {seed:#x}"
+        );
+        assert_eq!(
+            aps.header.profile_id, 0x0104,
+            "aps profile pin, seed {seed:#x}"
+        );
+        assert_eq!(
+            aps.header.src_endpoint, 0x01,
+            "aps src-endpoint pin, seed {seed:#x}"
+        );
+        assert_eq!(aps.header.counter, 0x42, "aps counter pin, seed {seed:#x}");
+        assert_eq!(
+            aps.payload, PAYLOAD,
+            "cross-seed payload pin, seed {seed:#x}"
+        );
+    }
+}
+
 // Decision determinism: the same seed + script + APDU yields identical
 // traces across runs.
 #[test]
