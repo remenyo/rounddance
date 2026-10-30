@@ -4,6 +4,18 @@ on:
   push:
   pull_request:
 
+# Manual-matrix parity notes (cf. PROGRESS waves 78-82 health rows):
+# this workflow covers everything that runs on ubuntu-latest.
+# Deliberately MANUAL (kept out of this workflow, with reasons):
+# - coverage gate: needs the private corpus (corpus/text pages +
+#   mining log), which is not present in public CI. Run locally.
+# - tools/browser-real.sh: needs a real JS/WASM engine (headless
+#   Chromium). ubuntu-latest ships no browser engine; the
+#   wasmtime-driven parity-browser job below covers the same
+#   decision parity (identical pinned digest + 13 getters).
+# - lab-hardware checks (radios, sniffers, NCP probes): need bench
+#   hardware; never in CI.
+
 jobs:
   fmt:
     runs-on: ubuntu-latest
@@ -39,7 +51,7 @@ jobs:
           targets: wasm32-unknown-unknown
       - name: no_std check per protocol crate
         run: |
-          for crate in rounddance-mac-sap rounddance-nwk rounddance-aps rounddance-zdo rounddance-security rounddance-zcl rounddance-gp rounddance-commission; do
+          for crate in rounddance-mac-sap rounddance-nwk rounddance-aps rounddance-zdo rounddance-security rounddance-zcl rounddance-gp rounddance-commission rounddance-compat rounddance-direct rounddance-roles rounddance-rcp rounddance-ifc rounddance-sim rounddance-inspect; do
             cargo build -p "$crate" --no-default-features --target wasm32-unknown-unknown
           done
 
@@ -52,3 +64,50 @@ jobs:
           targets: wasm32-unknown-unknown
       # lab-arbitrator is a host-only unix/pty tool and can never build for wasm.
       - run: cargo check --workspace --exclude lab-arbitrator --target wasm32-unknown-unknown
+
+  # tools/host-wasm-check.sh: native vs wasm32-wasip1 under wasmtime
+  # must print IDENTICAL. wasmtime is not preinstalled on
+  # ubuntu-latest, so it is fetched from the official release
+  # (pinned to the locally verified version).
+  parity-host-wasm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+      - name: install wasmtime
+        run: |
+          curl -sSfL https://github.com/bytecodealliance/wasmtime/releases/download/v36.0.2/wasmtime-v36.0.2-x86_64-linux.tar.xz -o /tmp/wasmtime.tar.xz
+          tar -xf /tmp/wasmtime.tar.xz -C /tmp
+          echo "/tmp/wasmtime-v36.0.2-x86_64-linux" >> "$GITHUB_PATH"
+      - run: tools/host-wasm-check.sh
+
+  # tools/browser-check.sh: browser-shape bundle (zero imports)
+  # decisions must match native under wasmtime --invoke.
+  parity-browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: install wasmtime
+        run: |
+          curl -sSfL https://github.com/bytecodealliance/wasmtime/releases/download/v36.0.2/wasmtime-v36.0.2-x86_64-linux.tar.xz -o /tmp/wasmtime.tar.xz
+          tar -xf /tmp/wasmtime.tar.xz -C /tmp
+          echo "/tmp/wasmtime-v36.0.2-x86_64-linux" >> "$GITHUB_PATH"
+      - run: tools/browser-check.sh
+
+  # tools/c-check.sh: FFI staticlib driven from C and C++ must
+  # report DECISION-MATCH vs native. gcc/g++ are preinstalled on
+  # ubuntu-latest.
+  parity-c:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: tools/c-check.sh
