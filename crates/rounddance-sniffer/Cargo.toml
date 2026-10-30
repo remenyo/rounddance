@@ -21,6 +21,7 @@ libc = "0.2"
 rounddance-aps = { path = "../rounddance-aps" }
 rounddance-nwk = { path = "../rounddance-nwk" }
 rounddance-zcl = { path = "../rounddance-zcl" }
+rounddance-security = { path = "../rounddance-security" }
 
 [[bin]]
 name = "rd-sniff"

@@ -3,9 +3,11 @@
 //! Reads classic pcap (global header + per-packet records, any DLT —
 //! the inspector expects `LINKTYPE_IEEE802_15_4` 195 but records the
 //! link type per file for the report) and minimal pcapng (Section
-//! Header + Interface Description + Enhanced Packet blocks; other block
-//! kinds are skipped by length). Writing is pcap-only: pcapng ingest
-//! is read-only at scaffold scope.
+//! Header + Interface Description + Enhanced Packet blocks + Simple
+//! Packet blocks; other block kinds are skipped by length). Simple
+//! Packet blocks carry no timestamp (ingested with `ts_us = 0`) and no
+//! interface id (the last IDB linktype applies). Writing is pcap-only:
+//! pcapng ingest is read-only at scaffold scope.
 
 use std::io::{self, Read, Write};
 
@@ -25,6 +27,7 @@ pub const LINKTYPE_IEEE802_15_4_NOFCS: u32 = 230;
 /// pcapng block types we consume or skip.
 const PB_SHB: u32 = 0x0A0D0D0A;
 const PB_IDB: u32 = 0x00000001;
+const PB_SPB: u32 = 0x00000003;
 const PB_EPB: u32 = 0x00000006;
 
 /// One ingested packet.
@@ -179,6 +182,29 @@ fn read_pcapng(buf: &[u8]) -> Result<Vec<Packet>, IngestError> {
                     ts_us: ts,
                     linktype,
                     data: buf[pos + 28..pos + 28 + cap].to_vec(),
+                });
+            }
+            PB_SPB => {
+                // Simple Packet Block: no interface id, no timestamp.
+                // Layout is type + total + original-length + packet
+                // data (32-bit padded) + trailing total. The linktype
+                // is the last IDB seen (default 195); the timestamp is
+                // 0 (the block carries none). Scope is the reference
+                // shape with no options: extra trailing bytes past the
+                // padded packet are ignored, a short block is
+                // truncated.
+                if total < 16 {
+                    return Err(IngestError::Truncated);
+                }
+                let orig = u32le(&buf[pos + 8..pos + 12]) as usize;
+                let data_avail = total - 16;
+                if orig > data_avail {
+                    return Err(IngestError::Truncated);
+                }
+                out.push(Packet {
+                    ts_us: 0,
+                    linktype,
+                    data: buf[pos + 12..pos + 12 + orig].to_vec(),
                 });
             }
             _ => {}
