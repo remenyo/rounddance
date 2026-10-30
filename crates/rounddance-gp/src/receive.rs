@@ -485,6 +485,11 @@ const fn endpoint_of(id: GpdId) -> u8 {
 /// commissioning-range frames under no security drop even while the
 /// mode is open, and proxy-originated frames never enter the sink.
 ///
+/// Caller-clock contract: this intake takes no timestamp, so the
+/// caller ticks the parked session against its own clock before
+/// calling — otherwise a Success arriving past the reply window
+/// would still complete instead of timing out.
+///
 /// Requirements `RD-GP-02`, `RD-GP-03`, `RD-GP-05`
 /// (`14-0563-19-A36-05` dedup, `-A36-06` sink admission,
 /// `-A36-07` translation, `-A152-03` level gating).

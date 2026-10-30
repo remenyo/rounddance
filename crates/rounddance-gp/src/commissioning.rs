@@ -1,5 +1,5 @@
 //! Commissioning flows: mode entry points, translation-table
-//! population, and bidirectional-completion stubs.
+//! population, and bidirectional completion.
 //!
 //! Paraphrase-level model of doc `14-0563-19` §A.1.7.3 (GPD-side
 //! commissioning; anchors p0069-L1906-L1934), §A.3.6.2.2 (table
@@ -93,7 +93,7 @@ pub enum CommissioningState {
     Collecting,
     /// Unidirectional exchange complete.
     Commissioned,
-    /// Bidirectional exchange waiting on the reply path (stub).
+    /// Bidirectional exchange waiting on the reply path.
     AwaitingReply,
 }
 
