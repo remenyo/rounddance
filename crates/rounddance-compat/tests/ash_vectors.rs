@@ -670,3 +670,100 @@ fn ash_ack_frame_drives_tx_window_off_wire() {
     assert_eq!(tx.outstanding(), 1);
     assert_eq!(tx.retransmit_pending().start_frm, 2);
 }
+
+/// Sender reset: the link-reset primitive clears window state on the
+/// sender side (mirrors [`AshRxState::reset`] on the receiver side),
+/// so numbering restarts at zero with no frame owed.
+#[test]
+fn ash_tx_window_reset_clears_link_state() {
+    let mut tx = AshTxWindow::new();
+    for frm in 0..3u8 {
+        assert_eq!(tx.try_allocate(), Some(frm));
+    }
+    assert_eq!(tx.on_ack(0), Ok(1));
+    assert_eq!(tx.outstanding(), 2);
+    tx.reset();
+    assert_eq!(tx.outstanding(), 0);
+    assert_eq!(tx.base(), 0);
+    assert_eq!(tx.next_frm(), 0);
+    assert!(tx.can_send());
+    assert!(!tx.window_full());
+    assert!(!tx.retransmit_pending().needed());
+    assert_eq!(tx.try_allocate(), Some(0));
+    // Reset on a fresh window is a safe no-op.
+    let mut fresh = AshTxWindow::new();
+    fresh.reset();
+    assert_eq!(fresh.try_allocate(), Some(0));
+}
+
+/// Full-window wrap loopback through the streaming decoder: all
+/// seven outstanding frames cross the real wire byte-by-byte, the
+/// receiver accepts them in order, one cumulative ACK retires the
+/// whole window, fresh numbers wrap past 7 to 0, and the
+/// link-reset primitive restarts both sides. No timers, no
+/// bring-up sequencing — direct delivery only.
+#[test]
+fn ash_full_window_wrap_loopback_through_decoder() {
+    let mut tx = AshTxWindow::new();
+    let mut rx = AshRxState::new();
+    let mut dec = AshDecoder::new();
+    // Fill the whole window: frames 0..=6, one-octet payloads.
+    let mut wires = [[0u8; 32]; ASH_TX_WINDOW as usize];
+    let mut lens = [0usize; ASH_TX_WINDOW as usize];
+    for frm in 0..ASH_TX_WINDOW {
+        assert_eq!(tx.try_allocate(), Some(frm));
+        lens[frm as usize] = encode_data(frm, 0, false, &[0x40 + frm], &mut wires[frm as usize])
+            .expect("window payload must encode");
+    }
+    assert!(tx.window_full());
+    assert_eq!(tx.try_allocate(), None);
+    // Stream every frame through the decoder; each outcome is
+    // cross-checked against one-shot `decode` before the receiver
+    // files the frame number.
+    for frm in 0..ASH_TX_WINDOW {
+        let wire = &wires[frm as usize][..lens[frm as usize]];
+        let (want, used) = decode(wire).expect("window frame must decode");
+        assert_eq!(used, wire.len());
+        let outcomes = pump_ash(&mut dec, wire);
+        assert_eq!(outcomes.len(), 1, "frame {frm} must yield one outcome");
+        let AshOutcome::Frame(got) = outcomes[0] else {
+            panic!("frame {frm} must decode through the stream");
+        };
+        assert_eq!(got, want);
+        let AshKind::Data {
+            frm_num,
+            re_tx: false,
+            ..
+        } = got.kind
+        else {
+            panic!("frame {frm} must be fresh DATA");
+        };
+        assert_eq!(frm_num, frm);
+        assert_eq!(rx.on_data(frm_num), Ok(RxOutcome::Accept));
+        assert_eq!(got.payload_bytes(), &[0x40 + frm]);
+    }
+    assert_eq!(rx.ack_num(), 6);
+    assert_eq!(rx.expected(), 7);
+    // One cumulative ACK(6) off the real wire retires all seven.
+    let mut ack_wire = [0u8; 16];
+    let n = encode_ack(rx.ack_num(), &mut ack_wire).expect("ACK must encode");
+    let (ack, _) = decode(&ack_wire[..n]).expect("ACK must decode");
+    let AshKind::Ack { ack_num } = ack.kind else {
+        panic!("ACK frame expected");
+    };
+    assert_eq!(tx.on_ack(ack_num), Ok(7));
+    assert_eq!(tx.outstanding(), 0);
+    assert!(!tx.retransmit_pending().needed());
+    assert_eq!((dec.dropped(), dec.consecutive_bad()), (0, 0));
+    // Wrap: fresh allocation continues past 7 back to 0.
+    assert_eq!(tx.try_allocate(), Some(7));
+    assert_eq!(tx.try_allocate(), Some(0));
+    // Link-reset primitive restarts both sides at zero.
+    tx.reset();
+    rx.reset();
+    assert_eq!(tx.outstanding(), 0);
+    assert_eq!((tx.base(), tx.next_frm()), (0, 0));
+    assert!(tx.can_send());
+    assert_eq!(tx.try_allocate(), Some(0));
+    assert_eq!((rx.expected(), rx.ack_num()), (0, 0));
+}

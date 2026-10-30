@@ -781,6 +781,15 @@ impl AshTxWindow {
         }
     }
 
+    /// Reset link state: no frame owed, both cursors at zero (the
+    /// sender-side half of a link reset; the receiver half is
+    /// [`AshRxState::reset`]).
+    pub fn reset(&mut self) {
+        self.base = 0;
+        self.next_frm = 0;
+        self.outstanding = 0;
+    }
+
     /// Oldest unacknowledged frame number (`base`; meaningful only
     /// while [`Self::outstanding`] is nonzero).
     #[must_use]
