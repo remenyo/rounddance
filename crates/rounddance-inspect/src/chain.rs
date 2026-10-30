@@ -10,8 +10,8 @@
 //! Named sub-dissector legs ride alongside the stop notes: fixed-shape
 //! MAC command payloads ([`mac`](crate::mac)), NWK command payloads
 //! on unsecured as well as verified-open legs ([`nwkcmd`](crate::nwkcmd)),
-//! the transport-key APS command payload on unsecured as well as
-//! verified-open legs ([`apscmd`](crate::apscmd)),
+//! the transport-key and update-device APS command payloads on
+//! unsecured as well as verified-open legs ([`apscmd`](crate::apscmd)),
 //! the Touchlink envelope on broadcast-PAN outers
 //! ([`touchlink`](crate::touchlink)), the ZDO envelope on profile
 //! `0x0000` ([`zdo`](crate::zdo)) instead of a ZCL misparse, and the

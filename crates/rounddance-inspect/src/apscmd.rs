@@ -1,5 +1,5 @@
-//! APS transport-key command dissector: names the join leg the chain
-//! used to abandon at `trailing`.
+//! APS transport-key and update-device command dissector: names the
+//! join legs the chain used to abandon at `trailing`.
 //!
 //! Every other stack layer already earns a named sub-leg (MAC command,
 //! NWK command, ZDO, ZCL, Green Power, Touchlink); APS command frames
@@ -7,19 +7,27 @@
 //! only the header command identifier filed. This module names the
 //! transport-key command (`0x05`, the frame the Trust-Center-first
 //! join turns on) by its key type over the live and spec-agreed
-//! shapes: the network-key descriptor is an exact 33 octets (key +
-//! sequence + destination + source), the Trust-Center-link and
-//! application-link descriptors carry optional trailing TLVs so only
-//! their fixed prefixes gate the name. Key bytes are never rendered —
-//! the node carries the key type alone, exactly as Touchlink order
-//! bodies keep wrapped keys sealed. Reserved key types and every other
-//! command identifier file as [`ApsCmdKind::Unknown`] with the
-//! identifier, never a guess. Only an empty payload refuses outright.
+//! shapes, and the update-device command (`0x06`, the router-to-Trust
+//! Center status report) by its status + short over the spec Fig 4-13
+//! fixed prefix: the 8-octet device address, the 2-octet device short
+//! address, and the 1-octet status, with optional R23 JoinerTLVs after
+//! them, so only the 11-octet fixed prefix gates the name. Key bytes
+//! are never rendered — the transport-key node carries the key type
+//! alone, exactly as Touchlink order bodies keep wrapped keys sealed;
+//! the update-device 8-octet EUI stays in the capture (the
+//! network-report EPID precedent). Status semantics are never
+//! validated (the network-status precedent). Reserved key types and
+//! every other command identifier file as [`ApsCmdKind::Unknown`] with
+//! the identifier, never a guess. Only an empty payload refuses
+//! outright.
 
 use crate::tree::{ApsCmdKind, ApsCmdNode};
 
 /// APS transport-key command identifier (Table 4-31).
 pub const CMD_TRANSPORT_KEY: u8 = 0x05;
+
+/// APS update-device command identifier (Table 4-31).
+pub const CMD_UPDATE_DEVICE: u8 = 0x06;
 
 /// Standard key type: network key (Table 4-9; 33-octet descriptor).
 pub const KEY_TYPE_NETWORK: u8 = 0x01;
@@ -65,6 +73,21 @@ pub fn decode(cmd_id: u8, buf: &[u8]) -> Result<(ApsCmdNode, usize), ApsCmdError
             };
             if fixed {
                 ApsCmdKind::TransportKey { key_type }
+            } else {
+                ApsCmdKind::Unknown
+            }
+        }
+        // Update-device: the Fig 4-13 fixed prefix (8-octet device
+        // address + 2-octet short + 1-octet status) gates the name;
+        // optional R23 JoinerTLVs after it are admitted unparsed, so
+        // the gate is a minimum length. Status semantics are never
+        // validated here.
+        CMD_UPDATE_DEVICE => {
+            if len >= 11 {
+                ApsCmdKind::UpdateDevice {
+                    status: buf[10],
+                    short_addr: u16::from_le_bytes([buf[8], buf[9]]),
+                }
             } else {
                 ApsCmdKind::Unknown
             }

@@ -107,9 +107,11 @@ pub struct ApsNode {
 
 /// APS command payload summary: the named sub-dissector for APS
 /// command frames, on unsecured as well as verified-open legs.
-/// Only the transport-key command earns a shaped name (key type over
-/// the live and spec-agreed fixed shapes; key bytes stay sealed,
-/// never rendered); anything else files as `Unknown` with its
+/// The transport-key and update-device commands earn shaped names
+/// (key type over the live and spec-agreed fixed shapes, key bytes
+/// stay sealed, never rendered; device status + short over the
+/// spec-agreed fixed prefix, the 8-octet EUI stays in the capture);
+/// anything else files as `Unknown` with its
 /// command identifier, never a guess.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ApsCmdNode {
@@ -132,6 +134,19 @@ pub enum ApsCmdKind {
         /// Standard key type (`0x01` network, `0x03` application
         /// link, `0x04` Trust-Center link).
         key_type: u8,
+    },
+    /// Update-device command: device status + short address (the
+    /// 8-octet device EUI and any R23 JoinerTLVs stay in the
+    /// capture, never in the node — the network-report EPID
+    /// precedent). Status semantics are the stack's, never
+    /// validated here — the network-status precedent.
+    UpdateDevice {
+        /// Device status octet (Table 4-14: `0x00`-`0x03`
+        /// assigned, `0x04`-`0x07` reserved).
+        status: u8,
+        /// 16-bit network address of the device whose status is
+        /// being updated.
+        short_addr: u16,
     },
     /// None of the named shapes: identifier filed, payload unparsed.
     Unknown,

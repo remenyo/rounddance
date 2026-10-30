@@ -1238,6 +1238,12 @@ fn apscmd_text(k: &ApsCmdKind) -> String {
         ApsCmdKind::TransportKey { key_type } => {
             format!("transport-key keytype={key_type:#04x}")
         }
+        ApsCmdKind::UpdateDevice { status, short_addr } => {
+            format!(
+                "update-device status={status:#04x} short={}",
+                hex16(short_addr)
+            )
+        }
         ApsCmdKind::Unknown => String::from("unknown"),
     }
 }
@@ -1247,6 +1253,10 @@ fn apscmd_json(n: &ApsCmdNode) -> String {
         ApsCmdKind::TransportKey { key_type } => {
             ("transport-key", format!(",\"key_type\":{key_type}"))
         }
+        ApsCmdKind::UpdateDevice { status, short_addr } => (
+            "update-device",
+            format!(",\"status\":{status},\"short\":{short_addr}"),
+        ),
         ApsCmdKind::Unknown => ("unknown", String::new()),
     };
     format!(
