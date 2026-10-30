@@ -47,7 +47,9 @@
 //! ```
 //!
 //! Requirement traceability (repo-minted, MINTED-pending-confirm):
-//! `RD-COMPAT-11` (ASH link-control codec + ack-window state machine).
+//! `RD-COMPAT-11` (ASH link-control codec, plus the streaming
+//! [`AshDecoder`] byte pump over the same wire shape, plus ack-window
+//! state machine).
 //!
 //! # Ack-window state machine ([`AshTxWindow`], [`AshRxState`])
 //!
@@ -566,6 +568,166 @@ pub fn decode(buf: &[u8]) -> Result<(AshFrame, usize), AshError> {
         frame.payload[..payload_len].copy_from_slice(&body[2..2 + payload_len]);
     }
     Ok((frame, end + 1))
+}
+
+/// Why a byte run was dropped instead of decoded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AshDropReason {
+    /// `LEN` disagrees with the delimited body length, names a body
+    /// shorter than `ASH_CTRL + CRC`, breaks the control kind's body
+    /// contract, or the run overflowed the bounded buffer before any
+    /// closing [`FLAG`].
+    BadLength,
+    /// CRC-16/CCITT mismatch (frame dropped, never decoded).
+    BadCrc,
+    /// `ESC` with no following octet before the closing [`FLAG`].
+    BadEscape,
+    /// Control octet matches no known link-control shape (see
+    /// [`decode_control`]): well-delimited but unroutable. EZSP has
+    /// no twin: any control octet still decodes there, and unknown
+    /// command ids are refused one layer up by the adapter.
+    BadControl,
+}
+
+/// One decoder step result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AshOutcome {
+    /// A complete, CRC-clean frame.
+    Frame(AshFrame),
+    /// A malformed run was skipped; the parser re-armed at [`FLAG`].
+    Dropped(AshDropReason),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AshState {
+    Sync,
+    InFrame,
+    Skip,
+}
+
+/// Streaming ASH link-control parser: feed wire bytes, collect
+/// outcomes.
+///
+/// Bytes before the first [`FLAG`] are skipped silently (line noise,
+/// a peer mid-frame on attach). The stuffed body between the flags is
+/// accumulated verbatim and validated by the same [`decode`] the
+/// one-shot path uses, so streaming and queued framing agree by
+/// construction: a `LEN` mismatch surfaces as
+/// [`AshDropReason::BadLength`], a checksum mismatch as
+/// [`AshDropReason::BadCrc`], a dangling [`ESC`] as
+/// [`AshDropReason::BadEscape`], and an unknown control shape as
+/// [`AshDropReason::BadControl`]. A run that outgrows the bounded
+/// buffer before any closing flag drops once as `BadLength` and its
+/// tail through the run's flag is swallowed, so one overlong run can
+/// never wedge the stream nor double-count. A closing [`FLAG`] never
+/// doubles as the next opener — back-to-back frames still need their
+/// own opener, exactly where one-shot `decode` resumes. It never
+/// panics and holds no allocator state.
+#[derive(Clone, Debug)]
+pub struct AshDecoder {
+    state: AshState,
+    buf: [u8; MAX_ENCODED_ASH],
+    len: usize,
+    dropped: u32,
+    consecutive_bad: u32,
+}
+
+impl AshDecoder {
+    /// Parser waiting at [`FLAG`], counters zero.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            state: AshState::Sync,
+            buf: [0; MAX_ENCODED_ASH],
+            len: 0,
+            dropped: 0,
+            consecutive_bad: 0,
+        }
+    }
+
+    /// Total dropped runs so far (diagnostic).
+    #[must_use]
+    pub const fn dropped(&self) -> u32 {
+        self.dropped
+    }
+
+    /// Dropped runs since the last good frame (desync meter).
+    #[must_use]
+    pub const fn consecutive_bad(&self) -> u32 {
+        self.consecutive_bad
+    }
+
+    fn drop(&mut self, reason: AshDropReason) -> AshOutcome {
+        self.dropped = self.dropped.saturating_add(1);
+        self.consecutive_bad = self.consecutive_bad.saturating_add(1);
+        AshOutcome::Dropped(reason)
+    }
+
+    /// Feed one byte; at most one outcome per call (`None` while the
+    /// frame is still arriving or noise is being skipped).
+    pub fn push_byte(&mut self, byte: u8) -> Option<AshOutcome> {
+        match self.state {
+            AshState::Sync => {
+                if byte == FLAG {
+                    self.buf[0] = FLAG;
+                    self.len = 1;
+                    self.state = AshState::InFrame;
+                }
+                None
+            }
+            AshState::InFrame => {
+                if byte == FLAG {
+                    // `len >= 1` by construction, so room for the
+                    // closer always exists.
+                    self.buf[self.len] = FLAG;
+                    self.len += 1;
+                    self.state = AshState::Sync;
+                    return Some(self.close());
+                }
+                if self.len >= self.buf.len() {
+                    // Overlong run: drop once, swallow the tail
+                    // through the run's flag so it cannot double-count.
+                    self.state = AshState::Skip;
+                    self.len = 0;
+                    return Some(self.drop(AshDropReason::BadLength));
+                }
+                self.buf[self.len] = byte;
+                self.len += 1;
+                None
+            }
+            AshState::Skip => {
+                if byte == FLAG {
+                    self.state = AshState::Sync;
+                }
+                None
+            }
+        }
+    }
+
+    /// Validate one `FLAG .. FLAG` run through [`decode`].
+    fn close(&mut self) -> AshOutcome {
+        let run = &self.buf[..self.len];
+        self.len = 0;
+        match decode(run) {
+            Ok((frame, _)) => {
+                self.consecutive_bad = 0;
+                AshOutcome::Frame(frame)
+            }
+            Err(AshError::BadCrc) => self.drop(AshDropReason::BadCrc),
+            Err(AshError::BadEscape) => self.drop(AshDropReason::BadEscape),
+            Err(AshError::BadControl) => self.drop(AshDropReason::BadControl),
+            // `BadFlag`/`Truncated` cannot name a run that opens and
+            // closes with `FLAG`; every other decode refusal is a
+            // length-discipline refusal.
+            Err(_) => self.drop(AshDropReason::BadLength),
+        }
+    }
+}
+
+impl Default for AshDecoder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Largest count of DATA frames the sender may leave unacknowledged

@@ -9,9 +9,9 @@
 
 use rounddance_compat::ash::{
     decode, decode_control, encode_ack, encode_data, encode_error, encode_nak, encode_rst,
-    encode_rstack, next_num, pack_data_header, AshError, AshKind, AshRxState, AshTxWindow,
-    RxOutcome, ACK_BASE, ASH_TX_WINDOW, ERROR_CTRL, MAX_ASH_DATA, NAK_BASE, NUM_MASK, RSTACK_CTRL,
-    RST_CTRL,
+    encode_rstack, next_num, pack_data_header, AshDecoder, AshDropReason, AshError, AshKind,
+    AshOutcome, AshRxState, AshTxWindow, RxOutcome, ACK_BASE, ASH_TX_WINDOW, ERROR_CTRL,
+    MAX_ASH_DATA, MAX_ENCODED_ASH, NAK_BASE, NUM_MASK, RSTACK_CTRL, RST_CTRL,
 };
 use rounddance_compat::ember::FLAG;
 
@@ -279,6 +279,237 @@ fn ash_carries_ezsp_frame_body() {
         }
     );
     assert_eq!(frame.payload_bytes(), wire_body);
+}
+
+/// Feed every byte, collecting the non-silent outcomes.
+fn pump_ash(dec: &mut AshDecoder, bytes: &[u8]) -> Vec<AshOutcome> {
+    let mut out = Vec::new();
+    for b in bytes {
+        if let Some(o) = dec.push_byte(*b) {
+            out.push(o);
+        }
+    }
+    out
+}
+
+/// Streaming byte pin: FLAG | LEN=6 | CTRL=0x11 (frm=1, ack=2) |
+/// `00 01 00` | CRC16-LE(`11 00 01 00` = 0xDAE2) | FLAG. The CRC is
+/// hand-computed through the independent CRC-16/CCITT oracle
+/// (`crc16(b"123456789") == 0x29B1` pins the oracle itself), and the
+/// same bytes decode identically through one-shot `decode`.
+#[test]
+fn ash_decoder_byte_pinned_vector() {
+    use rounddance_compat::ember::crc16;
+    assert_eq!(crc16(b"123456789"), 0x29B1);
+    assert_eq!(crc16(&[0x11, 0x00, 0x01, 0x00]), 0xDAE2);
+    let wire = [FLAG, 0x06, 0x11, 0x00, 0x01, 0x00, 0xE2, 0xDA, FLAG];
+    let (want, used) = decode(&wire).unwrap();
+    assert_eq!(used, wire.len());
+    let mut dec = AshDecoder::new();
+    for b in &wire[..wire.len() - 1] {
+        assert_eq!(dec.push_byte(*b), None);
+    }
+    let Some(AshOutcome::Frame(got)) = dec.push_byte(wire[wire.len() - 1]) else {
+        panic!("pinned wire must decode");
+    };
+    assert_eq!(got, want);
+    assert_eq!(
+        got.kind,
+        AshKind::Data {
+            frm_num: 1,
+            ack_num: 2,
+            re_tx: false
+        }
+    );
+    assert_eq!(got.payload_bytes(), &[0x00, 0x01, 0x00]);
+    assert_eq!((dec.dropped(), dec.consecutive_bad()), (0, 0));
+}
+
+/// Split feeds reassemble to the same frame the one-shot `decode`
+/// returns, however the bytes are chunked — with FLAG/ESC octets in
+/// the payload so the stuffing path is exercised too.
+#[test]
+fn ash_decoder_split_feed_reassembles() {
+    let mut raw = [0u8; MAX_ENCODED_ASH];
+    let payload = [FLAG, 0x7D, 0x08, 0x00];
+    let n = encode_data(3, 4, false, &payload, &mut raw).unwrap();
+    let (want, used) = decode(&raw[..n]).unwrap();
+    assert_eq!(used, n);
+    for split in [1usize, 2, 5, 7, 9] {
+        let mut dec = AshDecoder::new();
+        let mut frames = Vec::new();
+        for chunk in raw[..n].chunks(split) {
+            for o in pump_ash(&mut dec, chunk) {
+                frames.push(o);
+            }
+        }
+        assert_eq!(frames.len(), 1, "split {split}");
+        let AshOutcome::Frame(got) = frames[0] else {
+            panic!("split {split} must yield a frame");
+        };
+        assert_eq!(got, want, "split {split}");
+    }
+}
+
+/// Line noise ahead of FLAG is skipped silently; a LEN that disagrees
+/// with the delimited body drops one run and re-arms, so the next
+/// good frame still decodes and the desync meter resets.
+#[test]
+fn ash_decoder_resyncs_over_noise_and_bad_len() {
+    let mut raw = [0u8; 32];
+    let n = encode_data(1, 2, false, &[0xAA], &mut raw).unwrap();
+    let mut bad = [0u8; 32];
+    bad[..n].copy_from_slice(&raw[..n]);
+    bad[1] = bad[1].wrapping_add(1);
+    assert_eq!(decode(&bad[..n]), Err(AshError::BadLength));
+    let mut dec = AshDecoder::new();
+    // Noise with no FLAG: silent.
+    assert!(pump_ash(&mut dec, &[0x00, 0x55, 0x13]).is_empty());
+    // LEN mismatch: one BadLength drop, then re-armed.
+    assert_eq!(
+        pump_ash(&mut dec, &bad[..n]),
+        [AshOutcome::Dropped(AshDropReason::BadLength)]
+    );
+    assert_eq!((dec.dropped(), dec.consecutive_bad()), (1, 1));
+    // The good frame still decodes; the meter resets.
+    let outcomes = pump_ash(&mut dec, &raw[..n]);
+    assert_eq!(outcomes.len(), 1);
+    let AshOutcome::Frame(frame) = outcomes[0] else {
+        panic!("good frame must decode after a drop");
+    };
+    assert_eq!(frame.payload_bytes(), &[0xAA]);
+    assert_eq!(dec.consecutive_bad(), 0);
+    assert_eq!(dec.dropped(), 1);
+}
+
+/// A flipped body octet fails the CRC: one `BadCrc` drop, counters
+/// tick, and the stream re-arms for the next frame.
+#[test]
+fn ash_decoder_bad_crc_drops_and_rearms() {
+    let mut raw = [0u8; 32];
+    let n = encode_data(1, 2, false, &[0xAA, 0x10], &mut raw).unwrap();
+    let mut bad = [0u8; 32];
+    bad[..n].copy_from_slice(&raw[..n]);
+    bad[n - 3] ^= 0x01;
+    assert_eq!(decode(&bad[..n]), Err(AshError::BadCrc));
+    let mut dec = AshDecoder::new();
+    assert_eq!(
+        pump_ash(&mut dec, &bad[..n]),
+        [AshOutcome::Dropped(AshDropReason::BadCrc)]
+    );
+    assert_eq!((dec.dropped(), dec.consecutive_bad()), (1, 1));
+    let outcomes = pump_ash(&mut dec, &raw[..n]);
+    assert!(matches!(outcomes[..], [AshOutcome::Frame(_)]));
+    assert_eq!((dec.dropped(), dec.consecutive_bad()), (1, 0));
+}
+
+/// A dangling ESC just before the closing FLAG is a `BadEscape` drop
+/// (same verdict the one-shot `decode` returns on the same bytes),
+/// and the stream re-arms for the next frame.
+#[test]
+fn ash_decoder_dangling_escape_drops() {
+    // Hand-built: ACK ack=3 (`0x98`) plus one body octet, closed by
+    // an ESC with no following octet before the FLAG.
+    let wire = [FLAG, 0x03, 0x98, 0x41, 0x7D, FLAG];
+    assert_eq!(decode(&wire), Err(AshError::BadEscape));
+    let mut dec = AshDecoder::new();
+    assert_eq!(
+        pump_ash(&mut dec, &wire),
+        [AshOutcome::Dropped(AshDropReason::BadEscape)]
+    );
+    assert_eq!((dec.dropped(), dec.consecutive_bad()), (1, 1));
+    // Re-armed: a good frame decodes next.
+    let mut raw = [0u8; 32];
+    let n = encode_ack(2, &mut raw).unwrap();
+    let outcomes = pump_ash(&mut dec, &raw[..n]);
+    assert!(matches!(outcomes[..], [AshOutcome::Frame(_)]));
+    assert_eq!(dec.consecutive_bad(), 0);
+}
+
+/// A run with no closing FLAG inside the bounded buffer drops exactly
+/// once: the overflow byte ends the run, the tail through the run's
+/// FLAG is swallowed, and the next good frame decodes.
+#[test]
+fn ash_decoder_overflow_drops_once_and_rearms() {
+    let mut raw = [0u8; 32];
+    let n = encode_data(3, 1, false, &[0x01], &mut raw).unwrap();
+    // FLAG-led run of non-FLAG octets longer than the bounded
+    // buffer, closed by its own FLAG: the overflow trips long before
+    // the closer arrives.
+    let mut overlong = [0x55u8; MAX_ENCODED_ASH + 2];
+    overlong[0] = FLAG;
+    overlong[MAX_ENCODED_ASH + 1] = FLAG;
+    let mut dec = AshDecoder::new();
+    let outcomes = pump_ash(&mut dec, &overlong);
+    assert_eq!(outcomes, [AshOutcome::Dropped(AshDropReason::BadLength)]);
+    assert_eq!((dec.dropped(), dec.consecutive_bad()), (1, 1));
+    let outcomes = pump_ash(&mut dec, &raw[..n]);
+    assert!(matches!(outcomes[..], [AshOutcome::Frame(_)]));
+    assert_eq!((dec.dropped(), dec.consecutive_bad()), (1, 0));
+}
+
+/// Back-to-back frames on one feed decode in order with no drops.
+#[test]
+fn ash_decoder_back_to_back_frames() {
+    let mut first = [0u8; 32];
+    let n1 = encode_data(0, 0, false, &[0x01], &mut first).unwrap();
+    let mut second = [0u8; 32];
+    let n2 = encode_data(1, 0, false, &[0x02, 0x03], &mut second).unwrap();
+    let mut wire = [0u8; 64];
+    wire[..n1].copy_from_slice(&first[..n1]);
+    wire[n1..n1 + n2].copy_from_slice(&second[..n2]);
+    let mut dec = AshDecoder::new();
+    let outcomes = pump_ash(&mut dec, &wire[..n1 + n2]);
+    assert_eq!(outcomes.len(), 2);
+    let [AshOutcome::Frame(a), AshOutcome::Frame(b)] = outcomes[..] else {
+        panic!("back-to-back frames must both decode");
+    };
+    assert_eq!(
+        (a.kind, b.kind),
+        (
+            AshKind::Data {
+                frm_num: 0,
+                ack_num: 0,
+                re_tx: false
+            },
+            AshKind::Data {
+                frm_num: 1,
+                ack_num: 0,
+                re_tx: false
+            },
+        )
+    );
+    assert_eq!(a.payload_bytes(), &[0x01]);
+    assert_eq!(b.payload_bytes(), &[0x02, 0x03]);
+    assert_eq!(dec.dropped(), 0);
+}
+
+/// A CRC-clean frame with a control octet matching no known shape
+/// (`7E 03 C3 DF 08 7E`, CRC `C3` = 0x08DF via the oracle) is
+/// well-delimited but unroutable: one `BadControl` drop — the same
+/// verdict one-shot `decode` returns — and the stream re-arms.
+#[test]
+fn ash_decoder_bad_control_drops_and_rearms() {
+    use rounddance_compat::ember::crc16;
+    assert_eq!(crc16(b"123456789"), 0x29B1);
+    assert_eq!(crc16(&[0xC3]), 0x08DF);
+    let wire = [FLAG, 0x03, 0xC3, 0xDF, 0x08, FLAG];
+    assert_eq!(decode(&wire), Err(AshError::BadControl));
+    let mut dec = AshDecoder::new();
+    assert_eq!(
+        pump_ash(&mut dec, &wire),
+        [AshOutcome::Dropped(AshDropReason::BadControl)]
+    );
+    assert_eq!((dec.dropped(), dec.consecutive_bad()), (1, 1));
+    // Re-armed: a good frame decodes next and resets the meter.
+    let mut raw = [0u8; 32];
+    let n = encode_ack(2, &mut raw).unwrap();
+    let outcomes = pump_ash(&mut dec, &raw[..n]);
+    let [AshOutcome::Frame(frame)] = outcomes[..] else {
+        panic!("good frame must decode after a drop");
+    };
+    assert_eq!(frame.kind, AshKind::Ack { ack_num: 2 });
+    assert_eq!((dec.dropped(), dec.consecutive_bad()), (1, 0));
 }
 
 /// Sender window: fresh numbers allocate in order, the window fills
