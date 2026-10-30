@@ -1886,25 +1886,19 @@ folds into the per-row anchor, and a future 2024 diff must reintroduce
 REV disambiguation. Anchors are PDF-page + clause (no printed line
 numbers in this extraction); `reconcile` flags from the staged files
 carry over — table/figure interiors freeze PDF-side before constants
-harden. 43 repo-minted IDs below, MINTED-pending-confirm; 10 staged
-rows held with cause (not minted): scratch-only verifiers (sole pin in
-`~/hwscratch/w84-goal-r7/verify/tests/scratch.rs`, 8 passing,
-promotable to repo tests) — `RD-154-112-01`
-(`sap_bounds_and_options`), `-7227-01` (`ack_branch_shapes`),
-`-7229-01` (`mode1_and_truncation_are_typed` +
-`nonenone_pan_tracks_version`), `-733-01` (`ack_branch_shapes`),
-`-754-01` / `-756-01` (`disassoc_and_panconflict`), `-7510-02`
-(`realign_page_form_is_length_refused`); pin-less structural
+harden. 50 repo-minted IDs below, MINTED-pending-confirm; the 7 formerly-held
+scratch-only verifiers are minted below with repo pins
+(`inspect/tests/mac_154_edges.rs`, promoted from the w84 scratch, 8/8
+green); 3 staged rows held with cause (not minted): pin-less structural
 boundaries — `-6742-01` (no NONE-with-confirm test in repo),
 `-921-01` / `-673-01` (absence boundaries: SAP carries no key
 parameters; covered positively by `RD-154-922-01` /
 `RD-154-834-01`). The 15 staged-but-not-minted items from the wave
 files stand as recorded (FFD/RFD roles, frame-pending use, ack
 encode/discipline, assoc/disassociate choreography, purge, no-ack
-classes, outgoing secure-path stamping). The w84 scratch legs
-further corroborate the mixed-pin rows below (`-7222-01`, `-7223-01`,
-`-7226-02`, `-72210-01`, `-734-01`, `-751-01`) and stay promotable
-evidence, not pins. Wording in code/tests is paraphrase only (D1).
+classes, outgoing secure-path stamping). The mac_154_edges legs corroborate the mixed-pin rows below
+(`-7222-01`, `-7223-01`, `-7226-02`, `-72210-01`, `-734-01`, `-751-01`)
+as repo pins. Wording in code/tests is paraphrase only (D1).
 
 | Requirement ID | State | Implementing code | Verifying test |
 |----------------|-------|-------------------|----------------|
@@ -1951,3 +1945,44 @@ evidence, not pins. Wording in code/tests is paraphrase only (D1).
 | RD-154-10133-01 | implemented + verified | `Channel` 11–26 range check (anchor 802154-2020-p0431-§10.1.3.3) | `mac-sap/src/lib.rs::channel_range_checked` |
 | RD-154-922-01 | implemented (structural) | SAP carries no key parameters (unsecured-only path = security-disabled MAC); level-zero passthrough shape, gated fail-closed ⇒ `Unsupported` (anchor 802154-2020-p0402-§9.2.2) | `mac-sap/src/lib.rs::error_display_is_human_readable` (`Unsupported` renders) |
 | RD-154-944-01 | implemented + verified | aux-header opacity boundary (header stops, no aux parse; anchor 802154-2020-p0413-§9.4.1, reconcile Figs 9-5/9-6 geometry) | `inspect/tests/goldens.rs::golden_captured_air_secured_nwk_stops_chain` |
+| RD-154-112-01 | implemented + verified | `mac-sap::MAX_PHY_PSDU_LEN` 127 (anchor Table 11-1 §11.2, p461, reconcile) | `inspect/tests/mac_154_edges.rs::sap_bounds_and_options` |
+| RD-154-7227-01 | implemented + verified | `decode` `seq_present` (suppression bit) | `inspect/tests/mac_154_edges.rs::ack_branch_shapes` (suppressed ack leg) |
+| RD-154-7229-01 | implemented + verified | `decode` mode-1 refusal; None-addressing parse | `inspect/tests/mac_154_edges.rs::mode1_and_truncation_are_typed` + `nonenone_pan_tracks_version` |
+| RD-154-733-01 | implemented + verified | ack branch: 3-octet minimal shape, longer tail kept as payload | `inspect/tests/mac_154_edges.rs::ack_branch_shapes` |
+| RD-154-754-01 | implemented + verified | `Disassoc{reason}` (anchor Table 7-11 §7.5) | `inspect/tests/mac_154_edges.rs::disassoc_and_panconflict` |
+| RD-154-756-01 | implemented + verified | `PanConflict` zero-content (anchor Table 7-11 §7.5) | `inspect/tests/mac_154_edges.rs::disassoc_and_panconflict` |
+| RD-154-7510-02 | implemented + verified | page-present form ⇒ `Length` refusal by design (anchor §7.5.10 p245–246) | `inspect/tests/mac_154_edges.rs::realign_page_form_is_length_refused` |
+
+## Wave-87 traceability — IEEE 802.15.4-2024 MAC diff (CONFIRM/REFINE over wave-84)
+
+Source doc: IEEE Std 802.15.4-2024 (doc 802154, rev 2024). All wording
+is paraphrase (D1); identifiers and numeric values cited, never spec
+text. Repo-minted IDs (`RD-154-24-<clause>-<seq>`, dots stripped),
+one-to-one with the staged diff file
+(`~/hwscratch/w87-154diff/requirements-wave-802154-2024-diff.md`); each
+row states its 2020 counterpart (`RD-154-<clause>-<seq>`) as CONFIRMED
+(same behavior, new anchor), REFINED (same behavior, noted delta), or
+NEW-COVERED in the implementing-code cell. Anchors are PDF-page + clause
+(no printed line numbers in this extraction). 13 repo-minted IDs below,
+MINTED-pending-confirm; 12 staged-but-not-minted items stand with cause
+in the staged file (suspendable status value, suite agility, EBSN note,
+scan-duration internals, TxOptions radio elements, confirm/indication
+richness, dropped unsecured-association sentence, FFD/RFD retirement
+context, plus U-24-01 table overlap ambiguity). Wording in code/tests is
+paraphrase only (D1).
+
+| Requirement ID | State | Implementing code | Verifying test |
+|----------------|-------|-------------------|----------------|
+| RD-154-24-751-01 | implemented + verified | `mac.rs::decode` `CMD_*` 0x01–0x08; all else `UnknownCommand` (anchor Table 7-11 §7.5.1 p0107–0108, reconcile) | `inspect/tests/decode_depth.rs::mac_command_legs_name_every_live_shape` + `inspect/tests/mac_154_edges.rs::unmodeled_ids_stay_unknown |
+| RD-154-24-752-03 | implemented + verified | `AssocReq{capabilities}` opaque octet (anchor Fig 10-157 §10.21.5.1 p0362, reconcile; bit 5 now suspendable-mark, octet shape unchanged) | `inspect/tests/decode_depth.rs::mac_command_legs_name_every_live_shape` (capabilities octet leg) |
+| RD-154-24-7510-02 | implemented + verified | page-present form ⇒ `Length` refusal by design (anchor §7.5.4 p0109–0110; trailing fields renamed page→extended-channel, 8-octet no-page shape unchanged) | `inspect/tests/mac_154_edges.rs::realign_page_form_is_length_refused |
+| RD-154-24-733-01 | implemented + verified | ack branch: 3-octet minimal shape, longer tail kept as payload (anchor §7.3.3 p0090–0092; U-01 persists, no new ambiguity) | `inspect/tests/mac_154_edges.rs::ack_branch_shapes |
+| RD-154-24-843-01 | implemented + verified | `set_short_addr`/`set_extended_addr`/`set_pan_id` state (anchors Table 8-36 §8.4.3 p0151–0156 + Table 10-111 p0374, reconcile; four attributes relocated, values unchanged) | `sim/src/lib.rs::round_trip_trace` drives setters |
+| RD-154-24-843-02 | implemented (structural) | `MacCapabilities` + retry/backoff/response-wait notes (anchor Table 8-36; beacon wording only) | structural (caps asserted in [SIM] mgmt test) |
+| RD-154-24-112-01 | implemented + verified | `mac-sap::MAX_PHY_PSDU_LEN` 127 (anchor Table 12-2 `phyMaxPacketSize` §12.3.2 p0602 + PHR length §13.1.3 p0615, reconcile) | `inspect/tests/mac_154_edges.rs::sap_bounds_and_options |
+| RD-154-24-10133-01 | implemented + verified | `Channel` 11–26 range check (anchor §11.1.3.3 p0567; page framing dropped, formula unchanged) | `mac-sap/src/lib.rs::channel_range_checked` |
+| RD-154-24-829-01 | implemented (structural) | `MacMgmtSap::reset(cold)` (anchor §8.2.6 p0122–0124; text identical) | structural (`reset` driven in `sim/src/lib.rs::round_trip_trace`) |
+| RD-154-24-8211-01 | implemented + verified | `energy_scan` ED slice + `Unsupported` + cap (anchors §10.18 p0349 + §8.2.8 p0127–0131, reconcile; duration now direct symbol count, SAP contract unchanged) | `sim/src/lib.rs::mgmt_reports_capabilities_and_scans` |
+| RD-154-24-921-01 | implemented (structural) | SAP carries no key parameters (unsecured-only path; anchor §9.2.1 p0160; suite-agility halves held — no crypto/key seam) | structural (absence boundary) |
+| RD-154-24-922-01 | implemented (structural) | level-zero passthrough; gated fail-closed ⇒ `Unsupported` (anchor §9.2.2 steps a–b p0161; new algorithm checks held — no transform seam) | `mac-sap/src/lib.rs::error_display_is_human_readable` (`Unsupported` renders) |
+| RD-154-24-944-01 | implemented + verified | aux-header opacity boundary (anchor §9.4.1 p0172–0174, reconcile; wire shape identical) | `inspect/tests/goldens.rs::golden_captured_air_secured_nwk_stops_chain` |
