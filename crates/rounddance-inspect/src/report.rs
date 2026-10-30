@@ -5,8 +5,8 @@
 //! remaining length, never decrypted.
 
 use crate::tree::{
-    Addr, AttKind, DecodeTree, DirectKind, GpKind, GpNode, HciKind, Layer, MacCmdKind, MacCmdNode,
-    NwkCmdKind, NwkCmdNode, TouchlinkKind, TouchlinkNode,
+    Addr, ApsCmdKind, ApsCmdNode, AttKind, DecodeTree, DirectKind, GpKind, GpNode, HciKind, Layer,
+    MacCmdKind, MacCmdNode, NwkCmdKind, NwkCmdNode, TouchlinkKind, TouchlinkNode,
 };
 use std::fmt::Write as _;
 
@@ -146,6 +146,15 @@ pub fn to_text(tree: &DecodeTree) -> String {
                     "  nwkcmd: id={:#04x} {} len={}B",
                     n.command_id,
                     nwkcmd_text(&n.kind),
+                    n.payload_len,
+                );
+            }
+            Layer::ApsCmd(n) => {
+                let _ = writeln!(
+                    s,
+                    "  apscmd: id={:#04x} {} len={}B",
+                    n.command_id,
+                    apscmd_text(&n.kind),
                     n.payload_len,
                 );
             }
@@ -332,6 +341,9 @@ pub fn to_json(tree: &DecodeTree) -> String {
             }
             Layer::NwkCmd(n) => {
                 s.push_str(&nwkcmd_json(n));
+            }
+            Layer::ApsCmd(n) => {
+                s.push_str(&apscmd_json(n));
             }
             Layer::Zdo(z) => {
                 s.push_str(&format!(
@@ -1218,6 +1230,28 @@ fn nwkcmd_json(n: &NwkCmdNode) -> String {
     format!(
         "{{\"nwkcmd\":{{\"cmd\":{},\"kind\":\"{kind}\"{extra}}}}}",
         n.command_id
+    )
+}
+
+fn apscmd_text(k: &ApsCmdKind) -> String {
+    match *k {
+        ApsCmdKind::TransportKey { key_type } => {
+            format!("transport-key keytype={key_type:#04x}")
+        }
+        ApsCmdKind::Unknown => String::from("unknown"),
+    }
+}
+
+fn apscmd_json(n: &ApsCmdNode) -> String {
+    let (kind, extra) = match n.kind {
+        ApsCmdKind::TransportKey { key_type } => {
+            ("transport-key", format!(",\"key_type\":{key_type}"))
+        }
+        ApsCmdKind::Unknown => ("unknown", String::new()),
+    };
+    format!(
+        "{{\"apscmd\":{{\"cmd\":{},\"kind\":\"{kind}\"{extra},\"len\":{}}}}}",
+        n.command_id, n.payload_len
     )
 }
 

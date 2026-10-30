@@ -105,6 +105,38 @@ pub struct ApsNode {
     pub command_id: Option<u8>,
 }
 
+/// APS command payload summary: the named sub-dissector for APS
+/// command frames, on unsecured as well as verified-open legs.
+/// Only the transport-key command earns a shaped name (key type over
+/// the live and spec-agreed fixed shapes; key bytes stay sealed,
+/// never rendered); anything else files as `Unknown` with its
+/// command identifier, never a guess.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ApsCmdNode {
+    /// APS command identifier (APS header command octet).
+    pub command_id: u8,
+    /// Named payload shape.
+    pub kind: ApsCmdKind,
+    /// Full APS command payload length in octets (command identifier
+    /// plus body).
+    pub payload_len: u16,
+}
+
+/// Named APS command payload shapes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ApsCmdKind {
+    /// Transport-key command: key type only (the transported key,
+    /// sequence, addresses, and any TLVs stay in the capture, never
+    /// in the node).
+    TransportKey {
+        /// Standard key type (`0x01` network, `0x03` application
+        /// link, `0x04` Trust-Center link).
+        key_type: u8,
+    },
+    /// None of the named shapes: identifier filed, payload unparsed.
+    Unknown,
+}
+
 /// ZCL header summary (reused `rounddance-zcl` codec).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ZclNode {
@@ -752,6 +784,8 @@ pub enum Layer {
     NwkCmd(NwkCmdNode),
     /// APS header.
     Aps(ApsNode),
+    /// APS command payload (unsecured or verified-open legs).
+    ApsCmd(ApsCmdNode),
     /// ZCL header.
     Zcl(ZclNode),
     /// ZDO envelope (profile `0x0000`, never ZCL).
@@ -769,11 +803,11 @@ pub enum Layer {
 }
 
 /// Maximum layers per tree: MAC + NWK + APS + ZCL/ZDO + one stop
-/// note, MAC + NWK + command leg + one stop note, MAC + Touchlink +
-/// one stop note, or MAC + GP + one stop note. Named command,
-/// profile, inter-PAN, and Green-Power legs take a layer slot that
-/// an unnamed stop used to fill alone, so depth grows by at most one
-/// per frame.
+/// note, MAC + NWK + command leg + one stop note, MAC + NWK + APS +
+/// APS-command leg + one stop note, MAC + Touchlink + one stop note,
+/// or MAC + GP + one stop note. Named command, profile, inter-PAN,
+/// and Green-Power legs take a layer slot that an unnamed stop used
+/// to fill alone, so depth grows by at most one per frame.
 pub const MAX_LAYERS: usize = 5;
 
 /// Bounded decode tree: the full dissector-chain result for one frame.
@@ -890,6 +924,17 @@ impl DecodeTree {
     pub fn aps(&self) -> Option<ApsNode> {
         for slot in self.layers() {
             if let Some(Layer::Aps(a)) = slot {
+                return Some(*a);
+            }
+        }
+        None
+    }
+
+    /// First APS command layer, if present.
+    #[must_use]
+    pub fn apscmd(&self) -> Option<ApsCmdNode> {
+        for slot in self.layers() {
+            if let Some(Layer::ApsCmd(a)) = slot {
                 return Some(*a);
             }
         }

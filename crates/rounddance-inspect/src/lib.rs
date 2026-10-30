@@ -25,6 +25,7 @@
 #![forbid(unsafe_code)]
 
 pub mod aps;
+pub mod apscmd;
 pub mod ble;
 pub mod capture;
 pub mod chain;

@@ -10,6 +10,8 @@
 //! Named sub-dissector legs ride alongside the stop notes: fixed-shape
 //! MAC command payloads ([`mac`](crate::mac)), NWK command payloads
 //! on unsecured as well as verified-open legs ([`nwkcmd`](crate::nwkcmd)),
+//! the transport-key APS command payload on unsecured as well as
+//! verified-open legs ([`apscmd`](crate::apscmd)),
 //! the Touchlink envelope on broadcast-PAN outers
 //! ([`touchlink`](crate::touchlink)), the ZDO envelope on profile
 //! `0x0000` ([`zdo`](crate::zdo)) instead of a ZCL misparse, and the
@@ -249,7 +251,20 @@ fn finish_aps_zcl(mut tree: DecodeTree, rest: &[u8]) -> Result<DecodeTree, TreeE
         }
     }
 
-    // Only APS data frames carry a ZCL payload; acks/commands stop here.
+    // APS command frames name their command leg (no ZCL payload rides
+    // one); acks stop here.
+    if tree.aps().map(|a| a.frame_type).unwrap_or(9) == 1 {
+        let mut remaining = rest.len();
+        if let Some(cmd) = tree.aps().and_then(|a| a.command_id) {
+            if let Ok((node, consumed)) = crate::apscmd::decode(cmd, rest) {
+                tree.push(Layer::ApsCmd(node));
+                remaining = rest.len().saturating_sub(consumed);
+            }
+        }
+        stop(&mut tree, "trailing", remaining);
+        return Ok(tree);
+    }
+    // Only APS data frames carry a ZCL payload; acks stop here.
     if tree.aps().map(|a| a.frame_type).unwrap_or(9) != 0 {
         stop(&mut tree, "trailing", rest.len());
         return Ok(tree);

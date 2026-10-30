@@ -1273,3 +1273,160 @@ fn gp_encrypted_decrypt_reveals_command_with_slotted_key() {
     assert_eq!(g.payload_len, 1);
     assert_eq!(note_reasons(&open), vec!["decrypted"]);
 }
+
+// ---------------------------------------------------------------------------
+// Wave-76 lane 2: APS transport-key (0x05) command leg. APS command
+// frames are the last stack layer with no named sub-leg: MAC earns
+// `maccmd`, NWK earns `nwkcmd`, ZDO/ZCL/GP/Touchlink all name their
+// envelope, while APS commands stop at an anonymous `trailing` note.
+// The transport-key command is the highest-value single variant: it is
+// the frame the Trust-Center-first join turns on, and the corpus
+// permits it APS-plain on initial joining, so keyed dissect exposes it
+// in cleartext. Reserved key types and every other command identifier
+// stay `Unknown` for future waves.
+// ---------------------------------------------------------------------------
+
+/// Wrap an APS command body (key type + descriptor; the header command
+/// octet rides the codec) in NWK + MAC.
+fn wrap_aps_command(cmd_id: u8, body: &[u8]) -> Vec<u8> {
+    let aps = rounddance_aps::frame::CommandHeader {
+        control: rounddance_aps::frame::FrameControl::command(),
+        counter: 0x51,
+        command_id: cmd_id,
+    };
+    let mut aps_buf = [0u8; 128];
+    let an = aps.encode_into(body, &mut aps_buf).unwrap();
+    let nwk = rounddance_nwk::frame::NwkHeader::minimal(
+        rounddance_nwk::frame::FrameControl::data(),
+        0x0000,
+        0x56cb,
+        1,
+        0x65,
+    );
+    let mut nwk_buf = [0u8; 256];
+    let nn = nwk.encode_into(&aps_buf[..an], &mut nwk_buf).unwrap();
+    let mut frame = vec![0x41, 0x88, 0x61];
+    frame.extend_from_slice(&0x3761u16.to_le_bytes());
+    frame.extend_from_slice(&0x0000u16.to_le_bytes());
+    frame.extend_from_slice(&0x56cbu16.to_le_bytes());
+    frame.extend_from_slice(&nwk_buf[..nn]);
+    frame
+}
+
+#[test]
+fn aps_transport_key_leg_names_key_type() {
+    use tree::ApsCmdKind as K;
+    // Network-key descriptor: type 0x01 + 16-octet key (test-only
+    // placeholder, never rendered) + seq 0x00 + dst/src EUIs = 35
+    // octets past the command octet (spec Fig 4-10; w45 battery
+    // plaintext pin).
+    let mut net = vec![0x01u8];
+    net.extend_from_slice(&[0xAAu8; 16]);
+    net.push(0x00);
+    net.extend_from_slice(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]);
+    net.extend_from_slice(&[0x5f, 0x75, 0xf4, 0xfe, 0xff, 0xe5, 0xe3, 0x04]);
+    let tree = chain::dissect(&wrap_aps_command(0x05, &net)).unwrap();
+    let a = tree.apscmd().expect("transport-key leg");
+    assert_eq!(a.command_id, 0x05);
+    assert_eq!(a.kind, K::TransportKey { key_type: 0x01 });
+    assert_eq!(a.payload_len, 35);
+    // The APS envelope still files the command identifier; no ZCL
+    // rides a command frame.
+    assert_eq!(tree.aps().expect("aps envelope").command_id, Some(0x05));
+    assert!(tree.zcl().is_none());
+    // Stop taxonomy never moves for a named leg.
+    assert_eq!(note_reasons(&tree), vec!["trailing"]);
+    let text = report::to_text(&tree);
+    assert!(text.contains("apscmd:"), "named leg renders: {text}");
+    assert!(text.contains("transport-key"), "leg kind renders: {text}");
+    assert!(
+        text.contains("keytype=0x01"),
+        "key type renders, key bytes never do: {text}"
+    );
+    let json = report::to_json(&tree);
+    assert!(json.contains("\"apscmd\""), "json leg renders: {json}");
+    assert!(
+        json.contains("\"kind\":\"transport-key\""),
+        "json kind renders: {json}"
+    );
+    assert!(json.contains("\"key_type\":1"), "json key type: {json}");
+    // The session timeline keys transport-key envelopes (the
+    // pre-existing `TransportKey` event arm reads the APS command
+    // identifier, unchanged by this leg).
+    assert_eq!(
+        session::classify_tree(&tree),
+        Some(session::TimelineEvent::TransportKey)
+    );
+    // Trust-Center-link minimum shape (type 0x04 + 32 fixed octets)
+    // and the same shape with trailing TLVs both name the leg.
+    let mut tc = vec![0x04u8];
+    tc.extend_from_slice(&[0xBBu8; 32]);
+    let tc_tlv = [&tc[..], &[0x00, 0x02, 0xAA, 0xBB][..]].concat();
+    for body in [&tc[..], &tc_tlv[..]] {
+        let t = chain::dissect(&wrap_aps_command(0x05, body)).unwrap();
+        assert_eq!(
+            t.apscmd().expect("tc-link leg").kind,
+            K::TransportKey { key_type: 0x04 }
+        );
+        assert_eq!(note_reasons(&t), vec!["trailing"]);
+        assert_eq!(
+            session::classify_tree(&t),
+            Some(session::TimelineEvent::TransportKey)
+        );
+    }
+    // Application-link minimum shape (type 0x03 + 25 fixed octets).
+    let mut app = vec![0x03u8];
+    app.extend_from_slice(&[0xCCu8; 25]);
+    let app = chain::dissect(&wrap_aps_command(0x05, &app)).unwrap();
+    assert_eq!(
+        app.apscmd().expect("app-link leg").kind,
+        K::TransportKey { key_type: 0x03 }
+    );
+    assert_eq!(
+        session::classify_tree(&app),
+        Some(session::TimelineEvent::TransportKey)
+    );
+    // Short network descriptor (33 body octets, one past the type
+    // short of the 34-octet shape), reserved key type, and the next
+    // command identifier (update-device 0x06, a future wave's leg)
+    // all file `Unknown` under the same stop; a lone command octet
+    // (empty body) refuses the leg outright.
+    let short = net[..33].to_vec();
+    let reserved = [&[0x00u8][..], &net[1..]].concat();
+    assert_eq!(short.len(), 33);
+    let ud = [0xCCu8; 11];
+    // The timeline arm reads the APS envelope command identifier, so
+    // short/reserved 0x05 bodies still key `TransportKey` while the
+    // next command identifier (0x06) keys nothing.
+    for (cmd, body, event) in [
+        (
+            0x05u8,
+            &short[..],
+            Some(session::TimelineEvent::TransportKey),
+        ),
+        (
+            0x05u8,
+            &reserved[..],
+            Some(session::TimelineEvent::TransportKey),
+        ),
+        (0x06u8, &ud[..], None),
+    ] {
+        let t = chain::dissect(&wrap_aps_command(cmd, body)).unwrap();
+        assert_eq!(t.apscmd().expect("unknown leg").kind, K::Unknown);
+        assert_eq!(note_reasons(&t), vec!["trailing"]);
+        assert_eq!(session::classify_tree(&t), event);
+    }
+    // A lone command octet (empty body) refuses the leg outright but
+    // keeps the same stop.
+    let lone = chain::dissect(&wrap_aps_command(0x05, &[])).unwrap();
+    assert!(lone.apscmd().is_none());
+    assert_eq!(note_reasons(&lone), vec!["trailing"]);
+    // A truncated APDU (no command octet at all) never reaches the
+    // leg: the APS refusal keeps the `unknown` stop.
+    let mut clipped = wrap_aps_command(0x05, &net);
+    clipped.truncate(clipped.len() - (net.len() + 1));
+    let t = chain::dissect(&clipped).unwrap();
+    assert!(t.aps().is_none());
+    assert!(t.apscmd().is_none());
+    assert_eq!(note_reasons(&t), vec!["unknown"]);
+}
