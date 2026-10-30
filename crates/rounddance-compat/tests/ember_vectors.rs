@@ -8,8 +8,8 @@
 
 use rounddance_compat::ember::{
     decode, encode, next_seq, EmberAdapter, EzspDecoder, EzspDropReason, EzspError, EzspOutcome,
-    MockEzspTransport, CMD_DATA_SEND, CTRL_CALLBACK, CTRL_SEQ_MASK, EVT_DATA_RECEIVE, FLAG,
-    MAX_ENCODED_FRAME, MAX_EZSP_PAYLOAD, STATUS_DELIVERED, STATUS_NO_ACK,
+    MockEzspTransport, CMD_DATA_SEND, CTRL_CALLBACK, CTRL_SEQ_MASK, EVT_DATA_RECEIVE,
+    EVT_TX_CONFIRM, FLAG, MAX_ENCODED_FRAME, MAX_EZSP_PAYLOAD, STATUS_DELIVERED, STATUS_NO_ACK,
 };
 use rounddance_mac_sap::{
     AddrMode, FramePayload, MacAddress, MacDataSap, MacMgmtSap, TxHandle, TxOptions, TxRequest,
@@ -489,4 +489,181 @@ fn ezsp_decoder_back_to_back_frames() {
     assert_eq!(a.payload_bytes(), &[0x01]);
     assert_eq!(b.payload_bytes(), &[0x02, 0x03]);
     assert_eq!(dec.dropped(), 0);
+}
+
+/// Streaming receive path, byte-pinned: FLAG | LEN=10 | CTRL=0x80 |
+/// ID 0x0082 LE | `01 00 C8 08 00` (src 0x0001, LQI 200, MSDU
+/// `08 00`) | CRC16-LE(`80 82 00 01 00 C8 08 00` = 0xAB0B) | FLAG.
+/// The CRC is hand-computed through the independent CRC-16/CCITT
+/// oracle (`crc16(b"123456789") == 0x29B1` pins the oracle itself).
+/// Fed whole through the byte ingress, the indication surfaces with
+/// the same source, LQI, and MSDU the NCP reported and no drop is
+/// counted — the same routing the queued-frame pump applies.
+#[test]
+fn ember_stream_receive_byte_pinned_vector() {
+    use rounddance_compat::ember::crc16;
+    assert_eq!(crc16(b"123456789"), 0x29B1);
+    assert_eq!(
+        crc16(&[0x80, 0x82, 0x00, 0x01, 0x00, 0xC8, 0x08, 0x00]),
+        0xAB0B
+    );
+    let wire = [
+        FLAG, 0x0A, 0x80, 0x82, 0x00, 0x01, 0x00, 0xC8, 0x08, 0x00, 0x0B, 0xAB, FLAG,
+    ];
+    let (one_shot, used) = decode(&wire).unwrap();
+    assert_eq!(used, wire.len());
+    assert_eq!(one_shot.frame_id, EVT_DATA_RECEIVE);
+    let mut adapter = EmberAdapter::new();
+    adapter.push_rx_bytes(&wire);
+    let ind = adapter.poll_indication().unwrap();
+    assert_eq!(ind.src, MacAddress::short(0xC601, 0x0001));
+    assert_eq!(ind.lqi, 200);
+    assert_eq!(ind.msdu.as_slice(), &[0x08, 0x00]);
+    assert_eq!(adapter.poll_indication(), None);
+    assert_eq!(
+        (adapter.stream_dropped(), adapter.stream_consecutive_bad()),
+        (0, 0)
+    );
+    assert_eq!(adapter.rx_dropped(), 0);
+}
+
+/// Split feeds reassemble through the adapter: one confirm callback
+/// (`7E 07 80 81 00 00 00 50 98 7E`, seq 0 + DELIVERED, CRC
+/// `80 81 00 00 00` = 0x9850 via the oracle) fed byte-by-byte plus
+/// one receive callback fed in 3-byte chunks complete the same
+/// request/confirm/indication decisions the queued-frame pump makes.
+#[test]
+fn ember_stream_receive_split_feed_delivers_confirm_and_indication() {
+    use rounddance_compat::ember::crc16;
+    assert_eq!(crc16(&[0x80, 0x81, 0x00, 0x00, 0x00]), 0x9850);
+    let mut adapter = EmberAdapter::new();
+    let h = adapter
+        .data_request(req(MacAddress::short(0xC601, 0x0002), &[0x01], true))
+        .unwrap();
+    let confirm = [FLAG, 0x07, 0x80, 0x81, 0x00, 0x00, 0x00, 0x50, 0x98, FLAG];
+    let (cf_one_shot, _) = decode(&confirm).unwrap();
+    assert_eq!(cf_one_shot.frame_id, EVT_TX_CONFIRM);
+    for b in &confirm {
+        adapter.push_rx_bytes(&[*b]);
+    }
+    let c = adapter.poll_confirm().unwrap();
+    assert_eq!((c.handle, c.status), (h, TxStatus::Delivered));
+    let receive = [
+        FLAG, 0x0A, 0x80, 0x82, 0x00, 0x01, 0x00, 0xC8, 0x08, 0x00, 0x0B, 0xAB, FLAG,
+    ];
+    for chunk in receive.chunks(3) {
+        adapter.push_rx_bytes(chunk);
+    }
+    let ind = adapter.poll_indication().unwrap();
+    assert_eq!(ind.src, MacAddress::short(0xC601, 0x0001));
+    assert_eq!(ind.msdu.as_slice(), &[0x08, 0x00]);
+    assert_eq!(
+        (adapter.stream_dropped(), adapter.stream_consecutive_bad()),
+        (0, 0)
+    );
+    assert_eq!(adapter.rx_dropped(), 0);
+}
+
+/// A failed delivery streamed off the wire surfaces as `NoAck`:
+/// `7E 07 80 81 00 00 01 71 88 7E` (seq 0 + NO_ACK, CRC
+/// `80 81 00 00 01` = 0x8871 via the oracle) completes the matching
+/// transaction without success.
+#[test]
+fn ember_stream_receive_no_ack_maps_to_noack() {
+    use rounddance_compat::ember::crc16;
+    assert_eq!(crc16(&[0x80, 0x81, 0x00, 0x00, 0x01]), 0x8871);
+    let mut adapter = EmberAdapter::new();
+    let h = adapter
+        .data_request(req(MacAddress::short(0xC601, 0x0002), &[0x01], true))
+        .unwrap();
+    adapter.push_rx_bytes(&[FLAG, 0x07, 0x80, 0x81, 0x00, 0x00, 0x01, 0x71, 0x88, FLAG]);
+    let c = adapter.poll_confirm().unwrap();
+    assert_eq!((c.handle, c.status), (h, TxStatus::NoAck));
+    assert_eq!(adapter.rx_dropped(), 0);
+}
+
+/// Line noise, a LEN mismatch, and a bad CRC drop through the byte
+/// ingress exactly as the decoder reports them — then a good confirm
+/// still completes its transaction and the desync meter resets.
+#[test]
+fn ember_stream_receive_resyncs_over_noise_bad_len_and_bad_crc() {
+    let confirm = [FLAG, 0x07, 0x80, 0x81, 0x00, 0x00, 0x00, 0x50, 0x98, FLAG];
+    let mut bad_len = confirm;
+    bad_len[1] = bad_len[1].wrapping_add(1);
+    assert_eq!(decode(&bad_len), Err(EzspError::BadLength));
+    let mut bad_crc = confirm;
+    bad_crc[5] ^= 0x01;
+    assert_eq!(decode(&bad_crc), Err(EzspError::BadCrc));
+    let mut adapter = EmberAdapter::new();
+    let h = adapter
+        .data_request(req(MacAddress::short(0xC601, 0x0002), &[0x01], true))
+        .unwrap();
+    // Noise with no FLAG: silent, no counters.
+    adapter.push_rx_bytes(&[0x00, 0x55]);
+    assert_eq!(
+        (adapter.stream_dropped(), adapter.stream_consecutive_bad()),
+        (0, 0)
+    );
+    // LEN disagreeing with the delimited body: one BadLength drop.
+    adapter.push_rx_bytes(&bad_len);
+    assert_eq!(
+        (adapter.stream_dropped(), adapter.stream_consecutive_bad()),
+        (1, 1)
+    );
+    // Flipped body octet under the old CRC: one BadCrc drop.
+    adapter.push_rx_bytes(&bad_crc);
+    assert_eq!(
+        (adapter.stream_dropped(), adapter.stream_consecutive_bad()),
+        (2, 2)
+    );
+    // The good confirm still matches its slot; the meter resets.
+    adapter.push_rx_bytes(&confirm);
+    let c = adapter.poll_confirm().unwrap();
+    assert_eq!((c.handle, c.status), (h, TxStatus::Delivered));
+    assert_eq!(
+        (adapter.stream_dropped(), adapter.stream_consecutive_bad()),
+        (2, 0)
+    );
+    assert_eq!(adapter.rx_dropped(), 2);
+}
+
+/// A CRC-clean frame with an unknown command (`7E 06 80 FF 00 00
+/// 9B 96 7E`, CRC `80 FF 00 00` = 0x969B via the oracle) is
+/// well-formed but unroutable: counted, never queued.
+#[test]
+fn ember_stream_receive_unknown_command_counts_dropped() {
+    use rounddance_compat::ember::crc16;
+    assert_eq!(crc16(&[0x80, 0xFF, 0x00, 0x00]), 0x969B);
+    let mut adapter = EmberAdapter::new();
+    adapter.push_rx_bytes(&[FLAG, 0x06, 0x80, 0xFF, 0x00, 0x00, 0x9B, 0x96, FLAG]);
+    assert_eq!(adapter.poll_confirm(), None);
+    assert_eq!(adapter.poll_indication(), None);
+    assert_eq!(
+        (adapter.stream_dropped(), adapter.stream_consecutive_bad()),
+        (0, 0)
+    );
+    assert_eq!(adapter.rx_dropped(), 1);
+}
+
+/// Backpressure parity with the queued-frame pump: the indication
+/// queue holds 8, so the 9th streamed receive callback is counted,
+/// never queued — and every queued indication drains in order.
+#[test]
+fn ember_stream_receive_full_indication_queue_counts_dropped() {
+    let one = [
+        FLAG, 0x0A, 0x80, 0x82, 0x00, 0x01, 0x00, 0xC8, 0x08, 0x00, 0x0B, 0xAB, FLAG,
+    ];
+    let mut nine = [0u8; 9 * 13];
+    for (i, slot) in nine.chunks_mut(13).enumerate() {
+        slot.copy_from_slice(&one);
+        let _ = i;
+    }
+    let mut adapter = EmberAdapter::new();
+    adapter.push_rx_bytes(&nine);
+    for _ in 0..8 {
+        let ind = adapter.poll_indication().unwrap();
+        assert_eq!(ind.src, MacAddress::short(0xC601, 0x0001));
+    }
+    assert_eq!(adapter.poll_indication(), None);
+    assert_eq!(adapter.rx_dropped(), 1);
 }

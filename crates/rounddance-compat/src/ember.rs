@@ -39,7 +39,7 @@
 //! Requirement traceability (repo-minted, MINTED-pending-confirm):
 //! `RD-COMPAT-05` (codec, plus the streaming [`EzspDecoder`] byte
 //! pump over the same wire shape), `RD-COMPAT-06` (SAP mapping;
-//! adapter wiring of the streaming ingress waits a later increment),
+//! streaming ingress wired into the adapter receive path),
 //! `RD-COMPAT-07` (join-flow parity with the existing MAC codec).
 
 use rounddance_mac_sap::{
@@ -653,6 +653,7 @@ const EMBER_INDICATION_DEPTH: usize = 8;
 #[derive(Clone, Debug)]
 pub struct EmberAdapter {
     transport: MockEzspTransport,
+    decoder: EzspDecoder,
     pan: PanId,
     short: ShortAddr,
     ext: [u8; 8],
@@ -677,6 +678,7 @@ impl EmberAdapter {
     pub const fn new() -> Self {
         Self {
             transport: MockEzspTransport::new(),
+            decoder: EzspDecoder::new(),
             pan: 0xC601,
             short: 0x0002,
             ext: [0; 8],
@@ -779,12 +781,52 @@ impl EmberAdapter {
                 self.rx_dropped = self.rx_dropped.saturating_add(1);
                 continue;
             };
-            match frame.frame_id {
-                EVT_TX_CONFIRM => self.note_confirm(&frame),
-                EVT_DATA_RECEIVE => self.note_receive(&frame),
-                _ => {
+            self.note_frame(&frame);
+        }
+    }
+
+    /// Feed raw NCP wire bytes (UART order) through the streaming
+    /// [`EzspDecoder`]: complete frames dispatch exactly as the queued
+    /// [`Self::pump`] path routes them, while decoder drops
+    /// ([`EzspDropReason`]) and unroutable commands count toward
+    /// [`Self::rx_dropped`], never queue. Split and back-to-back
+    /// feeds reassemble identically — flags, not calls, delimit.
+    pub fn push_rx_bytes(&mut self, bytes: &[u8]) {
+        let mut i = 0;
+        while i < bytes.len() {
+            match self.decoder.push_byte(bytes[i]) {
+                Some(EzspOutcome::Frame(frame)) => self.note_frame(&frame),
+                Some(EzspOutcome::Dropped(_)) => {
                     self.rx_dropped = self.rx_dropped.saturating_add(1);
                 }
+                None => {}
+            }
+            i += 1;
+        }
+    }
+
+    /// Decoder drop runs seen on the byte ingress (diagnostic; each
+    /// one feeds [`Self::rx_dropped`] one-for-one).
+    #[must_use]
+    pub const fn stream_dropped(&self) -> u32 {
+        self.decoder.dropped()
+    }
+
+    /// Decoder drop runs since the last good frame on the byte
+    /// ingress (desync meter, cleared by a good frame).
+    #[must_use]
+    pub const fn stream_consecutive_bad(&self) -> u32 {
+        self.decoder.consecutive_bad()
+    }
+
+    /// Route one complete NCP frame to its SAP queue (shared by the
+    /// queued [`Self::pump`] path and the byte-ingress path).
+    fn note_frame(&mut self, frame: &EzspFrame) {
+        match frame.frame_id {
+            EVT_TX_CONFIRM => self.note_confirm(frame),
+            EVT_DATA_RECEIVE => self.note_receive(frame),
+            _ => {
+                self.rx_dropped = self.rx_dropped.saturating_add(1);
             }
         }
     }
