@@ -1244,6 +1244,7 @@ fn apscmd_text(k: &ApsCmdKind) -> String {
                 hex16(short_addr)
             )
         }
+        ApsCmdKind::RemoveDevice => String::from("remove-device"),
         ApsCmdKind::Unknown => String::from("unknown"),
     }
 }
@@ -1257,6 +1258,7 @@ fn apscmd_json(n: &ApsCmdNode) -> String {
             "update-device",
             format!(",\"status\":{status},\"short\":{short_addr}"),
         ),
+        ApsCmdKind::RemoveDevice => ("remove-device", String::new()),
         ApsCmdKind::Unknown => ("unknown", String::new()),
     };
     format!(

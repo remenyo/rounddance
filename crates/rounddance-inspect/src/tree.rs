@@ -107,11 +107,12 @@ pub struct ApsNode {
 
 /// APS command payload summary: the named sub-dissector for APS
 /// command frames, on unsecured as well as verified-open legs.
-/// The transport-key and update-device commands earn shaped names
-/// (key type over the live and spec-agreed fixed shapes, key bytes
-/// stay sealed, never rendered; device status + short over the
-/// spec-agreed fixed prefix, the 8-octet EUI stays in the capture);
-/// anything else files as `Unknown` with its
+/// The transport-key, update-device, and remove-device commands earn
+/// shaped names (key type over the live and spec-agreed fixed shapes,
+/// key bytes stay sealed, never rendered; device status + short over
+/// the spec-agreed fixed prefix, the 8-octet EUI stays in the capture;
+/// the remove-device EUI alone stays in the capture, never in the
+/// node); anything else files as `Unknown` with its
 /// command identifier, never a guess.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ApsCmdNode {
@@ -148,6 +149,11 @@ pub enum ApsCmdKind {
         /// being updated.
         short_addr: u16,
     },
+    /// Remove-device command: the 8-octet device address stays in
+    /// the capture, never in the node — the update-device EUI
+    /// precedent. The shape is the address alone (no short, no
+    /// status, no TLV tail), so the node carries no address bytes.
+    RemoveDevice,
     /// None of the named shapes: identifier filed, payload unparsed.
     Unknown,
 }

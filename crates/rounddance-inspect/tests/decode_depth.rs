@@ -1537,3 +1537,79 @@ fn aps_update_device_leg_names_status_and_short() {
     assert!(lone.apscmd().is_none());
     assert_eq!(note_reasons(&lone), vec!["trailing"]);
 }
+
+// ---------------------------------------------------------------------------
+// Wave-79 track-inspect: APS remove-device (0x07) command leg. The next
+// unnamed APS command id after wave-78's update-device (0x06): spec Table
+// 4-31 assigns 0x07 to REMOVE_DEVICE, and the wave-78 test pins it as a
+// future leg (`Unknown`). Wire shape is the device address alone — an
+// 8-octet EUI with no short, no status, and no JoinerTLV tail — so the
+// gate is an exact 8-octet body (9-octet payload with the command
+// octet). The EUI stays in the capture (the network-report EPID and
+// update-device EUI precedents); the node carries no address bytes,
+// never rendered in either report leg.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn aps_remove_device_leg_names_eui_shape() {
+    use tree::ApsCmdKind as K;
+    // Synthetic EUI 01..08: identifier bytes only, never key material,
+    // never rendered.
+    let body = vec![0x01u8, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
+    assert_eq!(body.len(), 8);
+    let tree = chain::dissect(&wrap_aps_command(0x07, &body)).unwrap();
+    let a = tree.apscmd().expect("remove-device leg");
+    assert_eq!(a.command_id, 0x07);
+    assert_eq!(a.kind, K::RemoveDevice);
+    assert_eq!(a.payload_len, 9);
+    // The APS envelope still files the command identifier; no ZCL
+    // rides a command frame.
+    assert_eq!(tree.aps().expect("aps envelope").command_id, Some(0x07));
+    assert!(tree.zcl().is_none());
+    // Stop taxonomy never moves for a named leg.
+    assert_eq!(note_reasons(&tree), vec!["trailing"]);
+    let text = report::to_text(&tree);
+    assert!(text.contains("apscmd:"), "named leg renders: {text}");
+    assert!(text.contains("remove-device"), "leg kind renders: {text}");
+    let json = report::to_json(&tree);
+    assert!(json.contains("\"apscmd\""), "json leg renders: {json}");
+    assert!(
+        json.contains("\"kind\":\"remove-device\""),
+        "json kind renders: {json}"
+    );
+    assert!(json.contains("\"cmd\":7"), "json command id: {json}");
+    // The 8-octet EUI stays in the capture, never in the node.
+    assert!(
+        !json.contains("578437695752307201"),
+        "EUI never rendered: {json}"
+    );
+    assert!(
+        !text.contains("578437695752307201"),
+        "EUI never rendered: {text}"
+    );
+    // Remove chatter never opens a session timeline.
+    assert_eq!(session::classify_tree(&tree), None);
+    // Exact gate: short (7) and long (9, trailing octet) bodies stay
+    // `Unknown` under the same stop with no timeline event, as do
+    // reserved command identifiers at the named length and the next
+    // command identifier (request-key 0x08, a future wave's leg).
+    let short = &body[..7];
+    let long = [&body[..], &[0xAAu8][..]].concat();
+    assert_eq!(long.len(), 9);
+    for (cmd, b) in [
+        (0x07u8, short),
+        (0x07u8, &long[..]),
+        (0x01u8, &body[..]),
+        (0x08u8, &[0x01u8][..]),
+    ] {
+        let t = chain::dissect(&wrap_aps_command(cmd, b)).unwrap();
+        assert_eq!(t.apscmd().expect("unknown leg").kind, K::Unknown);
+        assert_eq!(note_reasons(&t), vec!["trailing"]);
+        assert_eq!(session::classify_tree(&t), None);
+    }
+    // A lone command octet (empty body) refuses the leg outright but
+    // keeps the same stop.
+    let lone = chain::dissect(&wrap_aps_command(0x07, &[])).unwrap();
+    assert!(lone.apscmd().is_none());
+    assert_eq!(note_reasons(&lone), vec!["trailing"]);
+}
