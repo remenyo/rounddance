@@ -89,6 +89,15 @@ fn fuzz_touchlink_flows_round_trip() {
         let _ = NetworkUpdateRequest::decode(&buf[..len]);
         let _ = DeviceInfoRequest::decode(&buf[..len]);
         let _ = IdentifyRequest::decode(&buf[..len]);
+        let _ = DeviceInfoRecord::decode(&buf[..len]);
+        let _ = DeviceInfoResponse::decode(&buf[..len]);
+        let _ = EndpointInformation::decode(&buf[..len]);
+        let _ = GetGroupIdentifiersRequest::decode(&buf[..len]);
+        let _ = GroupInfoRecord::decode(&buf[..len]);
+        let _ = GetGroupIdentifiersResponse::decode(&buf[..len]);
+        let _ = GetEndpointListRequest::decode(&buf[..len]);
+        let _ = EndpointInfoRecord::decode(&buf[..len]);
+        let _ = GetEndpointListResponse::decode(&buf[..len]);
         // Random bodies re-encode to the decoded value (the tail only
         // survives when exactly one sub-device is reported).
         let sub_devices = rng.below(2) as u8;
@@ -152,6 +161,107 @@ fn fuzz_touchlink_flows_round_trip() {
             Err(TouchlinkError::BadKeyIndex) => assert_eq!(a & b, 0),
             Err(_) => panic!("unexpected select error"),
         }
+    }
+}
+
+#[test]
+fn fuzz_touchlink_response_fields_round_trip() {
+    let mut rng = Fuzz(0x9010);
+    let mut buf = [0u8; MAX_TOUCHLINK_FRAME];
+    for _ in 0..CASES {
+        // Device information page with a random in-range count.
+        let dcount = rng.below((MAX_DEVICE_INFO_RECORDS + 1) as u64) as usize;
+        let mut drecords = [DeviceInfoRecord {
+            ieee: [0; 8],
+            endpoint: 0,
+            profile_id: 0,
+            device_id: 0,
+            version: 0,
+            group_count: 0,
+            sort: 0,
+        }; MAX_DEVICE_INFO_RECORDS];
+        for slot in drecords[..dcount].iter_mut() {
+            *slot = DeviceInfoRecord {
+                ieee: [rng.below(0x100) as u8; 8],
+                endpoint: rng.below(0x100) as u8,
+                profile_id: rng.below(0x1_0000) as u16,
+                device_id: rng.below(0x1_0000) as u16,
+                version: rng.below(0x100) as u8,
+                group_count: rng.below(0x100) as u8,
+                sort: rng.below(0x100) as u8,
+            };
+        }
+        let dinfo = DeviceInfoResponse {
+            num_sub_devices: rng.below(0x100) as u8,
+            start_index: rng.below(0x100) as u8,
+            count: dcount as u8,
+            records: drecords,
+        };
+        let n = dinfo.encode_into(&mut buf).unwrap();
+        assert!(n <= MAX_TOUCHLINK_PAYLOAD);
+        assert_eq!(DeviceInfoResponse::decode(&buf[..n]).unwrap(), dinfo);
+        // Group page with a random in-budget count.
+        let gcount = rng.below((MAX_GROUP_RECORDS + 1) as u64) as usize;
+        let mut grecords = [GroupInfoRecord {
+            group_id: 0,
+            group_type: GROUP_TYPE_NORMAL,
+        }; MAX_GROUP_RECORDS];
+        for slot in grecords[..gcount].iter_mut() {
+            *slot = GroupInfoRecord {
+                group_id: rng.below(0x1_0000) as u16,
+                group_type: rng.below(0x100) as u8,
+            };
+        }
+        let gpage = GetGroupIdentifiersResponse {
+            total: rng.below(0x100) as u8,
+            start_index: rng.below(0x100) as u8,
+            count: gcount as u8,
+            records: grecords,
+        };
+        let n = gpage.encode_into(&mut buf).unwrap();
+        assert!(n <= MAX_TOUCHLINK_PAYLOAD);
+        assert_eq!(
+            GetGroupIdentifiersResponse::decode(&buf[..n]).unwrap(),
+            gpage
+        );
+        // Endpoint page with a random in-budget count.
+        let ecount = rng.below((MAX_ENDPOINT_RECORDS + 1) as u64) as usize;
+        let mut erecords = [EndpointInfoRecord {
+            network_address: 0,
+            endpoint: 0,
+            profile_id: 0,
+            device_id: 0,
+            version: 0,
+        }; MAX_ENDPOINT_RECORDS];
+        for slot in erecords[..ecount].iter_mut() {
+            *slot = EndpointInfoRecord {
+                network_address: rng.below(0x1_0000) as u16,
+                endpoint: rng.below(0x100) as u8,
+                profile_id: rng.below(0x1_0000) as u16,
+                device_id: rng.below(0x1_0000) as u16,
+                version: rng.below(0x100) as u8,
+            };
+        }
+        let epage = GetEndpointListResponse {
+            total: rng.below(0x100) as u8,
+            start_index: rng.below(0x100) as u8,
+            count: ecount as u8,
+            records: erecords,
+        };
+        let n = epage.encode_into(&mut buf).unwrap();
+        assert!(n <= MAX_TOUCHLINK_PAYLOAD);
+        assert_eq!(GetEndpointListResponse::decode(&buf[..n]).unwrap(), epage);
+        // Fixed bodies round-trip through arbitrary bytes.
+        let fixed = EndpointInformation {
+            ieee: [rng.below(0x100) as u8; 8],
+            network_address: rng.below(0x1_0000) as u16,
+            endpoint: rng.below(0x100) as u8,
+            profile_id: rng.below(0x1_0000) as u16,
+            device_id: rng.below(0x1_0000) as u16,
+            version: rng.below(0x100) as u8,
+        };
+        let n = fixed.encode_into(&mut buf).unwrap();
+        assert_eq!(EndpointInformation::decode(&buf[..n]).unwrap(), fixed);
     }
 }
 

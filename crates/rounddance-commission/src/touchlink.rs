@@ -552,9 +552,14 @@ impl TouchlinkTarget {
 
     /// Build the scan-response frame for the latched transaction
     /// (`tx::SCAN_RSP`, `07-5123-08-13323-01`): the target's own
-    /// touchlink information plus the key index it accepts. Fuller
-    /// response application fields are a follow-up; the transaction
-    /// binding and command identifier are the frozen parts.
+    /// touchlink information plus the key index it accepts. This stays
+    /// the minimal wave-10 seal; the full application fields ride
+    /// [`ScanResponseBody`] via [`TouchlinkTarget::respond_full`],
+    /// and the device-information / utility responses have their own
+    /// codecs ([`DeviceInfoResponse`], [`EndpointInformation`],
+    /// [`GetGroupIdentifiersResponse`], [`GetEndpointListResponse`]).
+    /// The transaction binding and command identifier are the frozen
+    /// parts.
     #[must_use]
     pub fn scan_response(&self, touchlink_info: u8, key_index: u8) -> TouchlinkFrame {
         let mut payload = [0u8; MAX_TOUCHLINK_PAYLOAD];
@@ -1661,6 +1666,579 @@ impl IdentifyRequest {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Response application fields: device information + utility.
+// ---------------------------------------------------------------------------
+//
+// Paraphrase-level models of the response payload layouts in doc
+// `07-5123-08` ZCL §13.3.2.3.2 (device information response) /
+// §13.3.2.3.6 (endpoint information) / §13.3.2.3.7 (get group
+// identifiers response) / §13.3.2.3.8 (get endpoint list response),
+// plus the single-octet utility request pair in §13.3.2.2.9–10. All
+// wording here is paraphrase (D1). Requirement IDs below reuse the
+// dense touchlink scheme (`07-5123-08-133232-*`,
+// `07-5123-08-133236-*` … `133238-*`, dots stripped), repo-minted,
+// MINTED-pending-confirm.
+//
+// Envelope rule (same as the wave-20 request codecs): where the
+// unicast command figures repeat the inter-PAN transaction identifier
+// inside the ZCL payload, this codec carries the body after the
+// identifier and the [`TouchlinkFrame`] envelope binds it — the
+// on-air octet order (identifier first, then these fields, integers
+// little-endian) is unchanged. Multi-octet integers ride
+// little-endian throughout, matching the commission frame convention
+// and the inspector wire shapes.
+//
+// Bounds: the device-information record count range `0x00–0x05` is
+// corpus-pinned. The group/endpoint-list responses pin no maximum,
+// so their caps are repo transport bounds: the largest record count
+// whose body still fits [`MAX_TOUCHLINK_PAYLOAD`] (`3 + 3·29 = 90`
+// and `3 + 8·11 = 91`), refused as [`TouchlinkError::PayloadTooLong`].
+
+/// Largest device-information record count: the corpus response
+/// figure bounds the count field to `0x00–0x05`.
+pub const MAX_DEVICE_INFO_RECORDS: usize = 5;
+
+/// Largest group-identifier record count: the repo transport bound
+/// (`3 + 3·29 = 90` body octets fit [`MAX_TOUCHLINK_PAYLOAD`]).
+pub const MAX_GROUP_RECORDS: usize = 29;
+
+/// Largest endpoint-list record count: the repo transport bound
+/// (`3 + 8·11 = 91` body octets fit [`MAX_TOUCHLINK_PAYLOAD`]).
+pub const MAX_ENDPOINT_RECORDS: usize = 11;
+
+/// Group type naming an ordinary group: the only value the current
+/// revision assigns (senders set it; this codec carries the octet
+/// verbatim and never refuses another value — the corpus states no
+/// receiver rule).
+pub const GROUP_TYPE_NORMAL: u8 = 0x00;
+
+/// One device-information record: the per-sub-device addressing block
+/// inside a [`DeviceInfoResponse`] (`07-5123-08-133232-01`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeviceInfoRecord {
+    /// Long address of the device this record describes.
+    pub ieee: [u8; 8],
+    /// Endpoint identifier of the sub-device.
+    pub endpoint: u8,
+    /// Profile identifier supported by the sub-device.
+    pub profile_id: u16,
+    /// Device identifier supported by the sub-device.
+    pub device_id: u16,
+    /// Device-description version (low nibble is the simple
+    /// descriptor application version, high nibble zero).
+    pub version: u8,
+    /// Group identifiers the sub-device requires.
+    pub group_count: u8,
+    /// Sort order (`0` unsorted, `1` top of the list).
+    pub sort: u8,
+}
+
+impl DeviceInfoRecord {
+    /// Wire length.
+    pub const LEN: usize = 16;
+
+    /// Decode one record.
+    pub fn decode(buf: &[u8]) -> Result<Self, TouchlinkError> {
+        if buf.len() < Self::LEN {
+            return Err(TouchlinkError::Truncated);
+        }
+        if buf.len() > Self::LEN {
+            return Err(TouchlinkError::PayloadTooLong);
+        }
+        let mut ieee = [0u8; 8];
+        ieee.copy_from_slice(&buf[0..8]);
+        Ok(Self {
+            ieee,
+            endpoint: buf[8],
+            profile_id: get_u16(buf, 9),
+            device_id: get_u16(buf, 11),
+            version: buf[13],
+            group_count: buf[14],
+            sort: buf[15],
+        })
+    }
+
+    /// Encode into `out`.
+    pub fn encode_into(&self, out: &mut [u8]) -> Result<usize, TouchlinkError> {
+        if out.len() < Self::LEN {
+            return Err(TouchlinkError::BufferTooSmall);
+        }
+        out[0..8].copy_from_slice(&self.ieee);
+        out[8] = self.endpoint;
+        put_u16(out, 9, self.profile_id);
+        put_u16(out, 11, self.device_id);
+        out[13] = self.version;
+        out[14] = self.group_count;
+        out[15] = self.sort;
+        Ok(Self::LEN)
+    }
+}
+
+/// Device information response body: the sub-device table page the
+/// target unicasts back (`07-5123-08-133232-01`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeviceInfoResponse {
+    /// Sub-devices on the target, as reported in its scan response.
+    pub num_sub_devices: u8,
+    /// Table index the page starts at (echoes the request).
+    pub start_index: u8,
+    /// Records carried (`0x00–0x05`); the first `count` entries of
+    /// `records` are valid.
+    pub count: u8,
+    /// Record table (bounded by [`MAX_DEVICE_INFO_RECORDS`]).
+    pub records: [DeviceInfoRecord; MAX_DEVICE_INFO_RECORDS],
+}
+
+impl DeviceInfoResponse {
+    /// Wire length of the fixed header.
+    pub const HEADER_LEN: usize = 3;
+
+    /// Decode a device information response body: the count field
+    /// sizes the frame, so a short carry is [`TouchlinkError::Truncated`]
+    /// and trailing octets are [`TouchlinkError::PayloadTooLong`]; a
+    /// count outside the corpus range is [`TouchlinkError::InvalidField`].
+    pub fn decode(buf: &[u8]) -> Result<Self, TouchlinkError> {
+        if buf.len() < Self::HEADER_LEN {
+            return Err(TouchlinkError::Truncated);
+        }
+        let count = buf[2];
+        if count as usize > MAX_DEVICE_INFO_RECORDS {
+            return Err(TouchlinkError::InvalidField);
+        }
+        let want = Self::HEADER_LEN + DeviceInfoRecord::LEN * count as usize;
+        if buf.len() < want {
+            return Err(TouchlinkError::Truncated);
+        }
+        if buf.len() > want {
+            return Err(TouchlinkError::PayloadTooLong);
+        }
+        let mut records = [DeviceInfoRecord {
+            ieee: [0; 8],
+            endpoint: 0,
+            profile_id: 0,
+            device_id: 0,
+            version: 0,
+            group_count: 0,
+            sort: 0,
+        }; MAX_DEVICE_INFO_RECORDS];
+        for (i, slot) in records.iter_mut().take(count as usize).enumerate() {
+            *slot = DeviceInfoRecord::decode(
+                &buf[Self::HEADER_LEN + i * DeviceInfoRecord::LEN
+                    ..Self::HEADER_LEN + (i + 1) * DeviceInfoRecord::LEN],
+            )?;
+        }
+        Ok(Self {
+            num_sub_devices: buf[0],
+            start_index: buf[1],
+            count,
+            records,
+        })
+    }
+
+    /// Encode into `out`; returns the wire length.
+    pub fn encode_into(&self, out: &mut [u8]) -> Result<usize, TouchlinkError> {
+        if self.count as usize > MAX_DEVICE_INFO_RECORDS {
+            return Err(TouchlinkError::InvalidField);
+        }
+        let n = Self::HEADER_LEN + DeviceInfoRecord::LEN * self.count as usize;
+        if out.len() < n {
+            return Err(TouchlinkError::BufferTooSmall);
+        }
+        out[0] = self.num_sub_devices;
+        out[1] = self.start_index;
+        out[2] = self.count;
+        for (i, record) in self.records.iter().take(self.count as usize).enumerate() {
+            record.encode_into(
+                &mut out[Self::HEADER_LEN + i * DeviceInfoRecord::LEN
+                    ..Self::HEADER_LEN + (i + 1) * DeviceInfoRecord::LEN],
+            )?;
+        }
+        Ok(n)
+    }
+}
+
+/// Endpoint information body: the local endpoint's general
+/// information, sent unicast (`07-5123-08-133236-01`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EndpointInformation {
+    /// Long address of the local device.
+    pub ieee: [u8; 8],
+    /// Short network address of the local device.
+    pub network_address: u16,
+    /// Identifier of the local endpoint.
+    pub endpoint: u8,
+    /// Profile identifier supported on the endpoint.
+    pub profile_id: u16,
+    /// Device identifier supported on the endpoint.
+    pub device_id: u16,
+    /// Device-description version (low nibble is the simple
+    /// descriptor application version, high nibble zero).
+    pub version: u8,
+}
+
+impl EndpointInformation {
+    /// Wire length.
+    pub const LEN: usize = 16;
+
+    /// Decode an endpoint information body.
+    pub fn decode(buf: &[u8]) -> Result<Self, TouchlinkError> {
+        if buf.len() < Self::LEN {
+            return Err(TouchlinkError::Truncated);
+        }
+        if buf.len() > Self::LEN {
+            return Err(TouchlinkError::PayloadTooLong);
+        }
+        let mut ieee = [0u8; 8];
+        ieee.copy_from_slice(&buf[0..8]);
+        Ok(Self {
+            ieee,
+            network_address: get_u16(buf, 8),
+            endpoint: buf[10],
+            profile_id: get_u16(buf, 11),
+            device_id: get_u16(buf, 13),
+            version: buf[15],
+        })
+    }
+
+    /// Encode into `out`.
+    pub fn encode_into(&self, out: &mut [u8]) -> Result<usize, TouchlinkError> {
+        if out.len() < Self::LEN {
+            return Err(TouchlinkError::BufferTooSmall);
+        }
+        out[0..8].copy_from_slice(&self.ieee);
+        put_u16(out, 8, self.network_address);
+        out[10] = self.endpoint;
+        put_u16(out, 11, self.profile_id);
+        put_u16(out, 13, self.device_id);
+        out[15] = self.version;
+        Ok(Self::LEN)
+    }
+}
+
+/// Get group identifiers request body: the starting index for the
+/// group page (`07-5123-08-133237-01`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GetGroupIdentifiersRequest {
+    /// Table index (from zero) to start returning group identifiers.
+    pub start_index: u8,
+}
+
+impl GetGroupIdentifiersRequest {
+    /// Wire length.
+    pub const LEN: usize = 1;
+
+    /// Decode a get group identifiers request body.
+    pub fn decode(buf: &[u8]) -> Result<Self, TouchlinkError> {
+        if buf.is_empty() {
+            return Err(TouchlinkError::Truncated);
+        }
+        if buf.len() > Self::LEN {
+            return Err(TouchlinkError::PayloadTooLong);
+        }
+        Ok(Self {
+            start_index: buf[0],
+        })
+    }
+
+    /// Encode into `out`.
+    pub fn encode_into(&self, out: &mut [u8]) -> Result<usize, TouchlinkError> {
+        if out.is_empty() {
+            return Err(TouchlinkError::BufferTooSmall);
+        }
+        out[0] = self.start_index;
+        Ok(Self::LEN)
+    }
+}
+
+/// One group information record: a group identifier plus its
+/// (currently fixed) type octet (`07-5123-08-133237-01`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GroupInfoRecord {
+    /// Group identifier.
+    pub group_id: u16,
+    /// Group type (senders set [`GROUP_TYPE_NORMAL`]).
+    pub group_type: u8,
+}
+
+impl GroupInfoRecord {
+    /// Wire length.
+    pub const LEN: usize = 3;
+
+    /// Decode one record.
+    pub fn decode(buf: &[u8]) -> Result<Self, TouchlinkError> {
+        if buf.len() < Self::LEN {
+            return Err(TouchlinkError::Truncated);
+        }
+        if buf.len() > Self::LEN {
+            return Err(TouchlinkError::PayloadTooLong);
+        }
+        Ok(Self {
+            group_id: get_u16(buf, 0),
+            group_type: buf[2],
+        })
+    }
+
+    /// Encode into `out`.
+    pub fn encode_into(&self, out: &mut [u8]) -> Result<usize, TouchlinkError> {
+        if out.len() < Self::LEN {
+            return Err(TouchlinkError::BufferTooSmall);
+        }
+        put_u16(out, 0, self.group_id);
+        out[2] = self.group_type;
+        Ok(Self::LEN)
+    }
+}
+
+/// Get group identifiers response body: the requested group page
+/// (`07-5123-08-133237-01`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GetGroupIdentifiersResponse {
+    /// Total group identifiers on the device.
+    pub total: u8,
+    /// Table index the page starts at (echoes the request).
+    pub start_index: u8,
+    /// Records carried; the first `count` entries of `records` are
+    /// valid.
+    pub count: u8,
+    /// Record table (bounded by [`MAX_GROUP_RECORDS`]).
+    pub records: [GroupInfoRecord; MAX_GROUP_RECORDS],
+}
+
+impl GetGroupIdentifiersResponse {
+    /// Wire length of the fixed header.
+    pub const HEADER_LEN: usize = 3;
+
+    /// Decode a get group identifiers response body: the count field
+    /// sizes the frame, so a short carry is [`TouchlinkError::Truncated`]
+    /// and trailing octets are [`TouchlinkError::PayloadTooLong`]; a
+    /// count past the repo transport bound is
+    /// [`TouchlinkError::PayloadTooLong`].
+    pub fn decode(buf: &[u8]) -> Result<Self, TouchlinkError> {
+        if buf.len() < Self::HEADER_LEN {
+            return Err(TouchlinkError::Truncated);
+        }
+        let count = buf[2];
+        if count as usize > MAX_GROUP_RECORDS {
+            return Err(TouchlinkError::PayloadTooLong);
+        }
+        let want = Self::HEADER_LEN + GroupInfoRecord::LEN * count as usize;
+        if buf.len() < want {
+            return Err(TouchlinkError::Truncated);
+        }
+        if buf.len() > want {
+            return Err(TouchlinkError::PayloadTooLong);
+        }
+        let mut records = [GroupInfoRecord {
+            group_id: 0,
+            group_type: GROUP_TYPE_NORMAL,
+        }; MAX_GROUP_RECORDS];
+        for (i, slot) in records.iter_mut().take(count as usize).enumerate() {
+            *slot = GroupInfoRecord::decode(
+                &buf[Self::HEADER_LEN + i * GroupInfoRecord::LEN
+                    ..Self::HEADER_LEN + (i + 1) * GroupInfoRecord::LEN],
+            )?;
+        }
+        Ok(Self {
+            total: buf[0],
+            start_index: buf[1],
+            count,
+            records,
+        })
+    }
+
+    /// Encode into `out`; returns the wire length.
+    pub fn encode_into(&self, out: &mut [u8]) -> Result<usize, TouchlinkError> {
+        if self.count as usize > MAX_GROUP_RECORDS {
+            return Err(TouchlinkError::PayloadTooLong);
+        }
+        let n = Self::HEADER_LEN + GroupInfoRecord::LEN * self.count as usize;
+        if out.len() < n {
+            return Err(TouchlinkError::BufferTooSmall);
+        }
+        out[0] = self.total;
+        out[1] = self.start_index;
+        out[2] = self.count;
+        for (i, record) in self.records.iter().take(self.count as usize).enumerate() {
+            record.encode_into(
+                &mut out[Self::HEADER_LEN + i * GroupInfoRecord::LEN
+                    ..Self::HEADER_LEN + (i + 1) * GroupInfoRecord::LEN],
+            )?;
+        }
+        Ok(n)
+    }
+}
+
+/// Get endpoint list request body: the starting index for the
+/// endpoint page (`07-5123-08-133238-01`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GetEndpointListRequest {
+    /// Table index (from zero) to start returning endpoints.
+    pub start_index: u8,
+}
+
+impl GetEndpointListRequest {
+    /// Wire length.
+    pub const LEN: usize = 1;
+
+    /// Decode a get endpoint list request body.
+    pub fn decode(buf: &[u8]) -> Result<Self, TouchlinkError> {
+        if buf.is_empty() {
+            return Err(TouchlinkError::Truncated);
+        }
+        if buf.len() > Self::LEN {
+            return Err(TouchlinkError::PayloadTooLong);
+        }
+        Ok(Self {
+            start_index: buf[0],
+        })
+    }
+
+    /// Encode into `out`.
+    pub fn encode_into(&self, out: &mut [u8]) -> Result<usize, TouchlinkError> {
+        if out.is_empty() {
+            return Err(TouchlinkError::BufferTooSmall);
+        }
+        out[0] = self.start_index;
+        Ok(Self::LEN)
+    }
+}
+
+/// One endpoint information record: the addressing block for one
+/// endpoint in a [`GetEndpointListResponse`] page
+/// (`07-5123-08-133238-01`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EndpointInfoRecord {
+    /// Short network address of the device carrying the endpoint.
+    pub network_address: u16,
+    /// Endpoint identifier.
+    pub endpoint: u8,
+    /// Profile identifier supported on the endpoint.
+    pub profile_id: u16,
+    /// Device identifier supported on the endpoint.
+    pub device_id: u16,
+    /// Device-description version (low nibble is the simple
+    /// descriptor application version, high nibble zero).
+    pub version: u8,
+}
+
+impl EndpointInfoRecord {
+    /// Wire length.
+    pub const LEN: usize = 8;
+
+    /// Decode one record.
+    pub fn decode(buf: &[u8]) -> Result<Self, TouchlinkError> {
+        if buf.len() < Self::LEN {
+            return Err(TouchlinkError::Truncated);
+        }
+        if buf.len() > Self::LEN {
+            return Err(TouchlinkError::PayloadTooLong);
+        }
+        Ok(Self {
+            network_address: get_u16(buf, 0),
+            endpoint: buf[2],
+            profile_id: get_u16(buf, 3),
+            device_id: get_u16(buf, 5),
+            version: buf[7],
+        })
+    }
+
+    /// Encode into `out`.
+    pub fn encode_into(&self, out: &mut [u8]) -> Result<usize, TouchlinkError> {
+        if out.len() < Self::LEN {
+            return Err(TouchlinkError::BufferTooSmall);
+        }
+        put_u16(out, 0, self.network_address);
+        out[2] = self.endpoint;
+        put_u16(out, 3, self.profile_id);
+        put_u16(out, 5, self.device_id);
+        out[7] = self.version;
+        Ok(Self::LEN)
+    }
+}
+
+/// Get endpoint list response body: the requested endpoint page
+/// (`07-5123-08-133238-01`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GetEndpointListResponse {
+    /// Total endpoints on the device.
+    pub total: u8,
+    /// Table index the page starts at (echoes the request).
+    pub start_index: u8,
+    /// Records carried; the first `count` entries of `records` are
+    /// valid.
+    pub count: u8,
+    /// Record table (bounded by [`MAX_ENDPOINT_RECORDS`]).
+    pub records: [EndpointInfoRecord; MAX_ENDPOINT_RECORDS],
+}
+
+impl GetEndpointListResponse {
+    /// Wire length of the fixed header.
+    pub const HEADER_LEN: usize = 3;
+
+    /// Decode a get endpoint list response body: the count field
+    /// sizes the frame, so a short carry is [`TouchlinkError::Truncated`]
+    /// and trailing octets are [`TouchlinkError::PayloadTooLong`]; a
+    /// count past the repo transport bound is
+    /// [`TouchlinkError::PayloadTooLong`].
+    pub fn decode(buf: &[u8]) -> Result<Self, TouchlinkError> {
+        if buf.len() < Self::HEADER_LEN {
+            return Err(TouchlinkError::Truncated);
+        }
+        let count = buf[2];
+        if count as usize > MAX_ENDPOINT_RECORDS {
+            return Err(TouchlinkError::PayloadTooLong);
+        }
+        let want = Self::HEADER_LEN + EndpointInfoRecord::LEN * count as usize;
+        if buf.len() < want {
+            return Err(TouchlinkError::Truncated);
+        }
+        if buf.len() > want {
+            return Err(TouchlinkError::PayloadTooLong);
+        }
+        let mut records = [EndpointInfoRecord {
+            network_address: 0,
+            endpoint: 0,
+            profile_id: 0,
+            device_id: 0,
+            version: 0,
+        }; MAX_ENDPOINT_RECORDS];
+        for (i, slot) in records.iter_mut().take(count as usize).enumerate() {
+            *slot = EndpointInfoRecord::decode(
+                &buf[Self::HEADER_LEN + i * EndpointInfoRecord::LEN
+                    ..Self::HEADER_LEN + (i + 1) * EndpointInfoRecord::LEN],
+            )?;
+        }
+        Ok(Self {
+            total: buf[0],
+            start_index: buf[1],
+            count,
+            records,
+        })
+    }
+
+    /// Encode into `out`; returns the wire length.
+    pub fn encode_into(&self, out: &mut [u8]) -> Result<usize, TouchlinkError> {
+        if self.count as usize > MAX_ENDPOINT_RECORDS {
+            return Err(TouchlinkError::PayloadTooLong);
+        }
+        let n = Self::HEADER_LEN + EndpointInfoRecord::LEN * self.count as usize;
+        if out.len() < n {
+            return Err(TouchlinkError::BufferTooSmall);
+        }
+        out[0] = self.total;
+        out[1] = self.start_index;
+        out[2] = self.count;
+        for (i, record) in self.records.iter().take(self.count as usize).enumerate() {
+            record.encode_into(
+                &mut out[Self::HEADER_LEN + i * EndpointInfoRecord::LEN
+                    ..Self::HEADER_LEN + (i + 1) * EndpointInfoRecord::LEN],
+            )?;
+        }
+        Ok(n)
+    }
+}
+
 /// Which join order the initiator sends and which response it
 /// awaits (`07-5123-08-13322-01` / `13323-01`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2186,6 +2764,54 @@ impl TouchlinkTarget {
             return Err(TouchlinkError::StaleTransaction);
         }
         Ok(req.start_index)
+    }
+
+    /// Build the device-information response frame for the latched
+    /// transaction: the target unicasts the requested sub-device page
+    /// back with the exchange identifier (`22-65816-030-122-03` step 5,
+    /// `07-5123-08-133232-01`). The identifier binding is the frozen
+    /// part; the record table is product data. Only valid after a scan
+    /// response; a foreign transaction refuses and the exchange stays
+    /// waiting. Answering never changes state: the procedure keeps
+    /// awaiting orders. There is no inter-PAN send helper because the
+    /// response rides unicast, which has no seam in this crate; the
+    /// caller transmits the returned frame through its unicast path.
+    pub fn device_info_response(
+        &self,
+        transaction: u32,
+        num_sub_devices: u8,
+        start_index: u8,
+        records: &[DeviceInfoRecord],
+    ) -> Result<TouchlinkFrame, TouchlinkError> {
+        if self.state != TouchlinkTargetState::Responded {
+            return Err(TouchlinkError::BadState);
+        }
+        if transaction != self.transaction {
+            return Err(TouchlinkError::StaleTransaction);
+        }
+        if records.len() > MAX_DEVICE_INFO_RECORDS {
+            return Err(TouchlinkError::InvalidField);
+        }
+        let mut table = [DeviceInfoRecord {
+            ieee: [0; 8],
+            endpoint: 0,
+            profile_id: 0,
+            device_id: 0,
+            version: 0,
+            group_count: 0,
+            sort: 0,
+        }; MAX_DEVICE_INFO_RECORDS];
+        table[..records.len()].copy_from_slice(records);
+        let body = DeviceInfoResponse {
+            num_sub_devices,
+            start_index,
+            count: records.len() as u8,
+            records: table,
+        };
+        let mut payload =
+            [0u8; DeviceInfoResponse::HEADER_LEN + DeviceInfoRecord::LEN * MAX_DEVICE_INFO_RECORDS];
+        let n = body.encode_into(&mut payload)?;
+        TouchlinkFrame::new(self.transaction, tx::DEVICE_INFO_RSP, &payload[..n])
     }
 
     /// Advance the injected clock by `elapsed_ms`. Returns true when

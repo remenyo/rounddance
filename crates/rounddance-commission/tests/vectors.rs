@@ -2129,3 +2129,423 @@ fn vector_tclk_wait_timeouts_and_eject_rd_sim_01() {
     assert_eq!(done.state(), TclkState::Failed);
     assert_eq!(done.error(), Some(JoinError::BadState));
 }
+
+// 07-5123-08-133232-01: device information response — application
+// fields (record table) bound to the latched transaction.
+#[test]
+fn vector_device_info_response_wire_07_5123_08_133232_01() {
+    let rec0 = DeviceInfoRecord {
+        ieee: [0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77],
+        endpoint: 0x01,
+        profile_id: 0x0104,
+        device_id: 0x0100,
+        version: 0x01,
+        group_count: 0x02,
+        sort: 0x00,
+    };
+    let rec1 = DeviceInfoRecord {
+        ieee: [0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+        endpoint: 0x02,
+        profile_id: 0x0104,
+        device_id: 0x0200,
+        version: 0x02,
+        group_count: 0x00,
+        sort: 0x01,
+    };
+    let mut records = [DeviceInfoRecord {
+        ieee: [0; 8],
+        endpoint: 0,
+        profile_id: 0,
+        device_id: 0,
+        version: 0,
+        group_count: 0,
+        sort: 0,
+    }; MAX_DEVICE_INFO_RECORDS];
+    records[0] = rec0;
+    records[1] = rec1;
+    let rsp = DeviceInfoResponse {
+        num_sub_devices: 0x02,
+        start_index: 0x00,
+        count: 0x02,
+        records,
+    };
+    let mut buf = [0u8; 96];
+    let n = rsp.encode_into(&mut buf).unwrap();
+    assert_eq!(n, 3 + 2 * DeviceInfoRecord::LEN);
+    assert_eq!(
+        &buf[..19],
+        &[
+            0x02, 0x00, 0x02, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x01, 0x04, 0x01,
+            0x00, 0x01, 0x01, 0x02, 0x00,
+        ]
+    );
+    assert_eq!(
+        &buf[19..35],
+        &[
+            0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x02, 0x04, 0x01, 0x00, 0x02, 0x02,
+            0x00, 0x01,
+        ]
+    );
+    assert_eq!(DeviceInfoResponse::decode(&buf[..n]).unwrap(), rsp);
+    // Empty table is a legal page.
+    let empty = DeviceInfoResponse {
+        num_sub_devices: 0x01,
+        start_index: 0x01,
+        count: 0x00,
+        records: [DeviceInfoRecord {
+            ieee: [0; 8],
+            endpoint: 0,
+            profile_id: 0,
+            device_id: 0,
+            version: 0,
+            group_count: 0,
+            sort: 0,
+        }; MAX_DEVICE_INFO_RECORDS],
+    };
+    let m = empty.encode_into(&mut buf).unwrap();
+    assert_eq!(m, 3);
+    assert_eq!(&buf[..3], &[0x01, 0x01, 0x00]);
+    assert_eq!(DeviceInfoResponse::decode(&buf[..m]).unwrap(), empty);
+}
+
+// 07-5123-08-133232-01: device information response edges — the
+// record count range is corpus-pinned (0x00–0x05); the count field
+// must match the carried records exactly.
+#[test]
+fn vector_device_info_response_edges_07_5123_08_133232_01() {
+    let rec = DeviceInfoRecord {
+        ieee: [0x01; 8],
+        endpoint: 0x01,
+        profile_id: 0x0104,
+        device_id: 0x0100,
+        version: 0x01,
+        group_count: 0x00,
+        sort: 0x00,
+    };
+    // Truncated header and truncated tail refuse.
+    assert_eq!(
+        DeviceInfoResponse::decode(&[0x01, 0x00]).unwrap_err(),
+        TouchlinkError::Truncated
+    );
+    let mut buf = [0u8; 96];
+    let rsp = DeviceInfoResponse {
+        num_sub_devices: 0x01,
+        start_index: 0x00,
+        count: 0x01,
+        records: [rec; MAX_DEVICE_INFO_RECORDS],
+    };
+    let n = rsp.encode_into(&mut buf).unwrap();
+    assert_eq!(
+        DeviceInfoResponse::decode(&buf[..n - 1]).unwrap_err(),
+        TouchlinkError::Truncated
+    );
+    // Trailing junk refuses.
+    buf[n] = 0x00;
+    assert_eq!(
+        DeviceInfoResponse::decode(&buf[..n + 1]).unwrap_err(),
+        TouchlinkError::PayloadTooLong
+    );
+    // Count above the corpus range refuses even with room: the field
+    // value itself is illegal.
+    let mut bad = [0u8; 3 + 6 * DeviceInfoRecord::LEN];
+    bad[0] = 0x06;
+    bad[1] = 0x00;
+    bad[2] = 0x06;
+    assert_eq!(
+        DeviceInfoResponse::decode(&bad).unwrap_err(),
+        TouchlinkError::InvalidField
+    );
+    // Count field disagreeing with the carried records refuses: the
+    // frame claims two records but carries one, so it is truncated
+    // against its own claim.
+    let mut skew = [0u8; 3 + DeviceInfoRecord::LEN];
+    skew[0] = 0x01;
+    skew[1] = 0x00;
+    skew[2] = 0x02;
+    assert_eq!(
+        DeviceInfoResponse::decode(&skew).unwrap_err(),
+        TouchlinkError::Truncated
+    );
+    // Encoder refuses a count the bounded table cannot carry.
+    let over = DeviceInfoResponse {
+        num_sub_devices: 0x06,
+        start_index: 0x00,
+        count: 0x06,
+        records: [rec; MAX_DEVICE_INFO_RECORDS],
+    };
+    assert_eq!(
+        over.encode_into(&mut buf).unwrap_err(),
+        TouchlinkError::InvalidField
+    );
+}
+
+// 22-65816-030-122-03: target answers a matching device information
+// request with a response bound to the latched transaction; the
+// exchange stays waiting (no state change, no reply on mismatch).
+#[test]
+fn vector_device_info_exchange_22_65816_030_122_03() {
+    const TID: u32 = 0x1234_5678;
+    let mut target = TouchlinkTarget::new();
+    let scan = TouchlinkFrame::new(TID, 0x00, &[0x05, 0x83]).unwrap();
+    target.on_scan_request(&scan);
+    let scan_rsp = ScanResponseBody {
+        rssi_correction: 0x00,
+        zigbee_info: 0x01,
+        touchlink_info: 0x83,
+        key_bitmask: 0x8010,
+        response_id: 0x9abc_def0,
+        extended_pan: [0x01; 8],
+        network_update_id: 0x00,
+        channel: 15,
+        pan_id: 0x1a2b,
+        network_address: 0xffff,
+        sub_devices: 0,
+        total_groups: 0x00,
+        endpoint: 0,
+        profile_id: 0,
+        device_id: 0,
+        version: 0,
+        group_count: 0,
+    };
+    struct Drop;
+    impl InterPanTx for Drop {
+        type Error = TouchlinkError;
+        fn send(&mut self, _c: u8, _f: &TouchlinkFrame) -> Result<(), TouchlinkError> {
+            Ok(())
+        }
+    }
+    target.respond_full(&mut Drop, 15, &scan_rsp).unwrap();
+    assert_eq!(target.state(), TouchlinkTargetState::Responded);
+    // Request leg: the target surfaces the start index; product data
+    // fills the records.
+    let req = DeviceInfoRequest { start_index: 0 };
+    assert_eq!(target.on_device_info(TID, &req).unwrap(), 0);
+    let rec = DeviceInfoRecord {
+        ieee: [0x02; 8],
+        endpoint: 0x01,
+        profile_id: 0x0104,
+        device_id: 0x0100,
+        version: 0x01,
+        group_count: 0x00,
+        sort: 0x00,
+    };
+    let frame = target.device_info_response(TID, 1, 0, &[rec]).unwrap();
+    assert_eq!(frame.command, 0x03);
+    assert_eq!(frame.transaction, TID);
+    let body = DeviceInfoResponse::decode(frame.payload_bytes()).unwrap();
+    assert_eq!(body.num_sub_devices, 1);
+    assert_eq!(body.start_index, 0);
+    assert_eq!(body.count, 1);
+    assert_eq!(body.records[0], rec);
+    // No state change: the exchange stays waiting for orders.
+    assert_eq!(target.state(), TouchlinkTargetState::Responded);
+    // Foreign transactions never advance: stale builder + stale order
+    // check both refuse.
+    assert_eq!(
+        target
+            .device_info_response(0xdead_beef, 1, 0, &[rec])
+            .unwrap_err(),
+        TouchlinkError::StaleTransaction
+    );
+    assert_eq!(
+        target.on_device_info(0xdead_beef, &req).unwrap_err(),
+        TouchlinkError::StaleTransaction
+    );
+    // Idle targets cannot answer.
+    let idle = TouchlinkTarget::new();
+    assert_eq!(
+        idle.device_info_response(TID, 1, 0, &[rec]).unwrap_err(),
+        TouchlinkError::BadState
+    );
+}
+
+// 07-5123-08-133236-01: endpoint information — fixed 16-octet
+// application block (unicast utility, command 0x40).
+#[test]
+fn vector_endpoint_information_wire_07_5123_08_133236_01() {
+    let info = EndpointInformation {
+        ieee: [0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77],
+        network_address: 0x1234,
+        endpoint: 0x01,
+        profile_id: 0x0104,
+        device_id: 0x0100,
+        version: 0x01,
+    };
+    let mut buf = [0u8; 16];
+    assert_eq!(
+        info.encode_into(&mut buf).unwrap(),
+        EndpointInformation::LEN
+    );
+    assert_eq!(
+        &buf,
+        &[
+            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x34, 0x12, 0x01, 0x04, 0x01, 0x00,
+            0x01, 0x01,
+        ]
+    );
+    assert_eq!(EndpointInformation::decode(&buf).unwrap(), info);
+    assert_eq!(
+        EndpointInformation::decode(&buf[..15]).unwrap_err(),
+        TouchlinkError::Truncated
+    );
+    let mut long = [0u8; 17];
+    long[..16].copy_from_slice(&buf);
+    assert_eq!(
+        EndpointInformation::decode(&long).unwrap_err(),
+        TouchlinkError::PayloadTooLong
+    );
+}
+
+// 07-5123-08-133237-01 / 133238-01: utility request/response pairs —
+// single-octet start-index requests; paged record-list responses.
+#[test]
+fn vector_utility_responses_wire_07_5123_08_133237_01() {
+    // Requests are one octet each (start index).
+    let greq = GetGroupIdentifiersRequest { start_index: 0x02 };
+    let mut obuf = [0u8; 1];
+    assert_eq!(greq.encode_into(&mut obuf).unwrap(), 1);
+    assert_eq!(&obuf, &[0x02]);
+    assert_eq!(GetGroupIdentifiersRequest::decode(&obuf).unwrap(), greq);
+    let ereq = GetEndpointListRequest { start_index: 0x01 };
+    assert_eq!(ereq.encode_into(&mut obuf).unwrap(), 1);
+    assert_eq!(&obuf, &[0x01]);
+    assert_eq!(GetEndpointListRequest::decode(&obuf).unwrap(), ereq);
+    // Group response: total + start + count + 3-octet records.
+    let mut groups = [GroupInfoRecord {
+        group_id: 0,
+        group_type: GROUP_TYPE_NORMAL,
+    }; MAX_GROUP_RECORDS];
+    groups[0] = GroupInfoRecord {
+        group_id: 0x0001,
+        group_type: GROUP_TYPE_NORMAL,
+    };
+    groups[1] = GroupInfoRecord {
+        group_id: 0x0002,
+        group_type: GROUP_TYPE_NORMAL,
+    };
+    let grsp = GetGroupIdentifiersResponse {
+        total: 0x04,
+        start_index: 0x00,
+        count: 0x02,
+        records: groups,
+    };
+    let mut buf = [0u8; 96];
+    let n = grsp.encode_into(&mut buf).unwrap();
+    assert_eq!(n, 3 + 2 * GroupInfoRecord::LEN);
+    assert_eq!(
+        &buf[..n],
+        &[0x04, 0x00, 0x02, 0x01, 0x00, 0x00, 0x02, 0x00, 0x00]
+    );
+    assert_eq!(
+        GetGroupIdentifiersResponse::decode(&buf[..n]).unwrap(),
+        grsp
+    );
+    // Endpoint list response: total + start + count + 8-octet records.
+    let mut eps = [EndpointInfoRecord {
+        network_address: 0,
+        endpoint: 0,
+        profile_id: 0,
+        device_id: 0,
+        version: 0,
+    }; MAX_ENDPOINT_RECORDS];
+    eps[0] = EndpointInfoRecord {
+        network_address: 0x1234,
+        endpoint: 0x01,
+        profile_id: 0x0104,
+        device_id: 0x000d,
+        version: 0x01,
+    };
+    let ersp = GetEndpointListResponse {
+        total: 0x02,
+        start_index: 0x00,
+        count: 0x01,
+        records: eps,
+    };
+    let m = ersp.encode_into(&mut buf).unwrap();
+    assert_eq!(m, 3 + EndpointInfoRecord::LEN);
+    assert_eq!(
+        &buf[..m],
+        &[0x02, 0x00, 0x01, 0x34, 0x12, 0x01, 0x04, 0x01, 0x0d, 0x00, 0x01]
+    );
+    assert_eq!(GetEndpointListResponse::decode(&buf[..m]).unwrap(), ersp);
+}
+
+// Utility response edges: exact record framing, count agreement,
+// and the transport-budget caps (repo bounds, not corpus limits).
+#[test]
+fn vector_utility_response_edges_07_5123_08_133237_01() {
+    assert_eq!(
+        GetGroupIdentifiersResponse::decode(&[0x01, 0x00]).unwrap_err(),
+        TouchlinkError::Truncated
+    );
+    // Ragged tail refuses: the frame claims one record but carries
+    // a single stray octet, so it is truncated against its own claim.
+    assert_eq!(
+        GetGroupIdentifiersResponse::decode(&[0x01, 0x00, 0x01, 0x01]).unwrap_err(),
+        TouchlinkError::Truncated
+    );
+    // Octets beyond the claimed records refuse.
+    assert_eq!(
+        GetGroupIdentifiersResponse::decode(&[0x01, 0x00, 0x01, 0x01, 0x00, 0x00, 0xff])
+            .unwrap_err(),
+        TouchlinkError::PayloadTooLong
+    );
+    // Count claiming more records than carried refuses as truncated.
+    assert_eq!(
+        GetGroupIdentifiersResponse::decode(&[0x01, 0x00, 0x02, 0x01, 0x00, 0x00]).unwrap_err(),
+        TouchlinkError::Truncated
+    );
+    // A record count that cannot fit the declared frame budget refuses.
+    let mut over = [0u8; 3 + 30 * GroupInfoRecord::LEN];
+    over[0] = 30;
+    over[1] = 0;
+    over[2] = 30;
+    assert_eq!(
+        GetGroupIdentifiersResponse::decode(&over).unwrap_err(),
+        TouchlinkError::PayloadTooLong
+    );
+    assert_eq!(
+        GetEndpointListResponse::decode(&[0x01, 0x00, 0x01, 0x34, 0x12, 0x01]).unwrap_err(),
+        TouchlinkError::Truncated
+    );
+    let mut eover = [0u8; 3 + 12 * EndpointInfoRecord::LEN];
+    eover[0] = 12;
+    eover[1] = 0;
+    eover[2] = 12;
+    assert_eq!(
+        GetEndpointListResponse::decode(&eover).unwrap_err(),
+        TouchlinkError::PayloadTooLong
+    );
+    // Fullest legal tables still fit the declared frame budget.
+    let gfull = GetGroupIdentifiersResponse {
+        total: 29,
+        start_index: 0,
+        count: 29,
+        records: [GroupInfoRecord {
+            group_id: 0x0001,
+            group_type: GROUP_TYPE_NORMAL,
+        }; MAX_GROUP_RECORDS],
+    };
+    let mut buf = [0u8; 96];
+    let n = gfull.encode_into(&mut buf).unwrap();
+    assert!(n <= MAX_TOUCHLINK_PAYLOAD);
+    assert_eq!(
+        GetGroupIdentifiersResponse::decode(&buf[..n]).unwrap(),
+        gfull
+    );
+    let efull = GetEndpointListResponse {
+        total: 11,
+        start_index: 0,
+        count: 11,
+        records: [EndpointInfoRecord {
+            network_address: 0x0001,
+            endpoint: 0x01,
+            profile_id: 0x0104,
+            device_id: 0x000d,
+            version: 0x01,
+        }; MAX_ENDPOINT_RECORDS],
+    };
+    let m = efull.encode_into(&mut buf).unwrap();
+    assert!(m <= MAX_TOUCHLINK_PAYLOAD);
+    assert_eq!(GetEndpointListResponse::decode(&buf[..m]).unwrap(), efull);
+}
