@@ -904,3 +904,105 @@ fn ash_loss_recovery_and_wrap_ack_loopback_through_decoder() {
     assert_eq!((tx.base(), tx.next_frm()), (3, 3));
     assert_eq!((dec.dropped(), dec.consecutive_bad()), (0, 0));
 }
+
+/// Control-frame decoder parity: every non-DATA shape (ACK, NAK,
+/// RST, RSTACK, ERROR) crosses the streaming byte pump with one-shot
+/// `decode` parity. Decoder legs so far stream DATA plus one ACK
+/// re-arm value only; NAK/RST/RSTACK/ERROR are pinned one-shot only —
+/// this closes that composition gap inside the `RD-COMPAT-11`
+/// ack-window leg. Direct delivery only: no timers, no bring-up
+/// sequencing, no reset semantics decided.
+#[test]
+fn ash_control_frames_loopback_through_decoder() {
+    use rounddance_compat::ember::crc16;
+    assert_eq!(crc16(b"123456789"), 0x29B1);
+    // Oracle pins: CRC-16/CCITT over each unescaped control body.
+    assert_eq!(crc16(&[0xB8]), 0xC723);
+    assert_eq!(crc16(&[0x81]), 0x6059);
+    assert_eq!(crc16(&[0xC0]), 0x38BC);
+    assert_eq!(crc16(&[0xC1, 0x02, 0x01]), 0xAB18);
+    assert_eq!(crc16(&[0xC2, 0x02, 0x51]), 0xA8BD);
+    // ACK(7): CTRL = ACK_BASE | (7 << 3) = 0xB8 (top of the 3-bit
+    // ack range through the pump, not just the ack=2 re-arm value).
+    let mut ack_wire = [0u8; 16];
+    let n_ack = encode_ack(7, &mut ack_wire).unwrap();
+    assert_eq!(&ack_wire[..n_ack], &[FLAG, 0x03, 0xB8, 0x23, 0xC7, FLAG]);
+    // NAK(0): CTRL = NAK_BASE | (0 << 3) = 0x81 (bottom of the range).
+    let mut nak_wire = [0u8; 16];
+    let n_nak = encode_nak(0, &mut nak_wire).unwrap();
+    assert_eq!(&nak_wire[..n_nak], &[FLAG, 0x03, 0x81, 0x59, 0x60, FLAG]);
+    // RST: CTRL = 0xC0, CRC16(`C0`) = 0x38BC (same pin as the
+    // one-shot vector — the parity with the pump is what is new).
+    let mut rst_wire = [0u8; 16];
+    let n_rst = encode_rst(&mut rst_wire).unwrap();
+    assert_eq!(&rst_wire[..n_rst], &[FLAG, 0x03, 0xC0, 0xBC, 0x38, FLAG]);
+    // RSTACK(2, 1) and ERROR(2, 0x51): same one-shot pins, now
+    // through the pump with their version/status pairs intact.
+    let mut rstack_wire = [0u8; 16];
+    let n_rstack = encode_rstack(2, 1, &mut rstack_wire).unwrap();
+    assert_eq!(
+        &rstack_wire[..n_rstack],
+        &[FLAG, 0x05, 0xC1, 0x02, 0x01, 0x18, 0xAB, FLAG]
+    );
+    let mut error_wire = [0u8; 16];
+    let n_error = encode_error(2, 0x51, &mut error_wire).unwrap();
+    assert_eq!(
+        &error_wire[..n_error],
+        &[FLAG, 0x05, 0xC2, 0x02, 0x51, 0xBD, 0xA8, FLAG]
+    );
+    // One-shot parity first: each wire decodes to its kind.
+    let (want_ack, used) = decode(&ack_wire[..n_ack]).unwrap();
+    assert_eq!(used, n_ack);
+    assert_eq!(want_ack.kind, AshKind::Ack { ack_num: 7 });
+    let (want_nak, used) = decode(&nak_wire[..n_nak]).unwrap();
+    assert_eq!(used, n_nak);
+    assert_eq!(want_nak.kind, AshKind::Nak { ack_num: 0 });
+    let (want_rst, used) = decode(&rst_wire[..n_rst]).unwrap();
+    assert_eq!(used, n_rst);
+    assert_eq!(want_rst.kind, AshKind::Rst);
+    let (want_rstack, used) = decode(&rstack_wire[..n_rstack]).unwrap();
+    assert_eq!(used, n_rstack);
+    assert_eq!(
+        want_rstack.kind,
+        AshKind::Rstack {
+            version: 2,
+            status: 1
+        }
+    );
+    let (want_error, used) = decode(&error_wire[..n_error]).unwrap();
+    assert_eq!(used, n_error);
+    assert_eq!(
+        want_error.kind,
+        AshKind::Error {
+            version: 2,
+            code: 0x51
+        }
+    );
+    // Back-to-back through the byte pump: five frames in, five frame
+    // outcomes out, in order, each identical to the one-shot decode.
+    let mut wire = [0u8; 80];
+    let mut total = 0;
+    for (frame, n) in [
+        (&ack_wire[..n_ack], n_ack),
+        (&nak_wire[..n_nak], n_nak),
+        (&rst_wire[..n_rst], n_rst),
+        (&rstack_wire[..n_rstack], n_rstack),
+        (&error_wire[..n_error], n_error),
+    ] {
+        wire[total..total + n].copy_from_slice(frame);
+        total += n;
+    }
+    let mut dec = AshDecoder::new();
+    let outcomes = pump_ash(&mut dec, &wire[..total]);
+    assert_eq!(
+        outcomes,
+        [
+            AshOutcome::Frame(want_ack),
+            AshOutcome::Frame(want_nak),
+            AshOutcome::Frame(want_rst),
+            AshOutcome::Frame(want_rstack),
+            AshOutcome::Frame(want_error),
+        ]
+    );
+    assert_eq!((dec.dropped(), dec.consecutive_bad()), (0, 0));
+}
