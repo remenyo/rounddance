@@ -290,6 +290,60 @@ fn compat_30_replays_deterministically() {
     assert_eq!(first.toggle_on, second.toggle_on);
 }
 
+// `22-65816-030-91-01` + `22-65816-030-56-03` + `22-65816-030-91-02/03`
+// + `05-3474-23-331-02` + `05-3474-23-451-01` + `05-3474-23-4312-01` +
+// `07-5123-08-241-01` (matrix): 3.0-profile join + secured toggle is
+// timing-independent. Four seeds incl. the 0/u64::MAX edges (mids are
+// this scenario's own proven seeds: the functional `0x30C4` and the
+// replay `0xB3E`, same reuse habit as the secured-transport matrix
+// keeping `0x5EC0`) — per-seed double runs replay the identical trace
+// + wire + toggle, and every seed joins with the server flipped
+// off→on (same exact-medium split as the tclk stay-joined matrix: the
+// Deliver-only script draws no jitter, so even the trace pins
+// cross-seed — the naive cross-seed trace pin passes here, unlike the
+// Delay-jittered transport/GP rows where it fails on `queued_us`
+// timestamps only). The unknown-version + strict-posture negatives stay
+// standalone: seed-free gate checks with no medium trace.
+#[test]
+fn compat_30_matrix_seeds_share_wire_and_trace() {
+    const SEEDS: [u64; 4] = [0x0000, 0x30C4, 0xB3E, u64::MAX];
+    let mut ref_outcome: Option<(Vec<u8>, Vec<String>)> = None;
+    for &seed in &SEEDS {
+        let first = run_30_transaction(seed);
+        let second = run_30_transaction(seed);
+        assert_eq!(
+            first.trace, second.trace,
+            "per-seed trace replay, seed {seed:#x}"
+        );
+        assert_eq!(
+            first.wire, second.wire,
+            "per-seed wire replay, seed {seed:#x}"
+        );
+        assert_eq!(
+            first.toggle_on, second.toggle_on,
+            "per-seed toggle replay, seed {seed:#x}"
+        );
+        assert!(first.joined, "joiner joins, seed {seed:#x}");
+        assert!(first.toggle_on, "toggle flips off→on, seed {seed:#x}");
+        assert!(
+            first
+                .trace
+                .iter()
+                .any(|l| l.contains("confirm handle=0 status=Delivered")),
+            "trace records delivery, seed {seed:#x}"
+        );
+        assert!(!first.trace.is_empty());
+        let outcome = (first.wire, first.trace);
+        match &ref_outcome {
+            None => ref_outcome = Some(outcome),
+            Some(pinned) => assert_eq!(
+                &outcome, pinned,
+                "cross-seed wire+trace pin, seed {seed:#x}"
+            ),
+        }
+    }
+}
+
 // Unknown NWK versions never reach the join machine: steering may
 // list the beacon, but the compat gate refuses it before any key
 // material moves.

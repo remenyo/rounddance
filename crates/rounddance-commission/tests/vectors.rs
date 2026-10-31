@@ -257,6 +257,32 @@ fn vector_target_needs_network_22_65816_030_111_01() {
     assert!(t.serves_descriptors());
 }
 
+// 22-65816-030-111-01: identify-window expiry parks the machine —
+// caller ticks outside the window (before start, after expiry) are
+// silent no-ops: no state change, no expiry report, still no answers.
+#[test]
+fn vector_target_tick_outside_window_is_noop_22_65816_030_111_01() {
+    // Idle: the window never opened, so ticks report nothing.
+    let mut t = FinderTarget::new();
+    assert_eq!(t.state(), TargetState::Idle);
+    assert!(!t.answer_identify());
+    assert!(!t.tick_1s());
+    assert_eq!(t.state(), TargetState::Idle);
+
+    // Run the window out, then keep ticking: expiry reports once,
+    // later ticks stay parked in Done.
+    t.start(true, 2).unwrap();
+    assert!(!t.tick_1s());
+    assert_eq!(t.state(), TargetState::Identifying { remaining_s: 1 });
+    assert!(t.tick_1s());
+    assert_eq!(t.state(), TargetState::Done);
+    assert!(!t.tick_1s());
+    assert!(!t.tick_1s());
+    assert_eq!(t.state(), TargetState::Done);
+    assert!(!t.answer_identify());
+    assert!(t.serves_descriptors());
+}
+
 // 22-65816-030-111-02: off-network initiator fails; silence fails; answers log.
 #[test]
 fn vector_initiator_query_flow_22_65816_030_111_02() {
