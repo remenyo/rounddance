@@ -5,7 +5,7 @@
 //! `receive_handle_done`, never log/lock in the callback). All `unsafe`
 //! in this crate lives here and in [`crate::ffi`], each block justified.
 
-use crate::driver::{Driver, DriverError, RxFrame, TxEvent, TxFail, MAX_AIR_FRAME};
+use crate::driver::{Driver, DriverError, PendingMode, RxFrame, TxEvent, TxFail, MAX_AIR_FRAME};
 use crate::ffi::{self, tx_err};
 use core::sync::atomic::{AtomicBool, AtomicI8, AtomicU32, AtomicU8, AtomicUsize, Ordering};
 
@@ -347,6 +347,71 @@ impl Driver for EspIdfDriver {
         // SAFETY: no-arg FFI, return code checked.
         unsafe {
             check(ffi::esp_ieee802154_receive())?;
+        }
+        Ok(())
+    }
+
+    fn set_coordinator(&mut self, enable: bool) -> Result<(), DriverError> {
+        if !self.inited {
+            return Err(DriverError::NotReady);
+        }
+        // SAFETY: bool-arg FFI, return code checked.
+        unsafe {
+            check(ffi::esp_ieee802154_set_coordinator(enable))?;
+        }
+        Ok(())
+    }
+
+    fn set_pending_mode(&mut self, mode: PendingMode) -> Result<(), DriverError> {
+        if !self.inited {
+            return Err(DriverError::NotReady);
+        }
+        let ffi_mode = match mode {
+            PendingMode::Disable => ffi::PendingMode::Disable,
+            PendingMode::Enable => ffi::PendingMode::Enable,
+            PendingMode::Enhanced => ffi::PendingMode::Enhanced,
+            PendingMode::Zigbee => ffi::PendingMode::Zigbee,
+        };
+        // SAFETY: enum passed by value (repr u32, order checked
+        // against the header in `ffi`), code checked.
+        unsafe {
+            check(ffi::esp_ieee802154_set_pending_mode(ffi_mode))?;
+        }
+        Ok(())
+    }
+
+    fn pending_short_add(&mut self, short: u16) -> Result<(), DriverError> {
+        if !self.inited {
+            return Err(DriverError::NotReady);
+        }
+        // SAFETY: the driver copies the 2 address octets synchronously
+        // (header §"frame pending"); LE wire order on both sides.
+        let le = short.to_le_bytes();
+        unsafe {
+            check(ffi::esp_ieee802154_add_pending_addr(le.as_ptr(), true))?;
+        }
+        Ok(())
+    }
+
+    fn pending_short_clear(&mut self, short: u16) -> Result<(), DriverError> {
+        if !self.inited {
+            return Err(DriverError::NotReady);
+        }
+        // SAFETY: as for `pending_short_add`.
+        let le = short.to_le_bytes();
+        unsafe {
+            check(ffi::esp_ieee802154_clear_pending_addr(le.as_ptr(), true))?;
+        }
+        Ok(())
+    }
+
+    fn pending_shorts_reset(&mut self) -> Result<(), DriverError> {
+        if !self.inited {
+            return Err(DriverError::NotReady);
+        }
+        // SAFETY: bool-arg FFI, return code checked.
+        unsafe {
+            check(ffi::esp_ieee802154_reset_pending_table(true))?;
         }
         Ok(())
     }

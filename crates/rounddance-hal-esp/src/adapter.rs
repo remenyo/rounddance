@@ -18,7 +18,9 @@
 //! destination PAN: frames for our PAN go to the PAN indication queue,
 //! everything else to the inter-PAN queue.
 
-use crate::driver::{Driver, DriverError, RxFrame, TxEvent, TxFail, MAX_AIR_FRAME, MAX_PSDU};
+use crate::driver::{
+    Driver, DriverError, PendingMode, RxFrame, TxEvent, TxFail, MAX_AIR_FRAME, MAX_PSDU,
+};
 use crate::mac_cmd::{self, Incoming as MacIncoming};
 use core::array::from_fn;
 use core::fmt;
@@ -931,6 +933,68 @@ impl<D: Driver> EspAdapter<D> {
             return Err(MacError::NotReady);
         }
         self.driver.set_promiscuous(enable).map_err(map_mgmt_err)
+    }
+
+    /// Declare this node a PAN coordinator (frame-handling role).
+    ///
+    /// # Errors
+    ///
+    /// [`MacError::NotReady`] when the radio is down.
+    pub fn set_coordinator(&mut self, enable: bool) -> Result<(), MacError> {
+        if !self.inited {
+            return Err(MacError::NotReady);
+        }
+        self.driver.set_coordinator(enable).map_err(map_mgmt_err)
+    }
+
+    /// Program the auto frame-pending mode for ACKs (Phase 1 leg 1a:
+    /// [`PendingMode::Zigbee`](crate::driver::PendingMode) for the
+    /// coordinator's indirect-transmission convention).
+    ///
+    /// # Errors
+    ///
+    /// [`MacError::NotReady`] when the radio is down.
+    pub fn set_pending_mode(&mut self, mode: PendingMode) -> Result<(), MacError> {
+        if !self.inited {
+            return Err(MacError::NotReady);
+        }
+        self.driver.set_pending_mode(mode).map_err(map_mgmt_err)
+    }
+
+    /// Add a short address to the source-matching (pending) table.
+    ///
+    /// # Errors
+    ///
+    /// [`MacError::NotReady`] when the radio is down.
+    pub fn pending_short_add(&mut self, short: u16) -> Result<(), MacError> {
+        if !self.inited {
+            return Err(MacError::NotReady);
+        }
+        self.driver.pending_short_add(short).map_err(map_mgmt_err)
+    }
+
+    /// Remove a short address from the source-matching table.
+    ///
+    /// # Errors
+    ///
+    /// [`MacError::NotReady`] when the radio is down.
+    pub fn pending_short_clear(&mut self, short: u16) -> Result<(), MacError> {
+        if !self.inited {
+            return Err(MacError::NotReady);
+        }
+        self.driver.pending_short_clear(short).map_err(map_mgmt_err)
+    }
+
+    /// Empty the short-address source-matching table.
+    ///
+    /// # Errors
+    ///
+    /// [`MacError::NotReady`] when the radio is down.
+    pub fn pending_shorts_reset(&mut self) -> Result<(), MacError> {
+        if !self.inited {
+            return Err(MacError::NotReady);
+        }
+        self.driver.pending_shorts_reset().map_err(map_mgmt_err)
     }
 
     /// Queue one raw MAC-command PSDU for transmission (Len+2 wrapped,

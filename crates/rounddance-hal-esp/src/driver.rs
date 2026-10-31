@@ -52,6 +52,23 @@ impl fmt::Display for DriverError {
 
 impl core::error::Error for DriverError {}
 
+/// Auto frame-pending mode for ACKs (Zigbee indirect-transmission
+/// convention). The on-target driver maps these 1:1 onto
+/// `esp_ieee802154_pending_mode_t` (same order, checked against the
+/// header).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PendingMode {
+    /// Frame-pending bit always set in the ACK to a Data Request.
+    Disable,
+    /// Pending bit set when the source matches, in Data-Request ACKs.
+    Enable,
+    /// Pending bit set when the source matches, in all ACK frames.
+    Enhanced,
+    /// Zigbee convention: pending cleared to 0 only when the source
+    /// is a short address present in the table, in Data-Request ACKs.
+    Zigbee,
+}
+
 /// Why a transmit failed, mirroring the driver's TX-error enum
 /// (`esp_ieee802154_tx_error_t`; see `ffi` for the value mapping).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -191,6 +208,46 @@ pub trait Driver {
     /// [`DriverError::NotReady`] when down, [`DriverError::HwFault`] on
     /// driver error.
     fn start_rx(&mut self) -> Result<(), DriverError>;
+
+    /// Declare this node a PAN coordinator (affects frame handling,
+    /// e.g. association and pending-data behavior).
+    ///
+    /// # Errors
+    ///
+    /// As for [`Driver::set_channel`].
+    fn set_coordinator(&mut self, enable: bool) -> Result<(), DriverError>;
+
+    /// Program the auto frame-pending mode for ACKs (Zigbee indirect
+    /// convention lives here: [`PendingMode::Zigbee`]).
+    ///
+    /// # Errors
+    ///
+    /// As for [`Driver::set_channel`].
+    fn set_pending_mode(&mut self, mode: PendingMode) -> Result<(), DriverError>;
+
+    /// Add a short address to the source-matching (pending) table.
+    /// Under [`PendingMode::Zigbee`], a listed short gets its
+    /// Data-Request ACK pending bit cleared (no data queued); shorts
+    /// with queued indirect messages stay OUT of the table.
+    ///
+    /// # Errors
+    ///
+    /// As for [`Driver::set_channel`].
+    fn pending_short_add(&mut self, short: u16) -> Result<(), DriverError>;
+
+    /// Remove a short address from the source-matching table.
+    ///
+    /// # Errors
+    ///
+    /// As for [`Driver::set_channel`].
+    fn pending_short_clear(&mut self, short: u16) -> Result<(), DriverError>;
+
+    /// Empty the short-address source-matching table.
+    ///
+    /// # Errors
+    ///
+    /// As for [`Driver::set_channel`].
+    fn pending_shorts_reset(&mut self) -> Result<(), DriverError>;
 
     /// Submit one Len+2 frame for transmission (CCA-gated). Returns
     /// immediately; the fate arrives via [`Driver::poll_tx`].

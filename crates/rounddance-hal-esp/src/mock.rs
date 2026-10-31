@@ -6,7 +6,7 @@
 //! rings, no heap) so the same mock runs under
 //! `wasm32-unknown-unknown`.
 
-use crate::driver::{Driver, DriverError, RxFrame, TxEvent, MAX_AIR_FRAME};
+use crate::driver::{Driver, DriverError, PendingMode, RxFrame, TxEvent, MAX_AIR_FRAME};
 
 /// Scripted TX-submit outcomes consumed in order (`Ok` = accepted).
 const SCRIPT_DEPTH: usize = 8;
@@ -18,6 +18,8 @@ const RX_DEPTH: usize = 8;
 const TX_LOG_DEPTH: usize = 8;
 /// Recorded channel-programming calls.
 const CH_LOG_DEPTH: usize = 8;
+/// Recorded source-matching (pending) table entries.
+const PENDING_TABLE_DEPTH: usize = 8;
 
 /// Scriptable [`Driver`]: the adapter's host-side double.
 ///
@@ -49,6 +51,10 @@ pub struct MockDriver {
     last_addrs: Option<(u16, u16)>,
     promiscuous: Option<bool>,
     start_rx_calls: u32,
+    coordinator: Option<bool>,
+    pending_mode: Option<PendingMode>,
+    pending_shorts: [u16; PENDING_TABLE_DEPTH],
+    pending_shorts_len: usize,
     tx_log: [[u8; MAX_AIR_FRAME]; TX_LOG_DEPTH],
     tx_lens: [usize; TX_LOG_DEPTH],
     tx_count: usize,
@@ -86,6 +92,10 @@ impl MockDriver {
             last_addrs: None,
             promiscuous: None,
             start_rx_calls: 0,
+            coordinator: None,
+            pending_mode: None,
+            pending_shorts: [0u16; PENDING_TABLE_DEPTH],
+            pending_shorts_len: 0,
             tx_log: [[0u8; MAX_AIR_FRAME]; TX_LOG_DEPTH],
             tx_lens: [0; TX_LOG_DEPTH],
             tx_count: 0,
@@ -186,6 +196,24 @@ impl MockDriver {
         self.start_rx_calls
     }
 
+    /// Last programmed coordinator mode, if any.
+    #[must_use]
+    pub fn coordinator(&self) -> Option<bool> {
+        self.coordinator
+    }
+
+    /// Last programmed auto frame-pending mode, if any.
+    #[must_use]
+    pub fn pending_mode(&self) -> Option<PendingMode> {
+        self.pending_mode
+    }
+
+    /// Current recorded source-matching (pending) short table.
+    #[must_use]
+    pub fn pending_shorts(&self) -> &[u16] {
+        &self.pending_shorts[..self.pending_shorts_len]
+    }
+
     /// Number of transmitted air frames recorded.
     #[must_use]
     pub fn tx_count(&self) -> usize {
@@ -272,6 +300,60 @@ impl Driver for MockDriver {
             return Err(DriverError::NotReady);
         }
         self.start_rx_calls += 1;
+        Ok(())
+    }
+
+    fn set_coordinator(&mut self, enable: bool) -> Result<(), DriverError> {
+        if !self.ready {
+            return Err(DriverError::NotReady);
+        }
+        self.coordinator = Some(enable);
+        Ok(())
+    }
+
+    fn set_pending_mode(&mut self, mode: PendingMode) -> Result<(), DriverError> {
+        if !self.ready {
+            return Err(DriverError::NotReady);
+        }
+        self.pending_mode = Some(mode);
+        Ok(())
+    }
+
+    fn pending_short_add(&mut self, short: u16) -> Result<(), DriverError> {
+        if !self.ready {
+            return Err(DriverError::NotReady);
+        }
+        if self.pending_shorts[..self.pending_shorts_len].contains(&short) {
+            return Ok(());
+        }
+        if self.pending_shorts_len >= PENDING_TABLE_DEPTH {
+            // Mirrors the real driver's NO_MEM (mapped to HwFault).
+            return Err(DriverError::HwFault);
+        }
+        self.pending_shorts[self.pending_shorts_len] = short;
+        self.pending_shorts_len += 1;
+        Ok(())
+    }
+
+    fn pending_short_clear(&mut self, short: u16) -> Result<(), DriverError> {
+        if !self.ready {
+            return Err(DriverError::NotReady);
+        }
+        if let Some(pos) = self.pending_shorts[..self.pending_shorts_len]
+            .iter()
+            .position(|s| *s == short)
+        {
+            self.pending_shorts.copy_within(pos + 1.., pos);
+            self.pending_shorts_len -= 1;
+        }
+        Ok(())
+    }
+
+    fn pending_shorts_reset(&mut self) -> Result<(), DriverError> {
+        if !self.ready {
+            return Err(DriverError::NotReady);
+        }
+        self.pending_shorts_len = 0;
         Ok(())
     }
 

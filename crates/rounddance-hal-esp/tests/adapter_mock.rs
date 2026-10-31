@@ -456,3 +456,23 @@ fn frame_builders_reject_oversize() {
     assert_eq!(f[0], 127);
     assert_eq!(n, 126);
 }
+
+/// Phase 1 leg 1a (auto-pending primitives): coordinator mode +
+/// Zigbee pending mode + short-table management program the driver,
+/// and read back through the mock recording.
+#[test]
+fn coordinator_pending_primitives_program_driver() {
+    use rounddance_hal_esp::driver::PendingMode;
+    let mut a = adapter();
+    a.set_coordinator(true).unwrap();
+    a.set_pending_mode(PendingMode::Zigbee).unwrap();
+    a.pending_short_add(0x0002).unwrap();
+    a.pending_short_add(0x0003).unwrap();
+    a.pending_short_clear(0x0002).unwrap();
+    let d = a.driver();
+    assert_eq!(d.coordinator(), Some(true));
+    assert_eq!(d.pending_mode(), Some(PendingMode::Zigbee));
+    assert_eq!(d.pending_shorts(), &[0x0003]);
+    a.pending_shorts_reset().unwrap();
+    assert_eq!(a.driver().pending_shorts(), &[]);
+}

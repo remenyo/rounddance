@@ -52,6 +52,25 @@ pub struct EspFrameInfo {
     pub mpf_index: u32,
 }
 
+/// Auto frame-pending mode (`esp_ieee802154_pending_mode_t`,
+/// `esp_ieee802154_types.h`). Discriminants match the C enum order
+/// exactly (checked against the header); the driver passes the value
+/// straight through.
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PendingMode {
+    /// Frame-pending bit always set in the ACK to a Data Request.
+    Disable = 0,
+    /// Pending bit set when the source matches, in Data-Request ACKs.
+    Enable = 1,
+    /// Pending bit set when the source matches, in all ACK frames.
+    Enhanced = 2,
+    /// Zigbee convention: pending cleared to 0 only when the source
+    /// is a short address present in the table, in Data-Request ACKs
+    /// (devices with queued indirect messages stay OUT of the table).
+    Zigbee = 3,
+}
+
 unsafe extern "C" {
     /// `esp_err_t esp_ieee802154_enable(void)` — header §"basic",
     /// `enable`/`disable` pair. WHY-SAFE: no args, returns `esp_err_t`.
@@ -107,6 +126,28 @@ unsafe extern "C" {
     /// calls it exactly once per `receive_done` / written-ACK pointer,
     /// with the pointer the driver itself handed us.
     pub(crate) fn esp_ieee802154_receive_handle_done(frame: *const u8) -> i32;
+    /// `esp_err_t esp_ieee802154_set_coordinator(bool enable)` —
+    /// header §"basic". WHY-SAFE: bool arg by value, code checked.
+    pub(crate) fn esp_ieee802154_set_coordinator(enable: bool) -> i32;
+    /// `esp_err_t esp_ieee802154_set_pending_mode
+    /// (esp_ieee802154_pending_mode_t pending_mode)` — header §"frame
+    /// pending". WHY-SAFE: enum passed by value (repr u32, order
+    /// checked), code checked.
+    pub(crate) fn esp_ieee802154_set_pending_mode(pending_mode: PendingMode) -> i32;
+    /// `esp_err_t esp_ieee802154_add_pending_addr(const uint8_t *addr,
+    /// bool is_short)` — header §"frame pending". WHY-SAFE: pointer
+    /// borrows the caller address for the call only (driver copies
+    /// synchronously), code checked (`NO_MEM` → `HwFault`, like other
+    /// capacity refusals on this seam).
+    pub(crate) fn esp_ieee802154_add_pending_addr(addr: *const u8, is_short: bool) -> i32;
+    /// `esp_err_t esp_ieee802154_clear_pending_addr(const uint8_t
+    /// *addr, bool is_short)` — header §"frame pending". WHY-SAFE: as
+    /// for `add_pending_addr` (`NOT_FOUND` → `HwFault`: the caller
+    /// tracks membership; the table is write-only from our side).
+    pub(crate) fn esp_ieee802154_clear_pending_addr(addr: *const u8, is_short: bool) -> i32;
+    /// `esp_err_t esp_ieee802154_reset_pending_table(bool is_short)` —
+    /// header §"frame pending". WHY-SAFE: bool arg, code checked.
+    pub(crate) fn esp_ieee802154_reset_pending_table(is_short: bool) -> i32;
 }
 
 /// TX-error values (`esp_ieee802154_tx_error_t`,

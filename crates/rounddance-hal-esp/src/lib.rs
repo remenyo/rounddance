@@ -81,7 +81,7 @@ pub mod mock;
 
 pub use adapter::{EspAdapter, EspError, MacIndication, MAX_TX_POWER_DBM};
 pub use app::{AppError, AppRole, CoordinatorApp, JoinerApp, SerialLog};
-pub use driver::{Driver, DriverError, RxFrame, TxEvent, TxFail};
+pub use driver::{Driver, DriverError, PendingMode, RxFrame, TxEvent, TxFail};
 pub use mock::MockDriver;
 
 #[cfg(feature = "esp")]
