@@ -337,3 +337,30 @@ fn addressed_mode_routes_broadcast_and_unicast() {
     assert_eq!(second.psdu(), &asc);
     assert_eq!(a.rx_dropped(), 0);
 }
+
+/// TX-loss re-arm (w92 f1 class): an acked assoc-req whose built
+/// response could not be queued (single-flight busy) must be
+/// re-pended, not silently dropped — the joiner's only answer.
+#[test]
+fn rearm_assoc_repends_after_consumed_take() {
+    let mut app = formed_app();
+    let mut log = app::NullLog;
+    app.open_permit(&mut log, 600_000).unwrap();
+    app.admit_joiner(&mut log, 0).unwrap();
+    // Nothing latched: re-arm is a no-op.
+    app.rearm_assoc();
+    assert!(!app.assoc_pending());
+    // Admitted assoc latches + pends; take consumes.
+    app.on_mac_psdu(&ota_assoc_req());
+    assert!(app.assoc_pending());
+    let mut out = [0u8; 32];
+    assert_eq!(app.take_assoc_rsp(&mut out).unwrap(), 19);
+    assert!(!app.assoc_pending());
+    // TX loss: re-arm re-pends the same answer.
+    app.rearm_assoc();
+    assert!(app.assoc_pending());
+    let n = app.take_assoc_rsp(&mut out).unwrap();
+    assert_eq!(n, 19);
+    assert_eq!(out[15], MAC_ASSOC_RSP);
+    assert!(!app.assoc_pending());
+}

@@ -170,7 +170,11 @@ fn main() {
                 Ok(n) if n > 0 => {
                     log_air(&mut log, "RDCOORD TX-ASSOC-RSP", &tx_buf[..n]);
                     if let Err(e) = adapter.transmit_mac(&tx_buf[..n]) {
-                        println!("RDCOORD TX-ASSOC-FAILED {e:?}");
+                        // Single-flight busy on a congested band must not
+                        // drop the one answer: re-pend, retry next loop
+                        // (confirms drain meanwhile). w92 f1 class.
+                        println!("RDCOORD TX-ASSOC-FAILED {e:?}; re-armed");
+                        app.rearm_assoc();
                     }
                 }
                 Ok(_) => {}

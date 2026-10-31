@@ -568,6 +568,21 @@ impl CoordinatorApp {
         self.assoc.take_assoc_rsp(seq, short, 0x00, out)
     }
 
+    /// Re-pend the association answer for the latched EUI (TX-loss
+    /// recovery). Call when a built response could not be queued
+    /// (single-flight busy on a congested band) so the next loop
+    /// iteration rebuilds + retries instead of silently dropping the
+    /// one answer (w92 f1: acked assoc-req, no RSP on air). No-op
+    /// when no EUI is latched.
+    pub fn rearm_assoc(&mut self) {
+        if let Some(eui) = self.assoc.device_eui() {
+            let _ = self.assoc.on_data_poll(&DataPoll {
+                seq: self.mac_seq,
+                src_eui: eui,
+            });
+        }
+    }
+
     /// Build one gratuitous beacon into `out` (unsolicited, does not
     /// consume the solicited pending count). Firmware calls this when
     /// [`crate::mac_cmd::gratuitous_due`] fires while unassociated so
