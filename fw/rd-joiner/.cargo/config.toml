@@ -1,0 +1,21 @@
+[build]
+target = "riscv32imac-esp-espidf"
+
+[target.'cfg(target_os = "espidf")']
+linker = "ldproxy"
+rustflags = [ "--cfg", "espidf_time64" ]
+
+[unstable]
+build-std = ["std", "panic_abort"]
+
+[env]
+MCU = "esp32c6"
+IDF_PATH = "/home/dev/projects/esp-idf-v6"
+# Root-cause fix for w86-reclimb3 boot-loop: esp-idf-sys guesses the workspace
+# root from OUT_DIR by popping fixed path segments, which breaks when
+# CARGO_TARGET_DIR points outside the checkout (it resolved to the target dir's
+# parent, so the relative "sdkconfig.defaults" was silently not found and the
+# emitted sdkconfig kept the 3584-byte main-stack default -> stack-protection
+# panic in "main"). embuild documents exactly this override for custom target
+# dirs; value "" relative to this file's .cargo parent == fw/rd-coord itself.
+CARGO_WORKSPACE_DIR = { value = "", relative = true }

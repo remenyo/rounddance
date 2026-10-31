@@ -9,11 +9,12 @@
 //! secured ZCL Toggle → Default Response, plus the wave-23
 //! unsecured-vendor-frame tolerance and replay refusal).
 
-use rounddance_commission::{BeaconSurveyEntry, InstallCode, SteeringState, UNSECURED_VENDOR_CMD};
+use rounddance_commission::{BeaconSurveyEntry, InstallCode, JoinerState, UNSECURED_VENDOR_CMD};
 use rounddance_hal_esp::{
     app::{
         role_from_mac, AppRole, CoordinatorApp, JoinerApp, APP_CHANNEL, APP_PAN, COORD_BASE_MAC,
-        COORD_SHORT, JOINER_BASE_MAC, JOINER_SHORT, MAC_CAPS, UNASSOC_SHORT, ZCL_ENDPOINT,
+        COORD_SHORT, EXT_PAN_ID, JOINER_BASE_MAC, JOINER_SHORT, MAC_CAPS, UNASSOC_SHORT,
+        ZCL_ENDPOINT,
     },
     driver::RxFrame,
     EspAdapter, MockDriver, SerialLog,
@@ -148,23 +149,19 @@ impl FullStack {
         // Joiner: survey → candidate → assoc → vendor-frame tolerance
         // (wave-23 captured 0x30) → key → verify → announced.
         self.joiner.begin_scan(&mut self.joiner_log).unwrap();
-        let state = self
-            .joiner
-            .survey(
-                &mut self.joiner_log,
-                BeaconSurveyEntry {
-                    pan_id: APP_PAN,
-                    channel: APP_CHANNEL,
-                    lqi: 220,
-                    rssi: -40,
-                    permit_joining: true,
-                    router_capacity: true,
-                    end_device_capacity: true,
-                    protocol_version: 2,
-                },
-            )
+        self.joiner
+            .ingest_beacon(BeaconSurveyEntry {
+                pan_id: APP_PAN,
+                channel: APP_CHANNEL,
+                lqi: 220,
+                rssi: -40,
+                permit_joining: true,
+                router_capacity: true,
+                end_device_capacity: true,
+                protocol_version: 2,
+            })
             .unwrap();
-        assert_eq!(state, SteeringState::CandidateSelected);
+        assert_eq!(self.joiner.finish_scan(&mut self.joiner_log), Some(APP_PAN));
         self.joiner.assoc_confirm(&mut self.joiner_log, true);
         // Association assigns the short address, as on device.
         self.joiner_adapter.set_short_addr(JOINER_SHORT);
@@ -300,4 +297,86 @@ fn c6_standalone_unknown_unit_refuses_role() {
     assert_eq!(role_from_mac(&[0xa0, 0xf2, 0x62, 0xff, 0xfe, 0x86]), None);
     assert_eq!(role_from_mac(&COORD_BASE_MAC), Some(AppRole::Coordinator));
     assert_eq!(role_from_mac(&JOINER_BASE_MAC), Some(AppRole::Joiner));
+}
+
+/// Phase 3 leg 1: joiner-side MAC dispatch. A live-shaped beacon
+/// (MG21 capture bytes) feeds the survey through `on_mac_psdu` and
+/// elects the candidate; the coordinator's long-source assoc-rsp
+/// hands off short + status; `take_assoc_req` builds the join
+/// request for the elected PAN.
+#[test]
+fn joiner_on_mac_psdu_scans_and_hands_off_assoc() {
+    use rounddance_hal_esp::mac_cmd::Incoming;
+
+    static DEF: rounddance_zcl::onoff::ServerDef = rounddance_zcl::onoff::ServerDef;
+    let mut joiner_log = VecLog::default();
+    let mut joiner = JoinerApp::new(&DEF).unwrap();
+    joiner.begin_scan(&mut joiner_log).unwrap();
+    // Live-shaped beacon (our OTA shape, permit open): ch15.
+    let mut bc = [0u8; 26];
+    bc[..14].copy_from_slice(&[
+        0x00, 0x80, 0x5a, 0x01, 0xc6, 0x00, 0x00, 0xff, 0xcf, 0x00, 0x00, 0x00, 0x22, 0x8c,
+    ]);
+    bc[14..22].copy_from_slice(&EXT_PAN_ID);
+    bc[22..25].copy_from_slice(&[0xff, 0xff, 0xff]);
+    let inc = joiner.on_mac_psdu(&mut joiner_log, &bc, APP_CHANNEL, -60, 220);
+    assert!(matches!(inc, Incoming::Beacon(_)));
+    // Collection only: no election until the window closes.
+    assert_eq!(joiner.candidate_pan(), None);
+    assert!(!joiner_log.has("C6APP SURVEY"));
+    // Repeat beacons accumulate without faulting the machine.
+    let inc2 = joiner.on_mac_psdu(&mut joiner_log, &bc, APP_CHANNEL, -62, 220);
+    assert!(matches!(inc2, Incoming::Beacon(_)));
+    // Window closes: best row elected, joiner advances.
+    assert_eq!(joiner.finish_scan(&mut joiner_log), Some(APP_PAN));
+    assert!(joiner_log.has("C6APP SURVEY"));
+    assert_eq!(joiner.state(), JoinerState::AwaitingCandidate);
+    assert_eq!(joiner.candidate_pan(), Some(APP_PAN));
+    // Rescan-after-election must not fault the machine: a fresh scan
+    // re-elects while already AwaitingCandidate; the second
+    // on_candidate is correctly suppressed, not a BadState failure.
+    // (Must run before assoc_confirm moves the machine on.)
+    joiner.begin_scan(&mut joiner_log).unwrap();
+    let inc3 = joiner.on_mac_psdu(&mut joiner_log, &bc, APP_CHANNEL, -61, 221);
+    assert!(matches!(inc3, Incoming::Beacon(_)));
+    assert_eq!(joiner.finish_scan(&mut joiner_log), Some(APP_PAN));
+    assert_eq!(joiner.state(), JoinerState::AwaitingCandidate);
+    assert_eq!(joiner.candidate_pan(), Some(APP_PAN));
+    // Rescan-after-election must not fault the machine: a fresh scan
+    // re-elects while already AwaitingCandidate; the second
+    // on_candidate is correctly suppressed, not a BadState failure.
+    // (Must run before assoc_confirm moves the machine on.)
+    joiner.begin_scan(&mut joiner_log).unwrap();
+    let inc3 = joiner.on_mac_psdu(&mut joiner_log, &bc, APP_CHANNEL, -61, 221);
+    assert!(matches!(inc3, Incoming::Beacon(_)));
+    assert_eq!(joiner.finish_scan(&mut joiner_log), Some(APP_PAN));
+    assert_eq!(joiner.state(), JoinerState::AwaitingCandidate);
+    assert_eq!(joiner.candidate_pan(), Some(APP_PAN));
+    // Long-source assoc-rsp assigning 0xC5C1 (MG21's allocation):
+    // handoff stores the short and confirms success.
+    assert_eq!(joiner.assoc_short(), None);
+    let mut rsp = [0u8; 25];
+    rsp[..5].copy_from_slice(&[0x63, 0xcc, 0x02, 0x01, 0xc6]);
+    rsp[5..13].copy_from_slice(&rounddance_hal_esp::app::JOINER_EUI);
+    rsp[13..21].copy_from_slice(&rounddance_hal_esp::app::TC_EUI_WIRE);
+    rsp[21..25].copy_from_slice(&[0x02, 0xc1, 0xc5, 0x00]);
+    let rlen = 25;
+    let inc = joiner.on_mac_psdu(&mut joiner_log, &rsp[..rlen], 25, -60, 200);
+    assert!(matches!(inc, Incoming::AssocRsp(_)));
+    assert_eq!(joiner.assoc_short(), Some(0xC5C1));
+    assert!(joiner_log.has("C6APP ASSOC ok"));
+    // Assoc-req targets the elected PAN with our EUI in wire
+    // order (LSB-first, as the NCP-verified handshake shape
+    // requires), coordinator short.
+    let mut out = [0u8; 19];
+    let n = joiner.take_assoc_req(&mut out, APP_PAN).unwrap();
+    assert_eq!(n, 19);
+    assert_eq!(
+        &out[..9],
+        &[0x23, 0xc8, out[2], 0x01, 0xc6, 0x00, 0x00, 0xff, 0xff]
+    );
+    let mut wire = rounddance_hal_esp::app::JOINER_EUI;
+    wire.reverse();
+    assert_eq!(&out[9..17], &wire);
+    assert_eq!(&out[17..19], &[0x01, 0x8c]);
 }

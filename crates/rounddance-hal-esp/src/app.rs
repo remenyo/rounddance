@@ -31,8 +31,8 @@
 //! `RD-APP-C6-*` rows are repo-minted (MINTED-pending-confirm).
 
 use crate::mac_cmd::{
-    eui_matches, CoordAssoc, DataPoll, Incoming as MacIncoming, MacCmdError,
-    SUPERFRAME_ASSOC_PERMIT,
+    beacon_net_caps, build_assoc_req, eui_matches, CoordAssoc, DataPoll, Incoming as MacIncoming,
+    MacCmdError, SUPERFRAME_ASSOC_PERMIT,
 };
 use rounddance_aps::{decode_data, DataDest, DataHeader, DeliveryMode, FrameControl as ApsFc};
 use rounddance_commission::{
@@ -672,6 +672,12 @@ impl CoordinatorApp {
                 }
             }
             MacIncoming::Other => {}
+            // Beacons are joiner-side input; the coordinator ignores
+            // its own (and neighbours') beacons.
+            MacIncoming::Beacon(_) => {}
+            // Association responses are joiner-side input; the
+            // coordinator never receives its own answers.
+            MacIncoming::AssocRsp(_) => {}
         }
         inc
     }
@@ -1327,6 +1333,10 @@ pub struct JoinerApp<'a> {
     rx_replay: ReplayTable<8>,
     nwk_seq: u8,
     aps_counter: u8,
+    mac_seq: u8,
+    /// Short address assigned by the coordinator's assoc-rsp (set on
+    /// the joiner-side handoff; `None` until associated).
+    assoc_short: Option<u16>,
     /// Frames answered with a Default Response.
     pub defrsp_sent: u32,
     /// Unsecured vendor frames tolerated post-association (wave-23
@@ -1360,6 +1370,8 @@ impl<'a> JoinerApp<'a> {
             rx_replay: ReplayTable::<8>::new(),
             nwk_seq: 0,
             aps_counter: 0,
+            mac_seq: 0,
+            assoc_short: None,
             defrsp_sent: 0,
             unsecured_tolerated: 0,
         })
@@ -1377,34 +1389,50 @@ impl<'a> JoinerApp<'a> {
         onoff::onoff(&self.store)
     }
 
-    /// Begin the beacon survey on the application channel.
+    /// Begin the beacon survey.
     pub fn begin_scan<L: SerialLog>(&mut self, log: &mut L) -> Result<(), AppError> {
         let mask = ChannelMask::from_list(&[APP_CHANNEL]).map_err(|_| AppError::BadRole)?;
         self.steering
             .begin_scan(mask, 3)
             .map_err(|_| AppError::BadRole)?;
-        log.log("C6APP SCAN ch15");
+        // No channel in this line (`no_std`): the firmware logs the
+        // tuned channel at boot; the scan mask is ch15 (lab C601).
+        // A ch25-tuned joiner still surveys here — the entry carries
+        // the arrival channel, and the mask only bounds rescan loops.
+        log.log("C6APP SCAN");
         Ok(())
     }
 
     /// Ingest one survey entry (the coordinator's beacon).
-    pub fn survey<L: SerialLog>(
-        &mut self,
-        log: &mut L,
-        entry: BeaconSurveyEntry,
-    ) -> Result<SteeringState, AppError> {
+    ///
+    /// Collection only: the caller runs [`finish_scan`](Self::finish_scan)
+    /// when the scan window elapses, then acts on the elected
+    /// candidate. Finishing per-beacon would park the table on the
+    /// first heard network (usually a non-permitting neighbour) and
+    /// drop every later beacon — the w97 C601 air failure.
+    pub fn ingest_beacon(&mut self, entry: BeaconSurveyEntry) -> Result<(), AppError> {
         self.steering.ingest(entry).map_err(|_| AppError::BadRole)?;
-        // Field admission: decode success + RSSI sanity, no absolute
-        // LQI gate (C6 LQI reads flat 9–11 on ~100%-decode links —
-        // wave-27 — so `min_lqi = 100` could never pass on this
-        // hardware; see `LinkEvidencePolicy`).
+        Ok(())
+    }
+
+    /// Close the scan window: rank acceptable rows and elect the
+    /// winner. Returns the elected PAN, if any.
+    pub fn finish_scan<L: SerialLog>(&mut self, log: &mut L) -> Option<u16> {
         self.steering.finish_scan(&LinkEvidencePolicy::default());
-        let state = self.steering.state();
-        if state == SteeringState::CandidateSelected {
-            log.log("C6APP SURVEY candidate pan=0xc601");
-            self.joiner.on_candidate();
+        // Forward the election once per join attempt: a repeat
+        // finish while already AwaitingCandidate must not re-fire
+        // on_candidate (BadState wedge); the joiner only moves
+        // Unjoined → AwaitingCandidate here.
+        if self.steering.state() == SteeringState::CandidateSelected {
+            if let Some(c) = self.steering.candidate() {
+                log.log("C6APP SURVEY candidate");
+                if self.joiner.state() == JoinerState::Unjoined {
+                    self.joiner.on_candidate();
+                }
+                return Some(c.pan_id);
+            }
         }
-        Ok(state)
+        None
     }
 
     /// Association confirm from the MAC layer.
@@ -1415,6 +1443,102 @@ impl<'a> JoinerApp<'a> {
         } else {
             log.log("C6APP ASSOC failed");
         }
+    }
+
+    /// Feed one inbound MAC PSDU to the joiner: beacons feed the
+    /// survey (channel/RSSI/LQI come from the indication, not the
+    /// PSDU), association responses complete the handoff (short
+    /// adopted, machine advanced). Anything else is ignored —
+    /// a joiner answers nothing on the air at this leg.
+    pub fn on_mac_psdu<L: SerialLog>(
+        &mut self,
+        log: &mut L,
+        psdu: &[u8],
+        channel: u8,
+        rssi: i8,
+        lqi: u8,
+    ) -> MacIncoming {
+        let inc = crate::mac_cmd::classify(psdu);
+        match inc {
+            MacIncoming::Beacon(ref bi) => {
+                let payload = match psdu.get(bi.payload_off..) {
+                    Some(p) => p,
+                    None => return inc,
+                };
+                let (version, router_capacity, end_device_capacity) = match beacon_net_caps(payload)
+                {
+                    Some(v) => v,
+                    None => return inc,
+                };
+                let entry = BeaconSurveyEntry {
+                    pan_id: bi.src_pan,
+                    channel,
+                    lqi,
+                    rssi,
+                    permit_joining: bi.assoc_permit,
+                    router_capacity,
+                    end_device_capacity,
+                    protocol_version: version,
+                };
+                // Collection only (windowed finish in finish_scan):
+                // per-beacon finish would park the table on the first
+                // heard network; survey errors (full table, bad
+                // channel, wrong state) just skip this beacon.
+                let _ = self.ingest_beacon(entry);
+            }
+            MacIncoming::AssocRsp(ref rsp) => {
+                // EUI orientation-insensitive, like the coordinator
+                // admission path.
+                if !eui_matches(&joiner_ieee().to_le_bytes(), &rsp.dst_eui) {
+                    return inc;
+                }
+                self.assoc_short = Some(rsp.short);
+                self.assoc_confirm(log, rsp.status == 0x00);
+            }
+            _ => {}
+        }
+        inc
+    }
+
+    /// Short address assigned by the coordinator's assoc-rsp (`None`
+    /// until the handoff above runs).
+    #[must_use]
+    pub fn assoc_short(&self) -> Option<u16> {
+        self.assoc_short
+    }
+
+    /// Selected candidate PAN (valid once the survey elects one).
+    #[must_use]
+    pub fn candidate_pan(&self) -> Option<u16> {
+        self.steering.candidate().map(|c| c.pan_id)
+    }
+
+    fn take_mac_seq(&mut self) -> u8 {
+        let s = self.mac_seq;
+        self.mac_seq = self.mac_seq.wrapping_add(1);
+        s
+    }
+
+    /// Build one association-request PSDU into `out` for `dst_pan`
+    /// (coordinator short `0x0000`), with our MAC sequence + EUI.
+    ///
+    /// # Errors
+    ///
+    /// [`MacCmdError::BufferTooSmall`] when `out` is short.
+    pub fn take_assoc_req(&mut self, out: &mut [u8], dst_pan: u16) -> Result<usize, MacCmdError> {
+        let seq = self.take_mac_seq();
+        // EUI rides LSB-first (wire order), as the NCP-verified
+        // handshake shape requires (w93 MG21 reference):
+        // `joiner_ieee` is little-endian of the display-order const,
+        // so big-endian bytes are the wire order.
+        build_assoc_req(
+            seq,
+            dst_pan,
+            COORD_SHORT,
+            &joiner_ieee().to_be_bytes(),
+            MAC_CAPS,
+            out,
+        )
     }
 
     /// Tolerate one post-association unsecured vendor frame.

@@ -213,7 +213,7 @@ fn parsers_reject_malformed_without_panic() {
     ));
     assert!(matches!(
         mac_cmd::classify(&ota_beacon()),
-        mac_cmd::Incoming::Other
+        mac_cmd::Incoming::Beacon(_)
     ));
     assert!(matches!(
         mac_cmd::classify(&[0x41, 0x88, 0x00]),
@@ -315,31 +315,25 @@ fn joiner_handoff_values_from_air() {
 
     // assoc_confirm(true) advances the existing join machine, as the
     // c6_standalone leg does post-survey (app.rs assoc_confirm path).
-    // The survey entry carries the parsed PAN + permit flag; remaining
-    // fields are the lab pins the c6_standalone leg uses (full
-    // beacon→entry capacity/version mapping is rung-2 work).
+    // The entry carries the parsed PAN + permit flag; capacities and
+    // version come from beacon_net_caps (w97: pinned against two
+    // admitting networks' air bytes, not spec text).
     static DEF: rounddance_zcl::onoff::ServerDef = rounddance_zcl::onoff::ServerDef;
     let mut joiner = app::JoinerApp::new(&DEF).unwrap();
     joiner.begin_scan(&mut NullLog).unwrap();
-    let state = joiner
-        .survey(
-            &mut NullLog,
-            rounddance_commission::BeaconSurveyEntry {
-                pan_id: bi.src_pan,
-                channel: 15,
-                lqi: 200,
-                rssi: -40,
-                permit_joining: bi.assoc_permit,
-                router_capacity: true,
-                end_device_capacity: true,
-                protocol_version: 2,
-            },
-        )
+    joiner
+        .ingest_beacon(rounddance_commission::BeaconSurveyEntry {
+            pan_id: bi.src_pan,
+            channel: 15,
+            lqi: 200,
+            rssi: -40,
+            permit_joining: bi.assoc_permit,
+            router_capacity: true,
+            end_device_capacity: true,
+            protocol_version: 2,
+        })
         .unwrap();
-    assert_eq!(
-        state,
-        rounddance_commission::SteeringState::CandidateSelected
-    );
+    assert_eq!(joiner.finish_scan(&mut NullLog), Some(bi.src_pan));
     joiner.assoc_confirm(&mut NullLog, rsp.status == 0x00);
     assert_eq!(
         joiner.state(),
@@ -515,3 +509,41 @@ fn parse_mg21_reference_assoc_rsp_long_source() {
     assert_eq!(rsp.short, 0xc5c1);
     assert_eq!(rsp.status, 0x00);
 }
+
+/// Phase 3 leg 1: beacon classification + NWK capacity/version read.
+/// The OTA coordinator beacon classifies as Beacon (joiner-visible,
+/// no longer Other); the capacity/version read pins two air-proven
+/// admitting networks (ours: 0x22/0x8c; MG21 live capture ch25:
+/// 0x22/0x84 — both admitted end-device joins).
+#[test]
+fn beacon_classifies_and_caps_read_both_air_networks() {
+    use rounddance_hal_esp::mac_cmd::Incoming;
+    let bi = mac_cmd::parse_beacon(&ota_beacon()).expect("OTA beacon parses");
+    assert!(matches!(
+        mac_cmd::classify(&ota_beacon()),
+        Incoming::Beacon(_)
+    ));
+    assert_eq!((bi.src_pan, bi.assoc_permit), (PAN, true));
+    let ours = &ota_beacon()[bi.payload_off..];
+    assert_eq!(mac_cmd::beacon_net_caps(ours), Some((2, true, true)));
+    // MG21 live beacon (sniff_mg21bcn.txt, ch25): same version, same
+    // end-device capacity bit, router bit clear.
+    let mg21: Vec<u8> = (0..28)
+        .map(|i| u8::from_str_radix(&MG21_BEACON[2 * i..2 * i + 2], 16).unwrap())
+        .collect();
+    let mbi = mac_cmd::parse_beacon(&mg21).expect("MG21 beacon parses");
+    // Permit closed: captured outside MG21's permit window (beacons
+    // track the live window; the join attempts used an open one).
+    assert_eq!((mbi.src_pan, mbi.assoc_permit), (0x3761, false));
+    assert!(matches!(mac_cmd::classify(&mg21), Incoming::Beacon(_)));
+    let mcap = &mg21[mbi.payload_off..];
+    assert_eq!(mac_cmd::beacon_net_caps(mcap), Some((2, false, true)));
+    // Malformed payloads refuse: short, wrong protocol id.
+    assert_eq!(mac_cmd::beacon_net_caps(&[0x00, 0x22]), None);
+    assert_eq!(mac_cmd::beacon_net_caps(&[0x01, 0x22, 0x8c]), None);
+}
+
+/// MG21 live beacon PSDU, verbatim (sniff_mg21bcn.txt, 28 B: 26 B
+/// PSDU + 2 sniffer meter bytes): `FC 00 80`, PAN 0x3761, permit
+/// set, NWK payload `00 22 84 <EPAN> ff ff ff 00`.
+const MG21_BEACON: &str = "00808d61370000ff4f00000022841694b10911403a09ffffff004674";

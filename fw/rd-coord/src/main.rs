@@ -20,6 +20,7 @@ use esp_idf_hal::gpio::PinDriver;
 use esp_idf_hal::peripherals::Peripherals;
 use rounddance_hal_esp::app::{
     eui_from_mac, log_air, role_from_mac, NwkRxOutcome, APP_CHANNEL, APP_PAN, COORD_SHORT,
+    TC_EUI_WIRE,
 };
 use rounddance_hal_esp::mac_cmd::{gratuitous_due, GRATUITOUS_BEACON_INTERVAL_MS};
 use rounddance_hal_esp::{AppRole, CoordinatorApp, EspAdapter, EspIdfDriver, SerialLog};
@@ -82,7 +83,12 @@ fn main() {
     // NVS-first order (filtering ON, RX-when-idle, receiver running).
     adapter.set_pan_id(APP_PAN);
     adapter.set_short_addr(COORD_SHORT);
-    adapter.set_extended_addr(u64::from_le_bytes(eui));
+    // Radio address match compares arrival order (LSB-first on air):
+    // program the EUI in wire order (`TC_EUI_WIRE`), not display
+    // order, or HW ACKs for long-addressed inbound frames never match
+    // (w97 joiner leg: RSPs to the joiner got NoAck for exactly this
+    // reason on the other side).
+    adapter.set_extended_addr(u64::from_le_bytes(TC_EUI_WIRE));
     adapter
         .set_tx_power(10)
         .expect("standing +10 dBm cap");
@@ -176,6 +182,10 @@ fn main() {
                     );
                 }
                 rounddance_hal_esp::mac_cmd::Incoming::Other => {}
+                // Beacons/assoc-responses are joiner-side input; the
+                // coordinator logs its own answers, never receives them.
+                rounddance_hal_esp::mac_cmd::Incoming::Beacon(_)
+                | rounddance_hal_esp::mac_cmd::Incoming::AssocRsp(_) => {}
             }
         }
         // Data RX (NWK and above): log air bytes for the sniffer leg.

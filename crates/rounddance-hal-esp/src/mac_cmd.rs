@@ -244,11 +244,17 @@ pub enum Incoming {
     },
     /// Association request: admit-check, then answer.
     AssocReq(AssocReq),
+    /// Association response (joiner-side handoff): assigned short +
+    /// status; long-source form only, as real NCPs emit.
+    AssocRsp(AssocRsp),
     /// Long-form data poll: re-arm for the latched EUI only.
     DataPoll(DataPoll),
     /// Short-form data poll: re-arm for the EUI holding the short.
     ShortPoll(ShortPoll),
-    /// Anything else (data, foreign commands, beacons): not ours.
+    /// Beacon (joiner-side survey input): advertising PAN and permit
+    /// flag ride the PSDU; channel meters come from the indication.
+    Beacon(BeaconInfo),
+    /// Anything else (data, foreign commands): not ours.
     Other,
 }
 
@@ -530,6 +536,33 @@ pub fn parse_beacon(psdu: &[u8]) -> Option<BeaconInfo> {
     })
 }
 
+/// Read the Zigbee NWK beacon payload version + capacity bits
+/// (Phase 3 leg 1: joiner survey input).
+///
+/// Returns `(protocol_version, router_capacity, end_device_capacity)`
+/// or `None` when the shape is wrong. Byte contract, pinned by two
+/// air captures rather than spec text: `payload[0]` is the `0x00`
+/// protocol marker both networks emit; `payload[1]` low nibble is
+/// the protocol version (both emit `0x22`; Ember reports
+/// stackProfile 2 for ours); `payload[2]` capacity bits — bit `0x04`
+/// is set on both networks that admitted end-device joins (ours
+/// `0x8c`, MG21 `0x84`), so it gates end-device admission; bit
+/// `0x08` differs between the two admitting networks (set on ours,
+/// clear on MG21), so it is recorded as router capacity but never
+/// admission-decisive for a joiner. A third network contradicting
+/// the `0x04` reading needs the full mapping (named follow-up).
+#[must_use]
+pub fn beacon_net_caps(payload: &[u8]) -> Option<(u8, bool, bool)> {
+    let hdr = payload.get(..3)?;
+    if hdr[0] != 0x00 {
+        return None;
+    }
+    let version = hdr[1] & 0x0f;
+    let router_capacity = hdr[2] & 0x08 != 0;
+    let end_device_capacity = hdr[2] & 0x04 != 0;
+    Some((version, router_capacity, end_device_capacity))
+}
+
 /// Whether a beacon network payload advertises our network (marker +
 /// our extended PAN at the documented offset).
 #[must_use]
@@ -612,11 +645,17 @@ pub fn classify(psdu: &[u8]) -> Incoming {
     if let Some(req) = parse_assoc_req(psdu) {
         return Incoming::AssocReq(req);
     }
+    if let Some(rsp) = parse_assoc_rsp(psdu) {
+        return Incoming::AssocRsp(rsp);
+    }
     if let Some(poll) = parse_data_poll_long(psdu) {
         return Incoming::DataPoll(poll);
     }
     if let Some(poll) = parse_data_poll_short(psdu) {
         return Incoming::ShortPoll(poll);
+    }
+    if let Some(bi) = parse_beacon(psdu) {
+        return Incoming::Beacon(bi);
     }
     Incoming::Other
 }

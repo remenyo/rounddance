@@ -1,0 +1,17 @@
+CONFIG_IDF_TARGET="esp32c6"
+# Rust needs a lot more main-task stack than C (default 3K): the
+# 802.15.4 adapter construction alone overflows 8K (w87 boot evidence:
+# SP 1.5K below an 8K main stack inside EspAdapter::new). The joiner
+# app (~4.8K struct + ctor frames on top of the ~7.5K adapter) needs
+# 32K (w97 joiner boot-loop: 2.3K past a 16K main stack inside
+# JoinerApp::new). C6 RAM (512K) easily allows it.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=32768
+CONFIG_ESP_IPC_TASK_STACK_SIZE=4096
+# C++ without RTTI, without exceptions (user directive): our tree is
+# Rust-only (no .c files to rename; IDF/esp-idf-sys internals stay C),
+# so this pins the policy — no C++ EH/RTTI bloat, ever.
+CONFIG_COMPILER_CXX_EXCEPTIONS=n
+CONFIG_COMPILER_CXX_RTTI=n
+CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096
+CONFIG_FREERTOS_IDLE_TASK_STACKSIZE=4096
+CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT=4096
