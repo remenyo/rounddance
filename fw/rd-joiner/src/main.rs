@@ -23,9 +23,26 @@ use rounddance_mac_sap::{Channel, MacDataSap, MacMgmtSap};
 use rounddance_zcl::onoff;
 use std::time::Instant;
 
-// Scan channel: C601 lab network (ch15). Rebuild with 25 for an
-// MG21-reference attempt.
-const JOINER_SCAN_CHANNEL: u8 = 15;
+// Scan channel: default C601 lab network (ch15); override at build
+// time with `RD_JOINER_SCAN_CHANNEL=<11-26>` (no source edit, no
+// second constant to drift — the MG21-reference leg builds 25).
+// Invalid values fail the build loudly, never silently mistune.
+const fn parse_channel(s: &str) -> u8 {
+    let b = s.as_bytes();
+    let mut i = 0;
+    let mut v: u8 = 0;
+    while i < b.len() {
+        assert!(b[i] >= b'0' && b[i] <= b'9', "RD_JOINER_SCAN_CHANNEL not decimal");
+        v = v * 10 + (b[i] - b'0');
+        i += 1;
+    }
+    assert!(v >= 11 && v <= 26, "RD_JOINER_SCAN_CHANNEL out of 11-26");
+    v
+}
+const JOINER_SCAN_CHANNEL: u8 = match option_env!("RD_JOINER_SCAN_CHANNEL") {
+    Some(s) => parse_channel(s),
+    None => 15,
+};
 // Beacon-req / assoc-req retry cadence while unassociated.
 const REQ_INTERVAL_MS: u64 = 2_000;
 // Stop re-transmitting the assoc-req after this many tries (the
@@ -65,6 +82,7 @@ fn main() {
     assert!(rc == 0, "esp_read_mac BASE rc={rc}");
     let eui = eui_from_mac(&mac);
     println!("RDJOIN ident mac={mac:02x?} eui={eui:02x?}");
+    println!("RDJOIN scan ch={JOINER_SCAN_CHANNEL}");
     if role_from_mac(&mac) != Some(AppRole::Joiner) {
         println!("RDJOIN refuse: not the joiner unit, radio untouched");
         loop {

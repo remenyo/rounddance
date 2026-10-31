@@ -153,6 +153,29 @@ Status: CLOSED 2026-10-31 (measurement artifact — retention PROVEN while hoste
   sub-question parked with cause (DTR-level vs close-event vs
   ASH-presence; needs a DTR-toggle-while-open test). Evidence
   ~/hwscratch/w101/.
+
+### B-009 (2026-10-31): MG21 TC answers no stranger assoc (C6 joiner blocked at assoc)
+Status: PARKED with cause (MG21-side; needs human replug for the discriminator).
+- Symptom (2 campaigns): our C6 joiner scans/ch25, elects MG21 (permit=true
+  beacons, EPAN-verified), adopts PAN, TXs assoc-reqs (15+, MAC-ACKed each
+  time on sniffer) — MG21 NEVER transmits an assoc-rsp. Reproduced w102
+  with clean controls: factory-wiped child table (verified 0 children),
+  open permit window, fresh random-key TC formed via direct-EZSP script
+  (bellows CLI `form` silent-fails on v13: exit 0 + empty log, no network
+  — host-tool debt, direct script pays it).
+- Discriminator parked: whether ANY stranger gets an answer (MG24 NCP
+  canonical-shape control) is blocked — MG24 locally refuses joinNetwork
+  instantly (0.2 s NOT_JOINED, zero air frames) after a baud-mismatched
+  reset attempt wedged its stack; recovery needs a physical power cycle
+  (no sudo for uhubctl; human replug required), or rule it out via a
+  second foreign stack. If MG24-stranger also gets silence → MG21 admits
+  no one new (rejoin-only/broken permit path); if answered → our C6
+  frame is at fault (reopen leg-1 shape).
+- Supporting: (1) MG21 TC died again detach-adjacent (2nd datapoint for
+  the parked detach mechanism — now coordinator-role too); restore by
+  re-forming under a port holder. (2) nRF sniffer wedged twice mid-run
+  (process alive, zero new frames) — lab note, retry capture on doubt.
+  Evidence ~/hwscratch/w102/.
 - Lab at w96 closeout: 7F68 restored byte-identical to preflash backup
   (0 diff bytes); MG24 factory-reset EMPTY; MG21 left FORMED
   (documented lab-TC state); leases none, quarantine none. Evidence:
