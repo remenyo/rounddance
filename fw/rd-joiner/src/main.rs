@@ -158,6 +158,17 @@ fn main() {
     let mut adopted_short: Option<u16> = None;
     // Announce once the Trust-Center key is adopted.
     let mut annce_pending = false;
+    // Joiner ZDO-answer retry state (Phase 4, mirrors the annce and
+    // coordinator patterns): the Node_desc_rsp is unicast to the TC,
+    // so a non-Delivered confirm means the TC never saw it — rebuild
+    // (fresh auxctr + same echoed TSN) and re-TX, bounded.
+    let mut rsp_pending: Option<(u16, u8, u16)> = None;
+    // Last request params (rebuild source for retries: same echoed
+    // TSN, fresh auxctr — never an identical re-TX).
+    let mut rsp_req: Option<(u16, u8, u16)> = None;
+    let mut rsp_handle: Option<TxHandle> = None;
+    let mut rsp_tries: u8 = 0;
+    const RSP_RETRIES_MAX: u8 = 4;
     // Announce retry state (w103: broadcasts report radiation via
     // confirms too — two consecutive annces vanished on a congested
     // channel with no FAILED line because the fw dropped confirms
@@ -288,16 +299,14 @@ fn main() {
                     subject,
                 } => {
                     println!("RDJOIN RX-NODE-DESC-REQ tsn={tsn}");
-                    match app.take_node_desc_rsp(&mut tx_buf, src_short, tsn, subject) {
-                        Ok(n) if n > 0 => {
-                            log_air(&mut log, "RDJOIN TX-NODE-DESC-RSP", &tx_buf[..n]);
-                            if let Err(e) = adapter.transmit_mac(&tx_buf[..n]) {
-                                println!("RDJOIN TX-RSP-FAILED {e:?}");
-                            }
-                        }
-                        Ok(_) => {}
-                        Err(e) => println!("RDJOIN RSP-BUILD-FAILED {e:?}"),
-                    }
+                    // Queue (do not build inline): the send block
+                    // below transmits, and the confirm arm re-queues
+                    // on non-Delivered so a ChannelBusy loss on this
+                    // congested channel is retried, not silent.
+                    rsp_req = Some((src_short, tsn, subject));
+                    rsp_pending = rsp_req;
+                    rsp_handle = None;
+                    rsp_tries = 0;
                 }
                 JoinerNwkOutcome::Data { cluster, profile } => {
                     println!("RDJOIN RX-NWK-DATA cluster={cluster:#06x} profile={profile:#06x}");
@@ -341,8 +350,45 @@ fn main() {
                 }
             }
         }
+        // ZDO answer transmit: build once per attempt from the queued
+        // request, retire only on a Delivered confirm (or the retry
+        // budget). Same pattern as the annce block above.
+        if let Some((dst_short, tsn, subject)) = rsp_pending {
+            if rsp_handle.is_none() {
+                if rsp_tries >= RSP_RETRIES_MAX {
+                    println!("RDJOIN TX-RSP-GIVEUP tsn={tsn} (budget exhausted)");
+                    rsp_pending = None;
+                } else {
+                    match app.take_node_desc_rsp(&mut tx_buf, dst_short, tsn, subject) {
+                        Ok(n) if n > 0 => {
+                            log_air(&mut log, "RDJOIN TX-NODE-DESC-RSP", &tx_buf[..n]);
+                            match adapter.transmit_mac(&tx_buf[..n]) {
+                                Ok(h) => {
+                                    rsp_handle = Some(h);
+                                    rsp_tries += 1;
+                                }
+                                // Submit-time refusal re-pends (mirrors
+                                // the transport path): the confirm path
+                                // drives the retry budget, not this arm.
+                                Err(e) => {
+                                    println!("RDJOIN TX-RSP-FAILED {e:?}; re-armed");
+                                    rsp_pending = Some((dst_short, tsn, subject));
+                                }
+                            }
+                        }
+                        Ok(_) => {
+                            // Nothing to answer with (key or short
+                            // missing); do not spin.
+                            rsp_pending = None;
+                        }
+                        Err(e) => println!("RDJOIN RSP-BUILD-FAILED {e:?}"),
+                    }
+                }
+            }
+        }
         // TX confirms drain (shared queue): match our annce handle so
-        // a non-Delivered broadcast is retried above instead of lost.
+        // a non-Delivered broadcast is retried above instead of lost,
+        // and our RSP handle so a lost ZDO answer is rebuilt.
         while let Some(c) = adapter.poll_confirm() {
             if Some(c.handle) == annce_handle {
                 println!("RDJOIN ANNCE-CONFIRM {:?} tries={annce_tries}", c.status);
@@ -351,6 +397,23 @@ fn main() {
                     annce_pending = false;
                     app.verify_confirm(&mut log);
                     app.close_out(&mut log);
+                }
+            }
+            if Some(c.handle) == rsp_handle {
+                println!("RDJOIN RSP-CONFIRM {:?} tries={rsp_tries}", c.status);
+                rsp_handle = None;
+                if c.status == TxStatus::Delivered {
+                    // Answered and radiated: retire (a duplicate
+                    // answer would only triple-count on air).
+                    rsp_pending = None;
+                    rsp_req = None;
+                } else if rsp_tries > 0 {
+                    rsp_tries -= 1;
+                    println!("RDJOIN TX-RSP-NOACK; re-armed ({rsp_tries} left)");
+                    rsp_pending = rsp_req;
+                } else {
+                    println!("RDJOIN TX-RSP-GIVEUP (budget exhausted)");
+                    rsp_req = None;
                 }
             }
         }

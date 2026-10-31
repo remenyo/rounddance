@@ -1431,3 +1431,90 @@ fn node_desc_retries_open_independently_matchable_transactions() {
     }
     assert_eq!(app.zdo_pending_open(), 0);
 }
+
+/// Phase 4 RSP-retry contract: rebuilding a Node_desc_rsp for the
+/// same request (same echoed TSN, as the confirm-driven retry does)
+/// must never re-emit identical secured bytes — each take consumes a
+/// fresh aux counter, so a confirm-lost first copy cannot make the
+/// coordinator trip its own replay check on the duplicate.
+#[test]
+fn node_desc_rsp_rebuilds_advance_auxctr() {
+    const KEY: [u8; 16] = [
+        0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e,
+        0x1f,
+    ];
+    const JW: [u8; 8] = [0xa4, 0x97, 0x85, 0xfe, 0xff, 0x62, 0xf2, 0xa0];
+    static DEF: rounddance_zcl::onoff::ServerDef = rounddance_zcl::onoff::ServerDef;
+    let mut log = app::NullLog;
+    let mut joiner = app::JoinerApp::new(&DEF).unwrap();
+    joiner.begin_scan(&mut log).unwrap();
+    joiner
+        .ingest_beacon(rounddance_commission::BeaconSurveyEntry {
+            pan_id: 0xC601,
+            channel: 15,
+            lqi: 200,
+            rssi: -40,
+            permit_joining: true,
+            router_capacity: true,
+            end_device_capacity: true,
+            protocol_version: 2,
+        })
+        .unwrap();
+    assert_eq!(joiner.finish_scan(&mut log), Some(0xC601));
+    let mut rsp = [0u8; 25];
+    rsp[..5].copy_from_slice(&[0x63, 0xcc, 0x02, 0x01, 0xc6]);
+    rsp[5..13].copy_from_slice(&JW);
+    rsp[13..21].copy_from_slice(&rounddance_hal_esp::app::TC_EUI_WIRE);
+    rsp[21..25].copy_from_slice(&[0x02, 0x02, 0x00, 0x00]);
+    let _ = joiner.on_mac_psdu(&mut log, &rsp[..25], 15, -40, 200);
+    // Adopt the key through a synthetic transport (same shape the
+    // leg-2 test feeds).
+    let tkey = rounddance_commission::ha_transport_key().unwrap();
+    let tp = rounddance_commission::TransportKeyParams {
+        dst_pan: 0xC601,
+        dst_short: 0x0002,
+        dst_eui: JW,
+        src_eui: [0x68, 0x7f, 0x86, 0xfe, 0xff, 0x62, 0xf2, 0xa0],
+        mac_seq: 0x5a,
+        nwk_seq: 0x21,
+        nwk_radius: 0x1e,
+        aps_ctr: 0x51,
+        auxctr: 0x0000_1000,
+        seq_no: 0x00,
+        netkey: KEY,
+        transport_key: tkey,
+    };
+    let mut tf = [0u8; 128];
+    let tn = rounddance_commission::build_transport_key_frame(&tp, &mut tf).unwrap();
+    let _ = joiner.on_nwk_joiner(&tf[9..tn]);
+    assert!(joiner.adopted_netkey().is_some());
+    // Same request answered twice (the retry path): strictly
+    // increasing aux counters, both independently openable.
+    let mut out = [0u8; 160];
+    let n1 = joiner
+        .take_node_desc_rsp(&mut out, 0x0000, 0x09, 0x0002)
+        .unwrap();
+    let f1 = out[..n1].to_vec();
+    let n2 = joiner
+        .take_node_desc_rsp(&mut out, 0x0000, 0x09, 0x0002)
+        .unwrap();
+    let f2 = out[..n2].to_vec();
+    // Aux counter lives at MAC(9) + NWK(8) + 1.
+    let c1 = u32::from_le_bytes(f1[9 + 8 + 1..9 + 8 + 5].try_into().unwrap());
+    let c2 = u32::from_le_bytes(f2[9 + 8 + 1..9 + 8 + 5].try_into().unwrap());
+    assert_eq!(c2, c1.wrapping_add(1));
+    assert_ne!(f1, f2);
+    for (f, c) in [&f1, &f2].iter().zip([c1, c2]) {
+        let (actr, pt) = open_joiner_tail(
+            &KEY,
+            &f[31..f.len() - 4],
+            &f[f.len() - 4..],
+            &f[9..17],
+            &JW,
+            c,
+        );
+        assert_eq!(actr, c);
+        let rsp = rounddance_zdo::zdp::NodeDescRsp::decode(&pt[8..]).expect("rsp decodes");
+        assert_eq!((rsp.tsn, rsp.nwk_of_interest), (0x09, 0x0002));
+    }
+}

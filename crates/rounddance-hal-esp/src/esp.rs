@@ -234,6 +234,19 @@ fn map_tx_fail(code: u32) -> TxFail {
 pub struct EspIdfDriver {
     inited: bool,
     tx_in_flight: bool,
+    /// Driver-owned TX staging: the IDF driver DMA-reads our frame
+    /// pointer asynchronously (`s_tx_frame` is latched, not copied —
+    /// verified in `esp_ieee802154_dev.c`: `tx_init` only stores the
+    /// address). The old code handed it a pointer to a pump()-local
+    /// COPY of the queued slot; that temporary dies on return while
+    /// the radio may still be reading it, and stack reuse zeroes or
+    /// garbles the tail on air (w104: joiner assoc-reqs radiated with
+    /// the last 4 PSDU bytes zeroed while the logged bytes were
+    /// correct, ACKed, coordinator-deaf). Staging here lives as long
+    /// as the driver and is only overwritten on the next accepted
+    /// submit — which single-flight gates to after the TX event —
+    /// so the pointer is valid from submit through confirm.
+    tx_stage: [u8; MAX_AIR_FRAME],
 }
 
 impl EspIdfDriver {
@@ -243,6 +256,7 @@ impl EspIdfDriver {
         Self {
             inited: false,
             tx_in_flight: false,
+            tx_stage: [0; MAX_AIR_FRAME],
         }
     }
 
@@ -446,13 +460,23 @@ impl Driver for EspIdfDriver {
         if frame.is_empty() || frame.len() > MAX_AIR_FRAME {
             return Err(DriverError::InvalidParam);
         }
-        // SAFETY: the borrowed frame outlives this call; the driver
-        // copies what it needs before returning (single-flight, and the
-        // DONE/FAILED hooks only echo the pointer as an identifier).
-        // CCA-gated (`true`): unacked inter-PAN still benefits from
-        // carrier sense; ACKed frames need it for CSMA-CA.
+        // Stage into driver-owned storage BEFORE handing the pointer
+        // to the IDF: the radio DMA-reads asynchronously (CCA delay +
+        // air time), so the buffer must outlive this call — a
+        // caller-side temporary would be stack garbage by the time the
+        // DMA reads it. Single-flight (checked above) guarantees no
+        // second copy lands here before the TX event for this one.
+        // SAFETY: the staged copy outlives the driver (field of
+        // `self`, never reallocated); the IDF reads `len` bytes
+        // starting at the passed pointer, all within the array.
+        // `check` maps the return code; `tx_in_flight` gates the next
+        // submit until the DONE/FAILED hook fires.
+        // CCA (`true`): unacked inter-PAN still benefits from carrier
+        // sense; ACKed frames need it for CSMA-CA.
+        self.tx_stage[..frame.len()].copy_from_slice(frame);
+        let staged: &[u8] = &self.tx_stage[..frame.len()];
         unsafe {
-            check(ffi::esp_ieee802154_transmit(frame.as_ptr(), true))?;
+            check(ffi::esp_ieee802154_transmit(staged.as_ptr(), true))?;
         }
         self.tx_in_flight = true;
         Ok(())
