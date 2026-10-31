@@ -241,3 +241,70 @@ fn admit_extra_answers_air_order_mg24_assoc_req() {
     app2.on_mac_psdu(&foreign);
     assert_eq!(app2.take_assoc_rsp(&mut out).unwrap(), 0);
 }
+
+/// Short-addressed data-request poll carry (adapter gap): an associated
+/// device polls with its assigned short (`FC 63 88`, 10 B, command
+/// `0x04`). `classify` must route it (not `Other`, which the adapter
+/// drops into `rx_dropped`), and the app must re-arm the pending
+/// association answer for the short's EUI — the post-association
+/// sibling of the long pre-association poll fetch edge.
+#[test]
+fn short_poll_rearms_assoc_answer_through_adapter() {
+    use rounddance_hal_esp::mac_cmd::{
+        build_data_poll_short, classify, parse_data_poll_short, Incoming as MacIncoming,
+    };
+    // Codec round-trip: FC 63 88 | seq | dst pan | dst short | src short | 0x04.
+    let mut air = [0u8; 10];
+    assert_eq!(
+        build_data_poll_short(0x05, PAN, COORD, app::JOINER_SHORT, &mut air).unwrap(),
+        10
+    );
+    assert_eq!(
+        air,
+        [0x63, 0x88, 0x05, 0x01, 0xc6, 0x00, 0x00, 0x01, 0x00, 0x04]
+    );
+    let poll = parse_data_poll_short(&air).expect("short poll parses");
+    assert_eq!((poll.seq, poll.src_short), (0x05, app::JOINER_SHORT));
+    assert!(matches!(classify(&air), MacIncoming::ShortPoll(_)));
+    // Malformed short polls stay out of the MAC queue.
+    assert!(parse_data_poll_short(&air[..9]).is_none());
+    let mut bad = air;
+    bad[9] = 0x09;
+    assert!(parse_data_poll_short(&bad).is_none());
+    assert!(matches!(classify(&bad), MacIncoming::Other));
+
+    // Adapter carries it to the MAC queue (pre-fix: dropped, rx_dropped 1).
+    let mut a = EspAdapter::new(MockDriver::new());
+    a.set_pan_id(PAN);
+    a.set_short_addr(COORD);
+    a.init().unwrap();
+    let wire = len2_frame(&air);
+    a.driver_mut()
+        .inject_rx(&[RxFrame::from_slice(&wire, 15, -40, 200).unwrap()]);
+    assert!(a.poll_indication().is_none());
+    let ind = a.poll_mac_indication().expect("short poll routes");
+    assert_eq!(ind.psdu(), &air);
+    assert_eq!(a.rx_dropped(), 0);
+
+    // App re-arms the association answer for the short's EUI.
+    let mut app = formed_app();
+    let mut log = app::NullLog;
+    let mut out = [0u8; 32];
+    app.open_permit(&mut log, 600_000).unwrap();
+    app.admit_joiner(&mut log, 0).unwrap();
+    app.on_mac_psdu(&ota_assoc_req());
+    assert_eq!(app.take_assoc_rsp(&mut out).unwrap(), 19);
+    assert!(!app.assoc_pending());
+    app.on_mac_psdu(&air);
+    assert!(app.assoc_pending(), "short poll re-arms");
+    let n = app.take_assoc_rsp(&mut out).unwrap();
+    assert_eq!(n, 19);
+    assert_eq!(u16::from_le_bytes([out[16], out[17]]), app::JOINER_SHORT);
+    // Unknown short re-arms nothing.
+    app.on_mac_psdu(&ota_assoc_req());
+    assert_eq!(app.take_assoc_rsp(&mut out).unwrap(), 19);
+    let mut stranger = air;
+    stranger[7..9].copy_from_slice(&0x00feu16.to_le_bytes());
+    app.on_mac_psdu(&stranger);
+    assert!(!app.assoc_pending());
+}

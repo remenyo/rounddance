@@ -31,7 +31,8 @@
 //! `RD-APP-C6-*` rows are repo-minted (MINTED-pending-confirm).
 
 use crate::mac_cmd::{
-    eui_matches, CoordAssoc, Incoming as MacIncoming, MacCmdError, SUPERFRAME_ASSOC_PERMIT,
+    eui_matches, CoordAssoc, DataPoll, Incoming as MacIncoming, MacCmdError,
+    SUPERFRAME_ASSOC_PERMIT,
 };
 use rounddance_aps::{decode_data, DataDest, DataHeader, DeliveryMode, FrameControl as ApsFc};
 use rounddance_commission::{
@@ -449,6 +450,25 @@ impl CoordinatorApp {
         self.assoc.assoc_pending()
     }
 
+    /// Resolve an assigned short to its admitted EUI (the reverse of
+    /// the [`CoordinatorApp::take_assoc_rsp`] short selection): extra
+    /// admissions first, then the [`JOINER_SHORT`] fallback. Unknown
+    /// shorts resolve to nothing, so stray polls re-arm nothing.
+    fn short_to_eui(&self, short: u16) -> Option<[u8; 8]> {
+        if let Some((eui, _)) = self
+            .extra_shorts
+            .iter()
+            .flatten()
+            .find(|(_, s)| *s == short)
+        {
+            return Some(*eui);
+        }
+        if short == JOINER_SHORT {
+            return Some(JOINER_EUI);
+        }
+        None
+    }
+
     /// Pending beacon-answer count.
     #[must_use]
     pub fn beacon_pending(&self) -> u32 {
@@ -477,7 +497,8 @@ impl CoordinatorApp {
     /// Feed one inbound MAC-command PSDU to the responder: beacon-req
     /// pends a beacon, allow-listed assoc-req under an open window
     /// latches + pends a response (denied with no response otherwise),
-    /// long poll re-arms for the latched EUI. Returns the
+    /// long poll re-arms for the latched EUI, short poll re-arms for
+    /// the EUI holding the polled short. Returns the
     /// classification for the serial-log leg.
     pub fn on_mac_psdu(&mut self, psdu: &[u8]) -> MacIncoming {
         let inc = crate::mac_cmd::classify(psdu);
@@ -488,6 +509,14 @@ impl CoordinatorApp {
             }
             MacIncoming::DataPoll(ref poll) => {
                 let _ = self.assoc.on_data_poll(poll);
+            }
+            MacIncoming::ShortPoll(ref poll) => {
+                if let Some(eui) = self.short_to_eui(poll.src_short) {
+                    let _ = self.assoc.on_data_poll(&DataPoll {
+                        seq: poll.seq,
+                        src_eui: eui,
+                    });
+                }
             }
             MacIncoming::Other => {}
         }

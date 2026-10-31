@@ -13,7 +13,9 @@
 //! * Frames in (coordinator RX): beacon-request (MAC command `0x07`,
 //!   broadcast, 8 B), association-request (`0x01`, long source, 19 B),
 //!   long data-request poll (`0x04`, long source, 18 B — the fetch
-//!   edge `main.rs` uses to re-arm a pending association answer).
+//!   edge `main.rs` uses to re-arm a pending association answer), and
+//!   short data-request poll (`0x04`, short source, 10 B — the
+//!   post-association fetch from a device holding an assigned short).
 //! * Frames out (coordinator TX): beacon (MAC beacon, 26 B:
 //!   superframe `0xCFFF` + empty GTS/pending + 15 B network payload),
 //!   association-response (`0x02`, 19 B: assigned short + status).
@@ -89,6 +91,8 @@ pub const BEACON_REQ_LEN: usize = 8;
 pub const ASSOC_REQ_LEN: usize = 19;
 /// Long-form data-request poll PSDU length (long source, no caps).
 pub const DATA_POLL_LONG_LEN: usize = 18;
+/// Short-form data-request poll PSDU length (short source, no caps).
+pub const DATA_POLL_SHORT_LEN: usize = 10;
 /// Beacon PSDU length (superframe + GTS + pending + 15 B payload).
 pub const BEACON_LEN: usize = 26;
 /// Association-response PSDU length (assigned short + status).
@@ -186,6 +190,16 @@ pub struct DataPoll {
     pub src_eui: [u8; 8],
 }
 
+/// One decoded short-form data-request poll (post-association fetch
+/// from an assigned short).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShortPoll {
+    /// MAC sequence number.
+    pub seq: u8,
+    /// Polling device short address.
+    pub src_short: u16,
+}
+
 /// One decoded beacon (joiner-side survey input).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BeaconInfo {
@@ -230,6 +244,8 @@ pub enum Incoming {
     AssocReq(AssocReq),
     /// Long-form data poll: re-arm for the latched EUI only.
     DataPoll(DataPoll),
+    /// Short-form data poll: re-arm for the EUI holding the short.
+    ShortPoll(ShortPoll),
     /// Anything else (data, foreign commands, beacons): not ours.
     Other,
 }
@@ -381,6 +397,56 @@ pub fn parse_data_poll_long(psdu: &[u8]) -> Option<DataPoll> {
     Some(DataPoll {
         seq: psdu[2],
         src_eui,
+    })
+}
+
+/// Build a short-form data-request poll PSDU into `out` (10 B).
+///
+/// Same command as the long poll with short addressing (`FC 63 88`,
+/// intra-PAN): the post-association fetch of a pending answer from a
+/// device that already holds an assigned short.
+///
+/// Layout: `FC 63 88 | seq | dst pan | dst short | src short | cmd 0x04`.
+///
+/// # Errors
+///
+/// [`MacCmdError::BufferTooSmall`] when `out` holds fewer than
+/// [`DATA_POLL_SHORT_LEN`] octets.
+pub fn build_data_poll_short(
+    seq: u8,
+    dst_pan: u16,
+    dst_short: u16,
+    src_short: u16,
+    out: &mut [u8],
+) -> Result<usize, MacCmdError> {
+    if out.len() < DATA_POLL_SHORT_LEN {
+        return Err(MacCmdError::BufferTooSmall);
+    }
+    out[0] = 0x63;
+    out[1] = 0x88;
+    out[2] = seq;
+    out[3..5].copy_from_slice(&dst_pan.to_le_bytes());
+    out[5..7].copy_from_slice(&dst_short.to_le_bytes());
+    out[7..9].copy_from_slice(&src_short.to_le_bytes());
+    out[9] = MAC_DATA_REQ;
+    Ok(DATA_POLL_SHORT_LEN)
+}
+
+/// Parse a short-form data-request poll PSDU.
+#[must_use]
+pub fn parse_data_poll_short(psdu: &[u8]) -> Option<ShortPoll> {
+    if psdu.len() != DATA_POLL_SHORT_LEN {
+        return None;
+    }
+    if psdu[0] != 0x63 || psdu[1] != 0x88 {
+        return None;
+    }
+    if psdu[9] != MAC_DATA_REQ {
+        return None;
+    }
+    Some(ShortPoll {
+        seq: psdu[2],
+        src_short: u16::from_le_bytes([psdu[7], psdu[8]]),
     })
 }
 
@@ -539,6 +605,9 @@ pub fn classify(psdu: &[u8]) -> Incoming {
     }
     if let Some(poll) = parse_data_poll_long(psdu) {
         return Incoming::DataPoll(poll);
+    }
+    if let Some(poll) = parse_data_poll_short(psdu) {
+        return Incoming::ShortPoll(poll);
     }
     Incoming::Other
 }

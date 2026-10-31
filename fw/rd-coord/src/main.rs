@@ -141,6 +141,12 @@ fn main() {
                 rounddance_hal_esp::mac_cmd::Incoming::DataPoll(poll) => {
                     println!("RDCOORD RX-POLL seq={} eui={:02x?}", poll.seq, poll.src_eui);
                 }
+                rounddance_hal_esp::mac_cmd::Incoming::ShortPoll(poll) => {
+                    println!(
+                        "RDCOORD RX-SHORTPOLL seq={} src={:#06x}",
+                        poll.seq, poll.src_short
+                    );
+                }
                 rounddance_hal_esp::mac_cmd::Incoming::Other => {}
             }
         }

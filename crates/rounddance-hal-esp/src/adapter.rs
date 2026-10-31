@@ -259,7 +259,7 @@ fn map_mgmt_err(e: DriverError) -> MacError {
 }
 
 /// One received MAC-command PSDU (beacon-request / assoc-request /
-/// long data poll) with per-frame meters.
+/// long or short data poll) with per-frame meters.
 ///
 /// The PSDU is the exact on-air command bytes (`Len`-stripped, tail
 /// meters excluded); upper layers feed it to
