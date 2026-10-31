@@ -81,36 +81,20 @@ Status: OPEN (new; join itself is proven — this is post-join loss).
   autosuspend already `on`), our coordinator (control arm: identical
   drop from the reference MG21 TC after a textbook join with annce +
   follow-ups), NCP state dirt (factory-reset before each run).
-- Leading hypothesis CONFIRMED as NCP-side (w95): drop window pinned
+- Leading hypothesis CONFIRMED as NCP-side (w95+w96): drop window pinned
   <13 s post-NETWORK_UP (EMPTY at first 5 s dump); zero-touch watches
   exclude observer effect; reference-TC control drops identically;
   no rejoin scan ever (local reset-to-empty signature, not a protocol
-  path). Next: NCP-side visibility (join-logging firmware) or
-  stick-level action (reflash known-good NCP image — procurement
-  queued since wave-36; needs explicit approval).
-- Lab at w95 closeout: 7F68 restored byte-identical to preflash backup
+  path). w96 update: RSP source now wire-order on air (MG21-identical,
+  `68 7f...`); NCP still drops identically → source order was never
+  the retention cause (closes that candidate). Confirm-driven TX retry
+  added (NoAck/ChannelBusy re-pend, bounded 4x) after a proven w96
+  NoAck-transport + JOIN_FAILED instance. Next: reflash prepared
+  (~/hwscratch/w96/b007-reflash-prep.md — target identity, image
+  options, exact procedure; DO NOT EXECUTE without explicit user
+  approval of the image + the destructive flash).
+- Lab at w96 closeout: 7F68 restored byte-identical to preflash backup
   (0 diff bytes); MG24 factory-reset EMPTY; MG21 left FORMED
-  (documented lab-TC state); leases none, quarantine none.
-- Lab at w94 closeout: 7F68 restored to preflash backup (1995 B
-  NVS-only delta); MG24 factory-reset EMPTY; MG21 left FORMED
-  (documented lab-TC state); leases none, quarantine none.
-- w93 differential: MG24 joins reference MG21 TC (0x3761/ch25) FIRST TRY
-  (`NETWORK_UP`, short 0xC5C1) → NCP fully healthy; defect is ours alone.
-- w93 root cause: assoc-rsp source addressing. Real NCPs answer `FC 63 cc`
-  (both addrs long, coordinator EUI source); ours was `63 8c` (short
-  source) → received-but-rejected. Fixed `152e2bd` (ASSOC_RSP_LEN 19→25,
-  MG21 wire frame pinned as regression vector), air-verified: NCP now
-  reports `NO_NETWORK_KEY_RECEIVED (173)` (was `JOIN_FAILED (148)`) —
-  association ACCEPTED, NCP waits for APS Transport-Key (0x05) we never
-  send. THAT is the current gate: Trust-Center key transport must be
-  implemented (repo assets: `derive_key_transport_key`, k1 golden frame
-  in `sim/tests/join_tc_first.rs`).
-- Stick reset (user-suggested, w93 step 1): tokenFactoryReset → identical
-  instant fail. Token state excluded (again).
-- NCP internal-scan flakiness stands (standalone scans hit, joinNetwork
-  internal scan often misses in 0.2 s); harness pre-scan retry loop
-  mitigates.
-- Lab state at w93 closeout: 7F68 restored to preflash backup (1995 B
-  NVS-only delta, app identical); MG24 factory-reset EMPTY; MG21 left
-  FORMED (documented lab-TC state, 0 children); leases none, quarantine
-  none. Evidence: ~/hwscratch/w93/SUMMARY.md.
+  (documented lab-TC state); leases none, quarantine none. Evidence:
+  ~/hwscratch/w96/ (observed join with full callbacks, RSP wire-order
+  air proof, retry fw, reflash prep).

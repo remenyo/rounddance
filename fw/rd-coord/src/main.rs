@@ -24,7 +24,7 @@ use rounddance_hal_esp::app::{
 use rounddance_hal_esp::mac_cmd::{gratuitous_due, GRATUITOUS_BEACON_INTERVAL_MS};
 use rounddance_hal_esp::{AppRole, CoordinatorApp, EspAdapter, EspIdfDriver, SerialLog};
 use rounddance_commission::ha_transport_key;
-use rounddance_mac_sap::{Channel, MacDataSap, MacMgmtSap};
+use rounddance_mac_sap::{Channel, MacDataSap, MacMgmtSap, TxHandle, TxStatus};
 use std::time::Instant;
 
 // esp-idf-sys 0.38 ships no binding for this symbol (same reason the
@@ -121,6 +121,12 @@ fn main() {
     let mut last_grat_ms: u64 = 0;
     let mut last_tick_ms: u64 = 0;
     let mut tx_buf = [0u8; 128];
+    // Join-critical in-flight tracking: confirm-driven retransmit
+    // (bounded) for the assoc answer + transport key.
+    let mut assoc_handle: Option<TxHandle> = None;
+    let mut transport_handle: Option<TxHandle> = None;
+    let mut assoc_retries: u8 = 4;
+    let mut transport_retries: u8 = 4;
     // Lab network key (OUR C601 network; deployment-owned test key,
     // documented: production must randomize + persist the aux counter
     // in NVS instead of rebooting from the fixed base).
@@ -150,6 +156,11 @@ fn main() {
                         "RDCOORD RX-ASSOCREQ seq={} eui={:02x?}",
                         req.seq, req.src_eui
                     );
+                    // Fresh join: reset the confirm-retry budgets.
+                    assoc_handle = None;
+                    transport_handle = None;
+                    assoc_retries = 4;
+                    transport_retries = 4;
                 }
                 rounddance_hal_esp::mac_cmd::Incoming::DataPoll(poll) => {
                     println!("RDCOORD RX-POLL seq={} eui={:02x?}", poll.seq, poll.src_eui);
@@ -167,9 +178,29 @@ fn main() {
         while let Some(ind) = adapter.poll_indication() {
             log_air(&mut log, "RDCOORD RX", ind.msdu.as_slice());
         }
-        // Drain TX confirms (shared data + MAC queue).
+        // Drain TX confirms (shared data + MAC queue). A NoAck /
+        // ChannelBusy confirm for a join-critical frame re-pends it:
+        // the NCP never saw it, and the join window is seconds long
+        // (w96: delivered RSP + NoAck transport + JOIN_FAILED).
+        // Bounded: 4 retries each, then the answer lapses.
         while let Some(c) = adapter.poll_confirm() {
             println!("RDCOORD TX-CONFIRM status={:?}", c.status);
+            if Some(c.handle) == assoc_handle {
+                assoc_handle = None;
+                if c.status != TxStatus::Delivered && assoc_retries > 0 {
+                    assoc_retries -= 1;
+                    println!("RDCOORD TX-ASSOC-NOACK; re-armed ({assoc_retries} left)");
+                    app.rearm_assoc();
+                }
+            }
+            if Some(c.handle) == transport_handle {
+                transport_handle = None;
+                if c.status != TxStatus::Delivered && transport_retries > 0 {
+                    transport_retries -= 1;
+                    println!("RDCOORD TX-TRANSPORT-NOACK; re-armed ({transport_retries} left)");
+                    app.rearm_transport();
+                }
+            }
         }
         // Radiate: assoc-response first, then solicited beacons, then
         // gratuitous beacons while unassociated (passive-capture leg).
@@ -177,12 +208,15 @@ fn main() {
             match app.take_assoc_rsp(&mut tx_buf) {
                 Ok(n) if n > 0 => {
                     log_air(&mut log, "RDCOORD TX-ASSOC-RSP", &tx_buf[..n]);
-                    if let Err(e) = adapter.transmit_mac(&tx_buf[..n]) {
+                    match adapter.transmit_mac(&tx_buf[..n]) {
+                        Ok(h) => assoc_handle = Some(h),
+                        Err(e) => {
                         // Single-flight busy on a congested band must not
                         // drop the one answer: re-pend, retry next loop
                         // (confirms drain meanwhile). w92 f1 class.
                         println!("RDCOORD TX-ASSOC-FAILED {e:?}; re-armed");
                         app.rearm_assoc();
+                        }
                     }
                 }
                 Ok(_) => {}
@@ -192,11 +226,14 @@ fn main() {
             match app.take_transport_key(&mut tx_buf, &C6_NETKEY, &transport_key) {
                 Ok(n) if n > 0 => {
                     log_air(&mut log, "RDCOORD TX-TRANSPORT-KEY", &tx_buf[..n]);
-                    if let Err(e) = adapter.transmit_mac(&tx_buf[..n]) {
+                    match adapter.transmit_mac(&tx_buf[..n]) {
+                        Ok(h) => transport_handle = Some(h),
+                        Err(e) => {
                         // Same single-flight hazard as the assoc answer:
                         // re-pend, retry next loop (w93 f1 class).
                         println!("RDCOORD TX-TRANSPORT-FAILED {e:?}; re-armed");
                         app.rearm_transport();
+                        }
                     }
                 }
                 Ok(_) => {}
