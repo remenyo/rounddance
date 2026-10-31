@@ -81,12 +81,16 @@ Status: OPEN (new; join itself is proven — this is post-join loss).
   autosuspend already `on`), our coordinator (control arm: identical
   drop from the reference MG21 TC after a textbook join with annce +
   follow-ups), NCP state dirt (factory-reset before each run).
-- Leading hypothesis: NCP-internal loss (partial token flush — key
-  present, net params zeroed; no rejoin attempt suggests local
-  reset-to-empty, not a protocol event). Next: rapid 5 s polling at
-  the next join to pin the drop window + exact last-air-frame; or
+- Leading hypothesis CONFIRMED as NCP-side (w95): drop window pinned
+  <13 s post-NETWORK_UP (EMPTY at first 5 s dump); zero-touch watches
+  exclude observer effect; reference-TC control drops identically;
+  no rejoin scan ever (local reset-to-empty signature, not a protocol
+  path). Next: NCP-side visibility (join-logging firmware) or
   stick-level action (reflash known-good NCP image — procurement
-  queued since wave-36).
+  queued since wave-36; needs explicit approval).
+- Lab at w95 closeout: 7F68 restored byte-identical to preflash backup
+  (0 diff bytes); MG24 factory-reset EMPTY; MG21 left FORMED
+  (documented lab-TC state); leases none, quarantine none.
 - Lab at w94 closeout: 7F68 restored to preflash backup (1995 B
   NVS-only delta); MG24 factory-reset EMPTY; MG21 left FORMED
   (documented lab-TC state); leases none, quarantine none.
