@@ -71,7 +71,7 @@ Status: CLOSED (join path proven 2026-10-31, w94 — see verdict).
 - NCP internal-scan flakiness stands (mitigated by pre-scan retry loop).
 
 ### B-007 (2026-10-31): joined NCP drops within minutes (retention)
-Status: REOPENED 2026-10-31 (our-side retention fault — healthy peer drops identically).
+Status: CLOSED 2026-10-31 (measurement artifact — retention PROVEN while hosted; no stack fault).
 - Symptom: all 6 joins this campaign drop to `NO_NETWORK/0xFFFE`
   (key retained: `network_key_set=true`) within minutes, then silence:
   exactly one NWK-secured uplink ~85 ms post-transport, then zero polls,
@@ -127,6 +127,32 @@ Status: REOPENED 2026-10-31 (our-side retention fault — healthy peer drops ide
   tap across the drop window (NCP-side reset vs silent token clear)
   + drop-window pinning with sub-minute single dumps from a fresh
   join. Evidence ~/hwscratch/w100/.
+
+- VERDICT w101 (UART-tap + hold experiments, MG21 vs C601):
+  (1) Raw UART tap across a 10-min joined window: ZERO bytes from
+  the NCP (no callbacks, no reset chatter) — the drop leaves no
+  NCP-side trace. (2) Drop window pinned <15 s via timed dumps
+  (JOINED +1.8 s, EMPTY +15 s). (3) resetNode at +17 s post-join
+  reads EMPTY — CONFOUNDED by (2), proves nothing about NVM.
+  (4) DECISIVE: holding ONE bellows session open, the NCP stays
+  JOINED/0x0003 at +30/+60/+90/+120 s; detached, it reads EMPTY
+  minutes later. (5) ASH-open with ZERO commands for 100 s: still
+  JOINED — polling not required, attachment suffices. (6) 10-MIN
+  HOSTED ALIVE PROOF: JOINED/0x0003 at all of t+1..t+10 min,
+  EMPTY only after final detach. CONCLUSION: every campaign
+  "drop" follows a host DETACH (join scripts detach at ~T+2 s;
+  per-minute dumps re-detach each minute; "zero-touch" runs still
+  detach once). Retention holds indefinitely while hosted. This
+  invalidates the "our coordinator loses members" reading AND
+  dissolves the MG24-stick-quarantine basis (its drops share the
+  artifact; the 13 s-to-32-60 s reflash delta is timing noise).
+  Lab discipline from here: never detach a joined NCP (hold the
+  session or expect the drop); tap.py fixed for binary streams
+  (`tapraw.py`: fixed-chunk reads — `readline` buffered ASH
+  forever, blinding the first UART window). Mechanism
+  sub-question parked with cause (DTR-level vs close-event vs
+  ASH-presence; needs a DTR-toggle-while-open test). Evidence
+  ~/hwscratch/w101/.
 - Lab at w96 closeout: 7F68 restored byte-identical to preflash backup
   (0 diff bytes); MG24 factory-reset EMPTY; MG21 left FORMED
   (documented lab-TC state); leases none, quarantine none. Evidence:
