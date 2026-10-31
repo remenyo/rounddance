@@ -19,7 +19,7 @@
 use esp_idf_hal::gpio::PinDriver;
 use esp_idf_hal::peripherals::Peripherals;
 use rounddance_hal_esp::app::{
-    eui_from_mac, log_air, role_from_mac, APP_CHANNEL, APP_PAN, COORD_SHORT,
+    eui_from_mac, log_air, role_from_mac, NwkRxOutcome, APP_CHANNEL, APP_PAN, COORD_SHORT,
 };
 use rounddance_hal_esp::mac_cmd::{gratuitous_due, GRATUITOUS_BEACON_INTERVAL_MS};
 use rounddance_hal_esp::{AppRole, CoordinatorApp, EspAdapter, EspIdfDriver, SerialLog};
@@ -181,9 +181,23 @@ fn main() {
         // Data RX (NWK and above): log air bytes for the sniffer leg.
         while let Some(ind) = adapter.poll_indication() {
             log_air(&mut log, "RDCOORD RX", ind.msdu.as_slice());
-            // Phase 1 leg RX-1: open + classify inbound NWK frames.
+            // Phase 1 leg RX-1/RSP-1: open + classify inbound NWK frames.
             let outcome = app.on_nwk_data(ind.msdu.as_slice(), &nwk_keys, now_ms);
             println!("RDCOORD RX-NWK {:?}", outcome);
+            // Reference-TC follow-through (w97 joinCTL): answer each
+            // Device_annce with a Node_desc_req to the announcer.
+            if let NwkRxOutcome::Annce { short, .. } = outcome {
+                match app.take_node_desc_req(&mut tx_buf, short, &C6_NETKEY) {
+                    Ok(n) if n > 0 => {
+                        log_air(&mut log, "RDCOORD TX-NODE-DESC-REQ", &tx_buf[..n]);
+                        if let Err(e) = adapter.transmit_mac(&tx_buf[..n]) {
+                            println!("RDCOORD TX-NODE-DESC-FAILED {e:?}");
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => println!("RDCOORD NODE-DESC-BUILD-FAILED {e:?}"),
+                }
+            }
         }
         // Drain TX confirms (shared data + MAC queue). A NoAck /
         // ChannelBusy confirm for a join-critical frame re-pends it:

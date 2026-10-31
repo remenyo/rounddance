@@ -357,9 +357,11 @@ pub struct CoordinatorApp {
     /// Explicit TX-loss recovery (`rearm_assoc`, `rearm_transport`)
     /// is unaffected by this flag.
     transport_sent: bool,
-    /// Auxiliary frame counter for transport delivery (strictly
-    /// monotonic per network key; starts at the lab base).
-    transport_auxctr: u32,
+    /// Auxiliary frame counter for NWK-secured transmission (strictly
+    /// monotonic per network key; starts at the lab base). One counter
+    /// space per sender per key: the transport delivery and all later
+    /// secured frames (ZDO requests, ...) share it.
+    nwk_auxctr: u32,
     /// Bounded indirect-message queue (Phase 1 leg 1b): payloads held
     /// per destination short until the device polls (leg 1c transmits
     /// them). While a short holds an entry it stays OUT of the
@@ -399,7 +401,7 @@ impl CoordinatorApp {
             aps_counter: 0,
             transport_pending: false,
             transport_sent: false,
-            transport_auxctr: TRANSPORT_AUX_BASE,
+            nwk_auxctr: TRANSPORT_AUX_BASE,
             indirect: [None; INDIRECT_DEPTH],
             tx_counter: FrameCounter::new(100, 4),
             rx_replay: ReplayTable::<8>::new(),
@@ -792,7 +794,7 @@ impl CoordinatorApp {
         // Source EUI rides LSB-first (wire order, `TC_EUI_WIRE`),
         // like every other address field the NCP parses (w93: MG21's
         // aux source is the LE bytes of its EUI).
-        let auxctr = self.transport_auxctr;
+        let auxctr = self.nwk_auxctr;
         let params = TransportKeyParams {
             dst_pan: APP_PAN,
             dst_short: short,
@@ -811,7 +813,7 @@ impl CoordinatorApp {
             Ok(n) => {
                 self.transport_pending = false;
                 self.transport_sent = true;
-                self.transport_auxctr = auxctr.wrapping_add(1);
+                self.nwk_auxctr = auxctr.wrapping_add(1);
                 Ok(n)
             }
             Err(_) => Err(MacCmdError::BufferTooSmall),
@@ -892,6 +894,67 @@ impl CoordinatorApp {
         let n = slot.len;
         self.indirect[pos] = None;
         Ok(n)
+    }
+
+    /// Build a coordinator→joiner Node_desc_req (ZDO cluster `0x0002`,
+    /// profile `0x0000`, unicast endpoint 0) as an NWK-secured data
+    /// frame into `out`; consumes one APS counter (used as both the
+    /// APS counter and the ZDO TSN) and one NWK aux counter. The fw
+    /// sends this once per handled Device_annce (the reference Ember
+    /// TC's follow-through, w97 joinCTL).
+    ///
+    /// # Errors
+    ///
+    /// [`MacCmdError::BufferTooSmall`] when `out` cannot hold the
+    /// frame.
+    pub fn take_node_desc_req(
+        &mut self,
+        out: &mut [u8],
+        dst_short: u16,
+        netkey: &[u8; 16],
+    ) -> Result<usize, MacCmdError> {
+        use rounddance_commission::{build_secured_nwk_frame, SecuredNwkParams};
+        use rounddance_zdo::zdp::NodeDescReq;
+        let c = self.take_aps_counter();
+        let zdo = NodeDescReq {
+            tsn: c,
+            nwk_of_interest: dst_short,
+        };
+        let mut zbuf = [0u8; NodeDescReq::LEN];
+        zdo.encode_into(&mut zbuf)
+            .map_err(|_| MacCmdError::BufferTooSmall)?;
+        let aps = rounddance_aps::DataHeader {
+            control: rounddance_aps::FrameControl::data(rounddance_aps::DeliveryMode::Unicast),
+            dest: rounddance_aps::DataDest::Unicast { dst_endpoint: 0 },
+            cluster_id: 0x0002,
+            profile_id: 0x0000,
+            src_endpoint: 0,
+            counter: c,
+            ext: None,
+        };
+        let mut abuf = [0u8; 16];
+        let alen = aps
+            .encode_into(&zbuf, &mut abuf)
+            .map_err(|_| MacCmdError::BufferTooSmall)?;
+        let auxctr = self.nwk_auxctr;
+        let params = SecuredNwkParams {
+            dst_pan: APP_PAN,
+            dst_short,
+            src_short: COORD_SHORT,
+            src_eui: TC_EUI_WIRE,
+            mac_seq: self.take_mac_seq(),
+            nwk_seq: self.take_nwk_seq(),
+            nwk_radius: 0x1e,
+            auxctr,
+            netkey: *netkey,
+        };
+        match build_secured_nwk_frame(&abuf[..alen], &params, out) {
+            Ok(n) => {
+                self.nwk_auxctr = auxctr.wrapping_add(1);
+                Ok(n)
+            }
+            Err(_) => Err(MacCmdError::BufferTooSmall),
+        }
     }
 
     /// Feed one inbound NWK frame (MAC header already stripped by the

@@ -849,3 +849,76 @@ fn nwk_rx_opens_secured_and_handles_annce() {
         other => panic!("expected open NwkCommand, got {:?}", other),
     }
 }
+
+/// Phase 1 response leg: coordinator-initiated Node_desc_req.
+/// Sealed NWK-data + open APS unicast (ep 0, 0x0002/0x0000) + ZDO
+/// request; the built frame decrypts to the exact APS/ZDO plaintext
+/// and our own RX path classifies it as Data{0x0002, 0}.
+#[test]
+fn node_desc_req_builds_sealed_and_classifies() {
+    use rounddance_hal_esp::app::NwkRxOutcome;
+    use rounddance_security::{ccm_star_open_into, KeySet, NetworkKey};
+
+    const KEY: [u8; 16] = [
+        0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e,
+        0x1f,
+    ];
+    const TCW: [u8; 8] = [0x68, 0x7f, 0x86, 0xfe, 0xff, 0x62, 0xf2, 0xa0];
+    let mut app = formed_app();
+    let mut out = [0u8; 160];
+    let n = app.take_node_desc_req(&mut out, 0x0002, &KEY).unwrap();
+    assert!(n <= out.len() && n > 30);
+    let f = &out[..n];
+    // MAC data header to the joined short.
+    assert_eq!(
+        &f[..9],
+        &[0x61, 0x88, f[2], 0x01, 0xc6, 0x02, 0x00, 0x00, 0x00]
+    );
+    // NWK secured data header, no extended addresses:
+    // FCF 08 02, dst 02 00, src 00 00, radius 1e, seq (fresh app: 00).
+    assert_eq!(&f[9..15], &[0x08, 0x02, 0x02, 0x00, 0x00, 0x00]);
+    assert_eq!(f[15], 0x1e);
+    assert_eq!(f[16], 0x00);
+    // Aux: on-air level zero, Index key, extended nonce (our source).
+    assert_eq!(f[17], 0x28);
+    assert_eq!(&f[22..30], &TCW);
+    assert_eq!(f[30], 0x00);
+    // Decrypt the tail with the key: APS unicast ep 0 + ZDO request.
+    let ct_end = n - 4;
+    let mut tag = [0u8; 4];
+    tag.copy_from_slice(&f[ct_end..n]);
+    let mut raux = [0u8; 14];
+    raux[0] = 0x2d;
+    raux[1..5].copy_from_slice(&f[18..22]);
+    raux[5..13].copy_from_slice(&TCW);
+    raux[13] = 0x00;
+    let mut aad = [0u8; 22];
+    aad[..8].copy_from_slice(&f[9..17]);
+    aad[8..22].copy_from_slice(&raux);
+    let mut nonce = [0u8; 13];
+    nonce[..8].copy_from_slice(&TCW);
+    nonce[8..12].copy_from_slice(&f[18..22]);
+    nonce[12] = 0x2d;
+    let mut pt = [0u8; 96];
+    let m = ccm_star_open_into(&KEY, &nonce, &aad, &f[31..ct_end], &tag, &mut pt).unwrap();
+    let pt = &pt[..m];
+    assert_eq!(&pt[..2], &[0x00, 0x00]);
+    assert_eq!(u16::from_le_bytes([pt[2], pt[3]]), 0x0002);
+    assert_eq!(u16::from_le_bytes([pt[4], pt[5]]), 0x0000);
+    assert_eq!(pt[6], 0x00);
+    // ZDO Node_desc_req: TSN + short of interest.
+    assert_eq!(pt[8..11], [pt[7], 0x02, 0x00]);
+    // Loopback: our own RX path classifies the request shape
+    // (MAC header stripped, as the driver/adapter path delivers).
+    let keys = KeySet::new(NetworkKey::new(KEY, 0));
+    let mut app2 = formed_app();
+    match app2.on_nwk_data(&f[9..], &keys, 5_000) {
+        NwkRxOutcome::Data { cluster, profile } => {
+            assert_eq!((cluster, profile), (0x0002, 0x0000));
+        }
+        other => panic!("expected Data, got {:?}", other),
+    }
+    // Short buffer refused.
+    let mut tiny = [0u8; 16];
+    assert!(app.take_node_desc_req(&mut tiny, 0x0002, &KEY).is_err());
+}
