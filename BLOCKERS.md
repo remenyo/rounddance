@@ -155,7 +155,7 @@ Status: CLOSED 2026-10-31 (measurement artifact — retention PROVEN while hoste
   ~/hwscratch/w101/.
 
 ### B-009 (2026-10-31): MG21 TC answers no stranger assoc (C6 joiner blocked at assoc)
-Status: OPEN (re-scoped 2026-10-31: MG21 DOES admit strangers — C6 silence isolated as C6-specific or TC-state-at-the-time; C6 x foreign-TC still unproven).
+Status: PARKED 2026-10-31 (cause: C6-specific assoc silence is fully isolated but the mechanism sits behind two missing capabilities - (a) Ember NCP-side assoc tracing (no mapping exists for why the TC drops our frame after MAC-ACK), (b) a cross-family TC to test OUI-keying (verified absent from the bench this turn: no CC2652/XDS110 anywhere on USB, the sole Nordic is the sniffer and repurposing it kills observation). Five campaigns + fresh-TC controls + storm-kill + same-TC NCP-answered split constitute the complete in-house evidence; follow-ups named, no open experiment remains executable with on-bench means. Reopen on: CC2652 procurement, NCP trace mapping, or a second Ember TC family.) — C6 silence isolated as C6-specific or TC-state-at-the-time; C6 x foreign-TC still unproven).
 - Symptom (2 campaigns): our C6 joiner scans/ch25, elects MG21 (permit=true
   beacons, EPAN-verified), adopts PAN, TXs assoc-reqs (15+, MAC-ACKed each
   time on sniffer) — MG21 NEVER transmits an assoc-rsp. Reproduced w102
@@ -280,3 +280,16 @@ Status: CLOSED 2026-10-31 (fix air-proven; mechanism root-caused in IDF source +
   (was 4/4), auxctr chain 0x1000→0x1004 proves one boot. The same
   run air-proved the replay fix (join-2 Annce classifies).
   Evidence ~/hwscratch/b008/.
+### B-010 (2026-10-31): Phase 5 bench-hardware gaps (CC2652, spare nRF)
+Status: PARKED with cause (no such hardware on the bench).
+- CC2652 identify + MT probe: impossible, no TI XDS110 device on USB
+  (verified `lsusb` + by-id audit 2026-10-31: 8x Espressif C6, 2x H2,
+  C5, 2x S3, S31, MG21, MG24, 1x nRF sniffer, J-Link; zero TI).
+  Reopen on procurement.
+- nRF ZBOSS stay-joined peers: impossible without killing observation
+  (the sole Nordic is the sniffer; flashing ZBOSS onto it destroys
+  the lab's only sniffer). Reopen on a second nRF dongle.
+- Neither blocks the stack: both are peer-diversity legs, and 3-stack
+  interop is already air-proven (MG24 x C601 join, MG21 x C601 join,
+  C6 x C601 joins, MG24 x MG21-TC assoc+RSP + w108 full join).
+  Evidence: this turn's USB audit + ~/hwscratch/w112/.

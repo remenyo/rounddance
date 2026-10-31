@@ -204,17 +204,38 @@ fn full_run(seed: u64) -> Vec<String> {
 
 #[test]
 fn direct_full_commissioning() {
-    let trace = full_run(0xD1EC7);
-    assert!(trace.iter().any(|l| l.starts_with("form:")));
-    assert!(trace.iter().any(|l| l.starts_with("permit:180")));
-    assert!(trace.iter().any(|l| l.starts_with("join:")));
-    assert!(trace.iter().any(|l| l.starts_with("key-update:42")));
-    assert!(trace.iter().any(|l| l.starts_with("handoff:")));
-    // Every operation reported success on the status characteristic.
-    let failures = trace
-        .iter()
-        .filter(|l| l.starts_with("status:") && !l.ends_with("00"));
-    assert_eq!(failures.count(), 0);
+    // 4-seed matrix (house pattern: 0x0000, arbitrary, 0xBEEF,
+    // u64::MAX): the flow is key-agnostic, so every seed must run
+    // the full form -> permit -> join -> key-update -> handoff path
+    // with zero status failures.
+    for &seed in &[0x0000u64, 0xD1EC7, 0xBEEF, u64::MAX] {
+        let trace = full_run(seed);
+        assert!(
+            trace.iter().any(|l| l.starts_with("form:")),
+            "seed {seed:#x}: no form"
+        );
+        assert!(
+            trace.iter().any(|l| l.starts_with("permit:180")),
+            "seed {seed:#x}: no permit"
+        );
+        assert!(
+            trace.iter().any(|l| l.starts_with("join:")),
+            "seed {seed:#x}: no join"
+        );
+        assert!(
+            trace.iter().any(|l| l.starts_with("key-update:42")),
+            "seed {seed:#x}: no key-update"
+        );
+        assert!(
+            trace.iter().any(|l| l.starts_with("handoff:")),
+            "seed {seed:#x}: no handoff"
+        );
+        // Every operation reported success on the status characteristic.
+        let failures = trace
+            .iter()
+            .filter(|l| l.starts_with("status:") && !l.ends_with("00"));
+        assert_eq!(failures.count(), 0, "seed {seed:#x}: status failures");
+    }
 }
 
 #[test]
