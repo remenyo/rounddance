@@ -18,15 +18,15 @@
 
 use esp_idf_hal::gpio::PinDriver;
 use esp_idf_hal::peripherals::Peripherals;
+use rounddance_commission::ha_transport_key;
 use rounddance_hal_esp::app::{
     eui_from_mac, log_air, role_from_mac, NwkRxOutcome, APP_CHANNEL, APP_PAN, COORD_SHORT,
     TC_EUI_WIRE,
 };
 use rounddance_hal_esp::mac_cmd::{gratuitous_due, GRATUITOUS_BEACON_INTERVAL_MS};
 use rounddance_hal_esp::{AppRole, CoordinatorApp, EspAdapter, EspIdfDriver, SerialLog};
-use rounddance_commission::ha_transport_key;
-use rounddance_security::{KeySet, NetworkKey};
 use rounddance_mac_sap::{Channel, MacDataSap, MacMgmtSap, TxHandle, TxStatus};
+use rounddance_security::{KeySet, NetworkKey};
 use std::time::Instant;
 
 // esp-idf-sys 0.38 ships no binding for this symbol (same reason the
@@ -89,9 +89,7 @@ fn main() {
     // (w97 joiner leg: RSPs to the joiner got NoAck for exactly this
     // reason on the other side).
     adapter.set_extended_addr(u64::from_le_bytes(TC_EUI_WIRE));
-    adapter
-        .set_tx_power(10)
-        .expect("standing +10 dBm cap");
+    adapter.set_tx_power(10).expect("standing +10 dBm cap");
     adapter.init().expect("radio init");
     // `set_channel` needs a live driver: retune explicitly post-init
     // even though the default already matches, so the air channel is
@@ -129,12 +127,20 @@ fn main() {
     // the NCP-side joiner's assoc-req is answered instead of denied).
     app.open_permit(&mut log, 3_600_000).expect("permit");
     app.admit_joiner(&mut log, 0).expect("admit 97A4");
-    app.admit_extra(&mut log, [0x34, 0x8d, 0x13, 0xff, 0xfe, 0x11, 0x49, 0x6d], 0x0002)
-        .expect("admit MG24");
+    app.admit_extra(
+        &mut log,
+        [0x34, 0x8d, 0x13, 0xff, 0xfe, 0x11, 0x49, 0x6d],
+        0x0002,
+    )
+    .expect("admit MG24");
     // Phase-5 MG21-as-joiner (B-007 isolation arm): healthy Ember NCP
     // peer joins C601 to prove retention on non-suspect hardware.
-    app.admit_extra(&mut log, [0x04, 0xe3, 0xe5, 0xff, 0xfe, 0xf4, 0x75, 0x5f], 0x0003)
-        .expect("admit MG21");
+    app.admit_extra(
+        &mut log,
+        [0x04, 0xe3, 0xe5, 0xff, 0xfe, 0xf4, 0x75, 0x5f],
+        0x0003,
+    )
+    .expect("admit MG21");
 
     let start = Instant::now();
     let mut last_grat_ms: u64 = 0;
@@ -146,6 +152,15 @@ fn main() {
     let mut transport_handle: Option<TxHandle> = None;
     let mut assoc_retries: u8 = 4;
     let mut transport_retries: u8 = 4;
+    // Post-join follow-through tracking: confirm-driven retransmit
+    // (bounded) for the coordinator-initiated Node_desc_req. A
+    // ChannelBusy confirm on a congested channel silently dropped the
+    // request pre-w103 (fire-and-forget); the joiner never answers a
+    // frame it never hears.
+    let mut node_desc_handle: Option<TxHandle> = None;
+    let mut node_desc_retries: u8 = 4;
+    let mut node_desc_short: Option<u16> = None;
+    let mut node_desc_pending: Option<u16> = None;
     // Network key: build-time provisioned. `RD_NETKEY_HEX` (32 hex
     // digits) bakes a deployment key into this image; unset means the
     // explicit lab default below (with a build warning — never silent).
@@ -188,6 +203,10 @@ fn main() {
                     transport_handle = None;
                     assoc_retries = 4;
                     transport_retries = 4;
+                    node_desc_handle = None;
+                    node_desc_short = None;
+                    node_desc_pending = None;
+                    node_desc_retries = 4;
                 }
                 rounddance_hal_esp::mac_cmd::Incoming::DataPoll(poll) => {
                     println!("RDCOORD RX-POLL seq={} eui={:02x?}", poll.seq, poll.src_eui);
@@ -211,20 +230,14 @@ fn main() {
             // Phase 1 leg RX-1/RSP-1: open + classify inbound NWK frames.
             let outcome = app.on_nwk_data(ind.msdu.as_slice(), &nwk_keys, now_ms);
             println!("RDCOORD RX-NWK {:?}", outcome);
-            // Reference-TC follow-through (w97 joinCTL): answer each
-            // Device_annce with a Node_desc_req to the announcer.
+            // Reference-TC follow-through (w97 joinCTL): queue a
+            // Node_desc_req to the announcer; the send block below
+            // transmits it (and retries it on non-Delivered confirms).
             if let NwkRxOutcome::Annce { short, .. } = outcome {
-                match app.take_node_desc_req(&mut tx_buf, short, &C6_NETKEY) {
-                    Ok(n) if n > 0 => {
-                        log_air(&mut log, "RDCOORD TX-NODE-DESC-REQ", &tx_buf[..n]);
-                        println!("RDCOORD ZDO-PENDING {}", app.zdo_pending_open());
-                        if let Err(e) = adapter.transmit_mac(&tx_buf[..n]) {
-                            println!("RDCOORD TX-NODE-DESC-FAILED {e:?}");
-                        }
-                    }
-                    Ok(_) => {}
-                    Err(e) => println!("RDCOORD NODE-DESC-BUILD-FAILED {e:?}"),
-                }
+                node_desc_short = Some(short);
+                node_desc_pending = Some(short);
+                node_desc_handle = None;
+                node_desc_retries = 4;
             }
         }
         // Drain TX confirms (shared data + MAC queue). A NoAck /
@@ -250,6 +263,43 @@ fn main() {
                     app.rearm_transport();
                 }
             }
+            if Some(c.handle) == node_desc_handle {
+                node_desc_handle = None;
+                if c.status != TxStatus::Delivered {
+                    if node_desc_retries > 0 {
+                        node_desc_retries -= 1;
+                        println!("RDCOORD TX-NODE-DESC-NOACK; re-armed ({node_desc_retries} left)");
+                        node_desc_pending = node_desc_short;
+                    } else {
+                        println!("RDCOORD TX-NODE-DESC-GIVEUP (budget exhausted)");
+                    }
+                }
+            }
+        }
+        // Node_desc transmit: queued by the Annce arm, re-queued on
+        // non-Delivered confirms. Each take consumes a fresh aux
+        // counter + TSN (never re-radiate identical secured bytes: a
+        // confirm-lost first copy would trip the joiner's replay
+        // check). Bounded: budget exhausted → loud give-up, join
+        // proceeds without the descriptor answer.
+        if let Some(short) = node_desc_pending.take() {
+            match app.take_node_desc_req(&mut tx_buf, short, &C6_NETKEY) {
+                Ok(n) if n > 0 => {
+                    log_air(&mut log, "RDCOORD TX-NODE-DESC-REQ", &tx_buf[..n]);
+                    println!("RDCOORD ZDO-PENDING {}", app.zdo_pending_open());
+                    match adapter.transmit_mac(&tx_buf[..n]) {
+                        Ok(h) => node_desc_handle = Some(h),
+                        // Submit-time refusal: logged, not re-queued
+                        // (mirrors the transport path — the confirm
+                        // path is the retry driver, and blind
+                        // rebuilds would burn aux counters + Pending
+                        // slots at loop rate).
+                        Err(e) => println!("RDCOORD TX-NODE-DESC-FAILED {e:?}"),
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => println!("RDCOORD NODE-DESC-BUILD-FAILED {e:?}"),
+            }
         }
         // Radiate: assoc-response first, then solicited beacons, then
         // gratuitous beacons while unassociated (passive-capture leg).
@@ -260,11 +310,11 @@ fn main() {
                     match adapter.transmit_mac(&tx_buf[..n]) {
                         Ok(h) => assoc_handle = Some(h),
                         Err(e) => {
-                        // Single-flight busy on a congested band must not
-                        // drop the one answer: re-pend, retry next loop
-                        // (confirms drain meanwhile). w92 f1 class.
-                        println!("RDCOORD TX-ASSOC-FAILED {e:?}; re-armed");
-                        app.rearm_assoc();
+                            // Single-flight busy on a congested band must not
+                            // drop the one answer: re-pend, retry next loop
+                            // (confirms drain meanwhile). w92 f1 class.
+                            println!("RDCOORD TX-ASSOC-FAILED {e:?}; re-armed");
+                            app.rearm_assoc();
                         }
                     }
                 }
@@ -278,10 +328,10 @@ fn main() {
                     match adapter.transmit_mac(&tx_buf[..n]) {
                         Ok(h) => transport_handle = Some(h),
                         Err(e) => {
-                        // Same single-flight hazard as the assoc answer:
-                        // re-pend, retry next loop (w93 f1 class).
-                        println!("RDCOORD TX-TRANSPORT-FAILED {e:?}; re-armed");
-                        app.rearm_transport();
+                            // Same single-flight hazard as the assoc answer:
+                            // re-pend, retry next loop (w93 f1 class).
+                            println!("RDCOORD TX-TRANSPORT-FAILED {e:?}; re-armed");
+                            app.rearm_transport();
                         }
                     }
                 }

@@ -1366,3 +1366,68 @@ fn admit_extra_answers_mg21_as_joiner() {
     assert_eq!(u16::from_le_bytes([out[22], out[23]]), app::MG21_SHORT);
     assert_eq!(&out[13..21], &app::TC_EUI_WIRE);
 }
+
+/// Phase 4 node_desc retry contract: consecutive takes (as the
+/// confirm-driven retry emits) open DISTINCT matchable transactions —
+/// a response to any one closes only its own entry, and the others
+/// stay open for their own answers. (The retry loop itself lives in
+/// fw, unharnessed; this pins the app behavior it depends on.)
+#[test]
+fn node_desc_retries_open_independently_matchable_transactions() {
+    use rounddance_hal_esp::app::NwkRxOutcome;
+    use rounddance_security::{KeySet, NetworkKey};
+
+    const KEY: [u8; 16] = [
+        0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e,
+        0x1f,
+    ];
+    let keys = KeySet::new(NetworkKey::new(KEY, 0));
+    let mut app = formed_app();
+    let mut out = [0u8; 160];
+    // Two takes (initial + one retry): distinct TSNs, two entries.
+    app.take_node_desc_req(&mut out, 0x0002, &KEY).unwrap();
+    app.take_node_desc_req(&mut out, 0x0002, &KEY).unwrap();
+    assert_eq!(app.zdo_pending_open(), 2);
+    // A response echoing the FIRST tsn closes only it.
+    let mut zdo = vec![0x00, 0x00];
+    let mut aps = vec![0x00, 0x00, 0x02, 0x80, 0x00, 0x00, 0x00, 0x09];
+    aps.append(&mut zdo);
+    let rsp = sealed_nwk(
+        &aps,
+        NwkType::Data,
+        0x0000,
+        0x0002,
+        None,
+        None,
+        0x42,
+        7,
+        &KEY,
+        [0u8; 8],
+    );
+    match app.on_nwk_data(&rsp, &keys, 9_000) {
+        NwkRxOutcome::ZdoResponse { tsn, .. } => assert_eq!(tsn, 0x00),
+        other => panic!("expected ZdoResponse, got {:?}", other),
+    }
+    assert_eq!(app.zdo_pending_open(), 1);
+    // The SECOND tsn still matches afterwards.
+    let mut zdo2 = vec![0x01, 0x00];
+    let mut aps2 = vec![0x00, 0x00, 0x02, 0x80, 0x00, 0x00, 0x00, 0x09];
+    aps2.append(&mut zdo2);
+    let rsp2 = sealed_nwk(
+        &aps2,
+        NwkType::Data,
+        0x0000,
+        0x0002,
+        None,
+        None,
+        0x43,
+        8,
+        &KEY,
+        [0u8; 8],
+    );
+    match app.on_nwk_data(&rsp2, &keys, 9_001) {
+        NwkRxOutcome::ZdoResponse { tsn, .. } => assert_eq!(tsn, 0x01),
+        other => panic!("expected ZdoResponse, got {:?}", other),
+    }
+    assert_eq!(app.zdo_pending_open(), 0);
+}
