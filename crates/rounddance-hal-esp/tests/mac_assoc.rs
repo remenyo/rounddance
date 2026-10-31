@@ -373,6 +373,121 @@ impl app::SerialLog for NullLog {
     fn log(&mut self, _line: &str) {}
 }
 
+/// Pre-w93 legacy short-source association-response shape (`FC 63 8c`,
+/// 19 B: coordinator SHORT as source). Real Ember NCPs never emit this
+/// layout on air (w93 MG21 capture is `FC 63 cc`, 25 B, long source);
+/// the long-source-only parser must refuse it with `None` (recorded
+/// here), and it must not classify as anything routable either.
+fn ota_assoc_rsp_legacy_short_source() -> [u8; 19] {
+    let mut b = [0u8; 19];
+    b[..3].copy_from_slice(&[0x63, 0x8c, 0x02]);
+    b[3..5].copy_from_slice(&PAN.to_le_bytes());
+    b[5..13].copy_from_slice(&JOINER_EUI);
+    b[13..15].copy_from_slice(&COORD.to_le_bytes());
+    b[15] = MAC_ASSOC_RSP;
+    b[16..18].copy_from_slice(&JOINER_SHORT.to_le_bytes());
+    b[18] = 0x00;
+    b
+}
+
+#[test]
+fn parse_rejects_legacy_short_source_rsp() {
+    // Same seq/PAN/dst-EUI/short/status as the OTA vector, only the
+    // source addressing differs (short `8c` vs long `cc`).
+    let legacy = ota_assoc_rsp_legacy_short_source();
+    assert_eq!(legacy.len(), 19);
+    assert_eq!(legacy[1], 0x8c);
+    assert_eq!(legacy[2], ota_assoc_rsp()[2]);
+    // Recorded refusal: exactly `None`, never a partial `AssocRsp`.
+    assert_eq!(mac_cmd::parse_assoc_rsp(&legacy), None);
+    assert!(mac_cmd::parse_assoc_rsp(&legacy).is_none());
+    assert!(matches!(
+        mac_cmd::classify(&legacy),
+        mac_cmd::Incoming::Other
+    ));
+    // Positive control: the 25 B long-source twin parses.
+    assert!(mac_cmd::parse_assoc_rsp(&ota_assoc_rsp()).is_some());
+}
+
+/// Truncated long-source RSPs (24 B off-by-one, 0 B empty) and
+/// wrong-command variants of the exact 25 B shape: all refuse with
+/// `None`, no indexing panic on the empty slice.
+#[test]
+fn parse_rejects_truncated_and_wrong_cmd_rsp() {
+    let full = ota_assoc_rsp();
+    // 24 B: one octet short of ASSOC_RSP_LEN.
+    assert_eq!(mac_cmd::parse_assoc_rsp(&full[..24]), None);
+    // 0 B: empty slice.
+    let empty: [u8; 0] = [];
+    assert_eq!(mac_cmd::parse_assoc_rsp(&empty), None);
+    assert_eq!(mac_cmd::parse_assoc_rsp(&full[..0]), None);
+    // Oversize is equally refused (exact-length match).
+    let mut long = [0u8; 26];
+    long[..25].copy_from_slice(&full);
+    assert_eq!(mac_cmd::parse_assoc_rsp(&long), None);
+    // Wrong command id in an otherwise valid 25 B shape.
+    let mut bad_cmd = full;
+    bad_cmd[21] = 0x09;
+    assert_eq!(mac_cmd::parse_assoc_rsp(&bad_cmd), None);
+    // Wrong second FC byte (`8c` short-source marker smuggled into a
+    // 25 B frame) and wrong first FC byte.
+    let mut bad_fc = full;
+    bad_fc[1] = 0x8c;
+    assert_eq!(mac_cmd::parse_assoc_rsp(&bad_fc), None);
+    let mut bad_fc0 = full;
+    bad_fc0[0] = 0x62;
+    assert_eq!(mac_cmd::parse_assoc_rsp(&bad_fc0), None);
+}
+
+/// `build_assoc_rsp` boundary: every undersized buffer (0 B, 24 B)
+/// fails with exactly `BufferTooSmall`; the 25 B boundary succeeds
+/// with the OTA-exact bytes.
+#[test]
+fn build_assoc_rsp_rejects_undersized_buffers_at_boundary() {
+    use mac_cmd::{MacCmdError, ASSOC_RSP_LEN};
+    assert_eq!(ASSOC_RSP_LEN, 25);
+    let mut exact = [0u8; 25];
+    let mut one_short = [0u8; 24];
+    let mut empty = [0u8; 0];
+    assert_eq!(
+        mac_cmd::build_assoc_rsp(
+            0x02,
+            PAN,
+            &JOINER_EUI,
+            &app::TC_EUI_WIRE,
+            JOINER_SHORT,
+            0x00,
+            &mut empty
+        ),
+        Err(MacCmdError::BufferTooSmall)
+    );
+    assert_eq!(
+        mac_cmd::build_assoc_rsp(
+            0x02,
+            PAN,
+            &JOINER_EUI,
+            &app::TC_EUI_WIRE,
+            JOINER_SHORT,
+            0x00,
+            &mut one_short
+        ),
+        Err(MacCmdError::BufferTooSmall)
+    );
+    assert_eq!(
+        mac_cmd::build_assoc_rsp(
+            0x02,
+            PAN,
+            &JOINER_EUI,
+            &app::TC_EUI_WIRE,
+            JOINER_SHORT,
+            0x00,
+            &mut exact
+        ),
+        Ok(25)
+    );
+    assert_eq!(&exact, &ota_assoc_rsp());
+}
+
 /// w93 MG21 reference (live Ember NCP, ch20): the wire-proven
 /// association-response shape — `FC 63 cc` (both addrs long),
 /// coordinator EUI as source. The old short-source `... 8c` layout

@@ -226,4 +226,113 @@ mod tests {
             Err(CcmError::TooSmall)
         );
     }
+
+    #[test]
+    fn seal_rejects_truncated_output_at_boundaries() {
+        // 35-octet transport plaintext needs 39 octets (35 ct + MIC-32).
+        // Zero and 38 (one tag octet short) refuse without partial
+        // writes; exact 39 succeeds; oversize returns 39 with slack
+        // untouched.
+        let pt = [0xabu8; 35];
+        let aad: &[u8] = &[0x21, 0x51, 0x30];
+        let mut zero = [0u8; 0];
+        assert_eq!(
+            seal_into(&K, &N, aad, &pt, &mut zero),
+            Err(CcmError::TooSmall)
+        );
+        let mut short = [0xAAu8; 38];
+        assert_eq!(
+            seal_into(&K, &N, aad, &pt, &mut short),
+            Err(CcmError::TooSmall)
+        );
+        assert_eq!(short, [0xAAu8; 38]);
+        let mut exact = [0u8; 39];
+        assert_eq!(seal_into(&K, &N, aad, &pt, &mut exact), Ok(39));
+        let mut oversize = [0x55u8; 43];
+        assert_eq!(seal_into(&K, &N, aad, &pt, &mut oversize), Ok(39));
+        assert_eq!(&oversize[..39], &exact[..]);
+        assert_eq!(&oversize[39..], &[0x55u8; 4]);
+    }
+
+    #[test]
+    fn open_with_wrong_key_fails_and_zeroes() {
+        // Any key other than the sealing key must fail with AuthFailed
+        // and zero the output (no plaintext leak on failure).
+        let pt = [0x05u8, 0x01, 0x02];
+        let aad: &[u8] = &[0x21, 0x51];
+        let mut buf = [0u8; 16];
+        let n = seal_into(&K, &N, aad, &pt, &mut buf).unwrap();
+        let (ct, tag) = buf[..n].split_at(pt.len());
+        let mut tag4 = [0u8; 4];
+        tag4.copy_from_slice(tag);
+        let mut wrong = K;
+        wrong[0] ^= 0x01;
+        let mut out = [0xAAu8; 3];
+        assert_eq!(
+            open_into(&wrong, &N, aad, ct, &tag4, &mut out),
+            Err(CcmError::AuthFailed)
+        );
+        assert_eq!(out, [0u8; 3]);
+    }
+
+    #[test]
+    fn nonce_tamper_rejected_and_zeroes() {
+        // Nonce bytes 0..8 cover the EUI, 8..12 the frame counter.
+        // Flipping either must fail authentication and zero output,
+        // mirroring transport aux-counter / aux-source tamper.
+        let pt = [0x05u8, 0x01, 0x02];
+        let aad: &[u8] = &[0x21, 0x51];
+        let mut buf = [0u8; 16];
+        let n = seal_into(&K, &N, aad, &pt, &mut buf).unwrap();
+        let (ct, tag) = buf[..n].split_at(pt.len());
+        let mut tag4 = [0u8; 4];
+        tag4.copy_from_slice(tag);
+        // Flip a nonce-covered EUI byte.
+        let mut nonce_eui = N;
+        nonce_eui[2] ^= 0x01;
+        let mut out = [0xAAu8; 3];
+        assert_eq!(
+            open_into(&K, &nonce_eui, aad, ct, &tag4, &mut out),
+            Err(CcmError::AuthFailed)
+        );
+        assert_eq!(out, [0u8; 3]);
+        // Flip a nonce-covered counter byte.
+        let mut nonce_ctr = N;
+        nonce_ctr[9] ^= 0x01;
+        let mut out2 = [0xAAu8; 3];
+        assert_eq!(
+            open_into(&K, &nonce_ctr, aad, ct, &tag4, &mut out2),
+            Err(CcmError::AuthFailed)
+        );
+        assert_eq!(out2, [0u8; 3]);
+    }
+
+    #[test]
+    fn truncated_tag_guess_rejected() {
+        // MIC-32 needs all 4 octets: a 3-octet tag cannot form the
+        // [u8; 4] open takes, and any guess for the missing octet fails
+        // with AuthFailed (output zeroed).
+        let pt = [0x05u8, 0x01, 0x02];
+        let aad: &[u8] = &[0x21, 0x51];
+        let mut buf = [0u8; 16];
+        let n = seal_into(&K, &N, aad, &pt, &mut buf).unwrap();
+        let (ct, tag) = buf[..n].split_at(pt.len());
+        assert_eq!(tag.len(), TAG_LEN);
+        let tag3 = &tag[..3];
+        assert_eq!(tag3.len(), 3);
+        assert_ne!(tag3.len(), TAG_LEN);
+        let mut guessed = [0u8; TAG_LEN];
+        guessed[..3].copy_from_slice(tag3);
+        guessed[3] = tag[3] ^ 0x01;
+        // Guard against an accidental correct guess.
+        if guessed[3] == tag[3] {
+            guessed[3] ^= 0x01;
+        }
+        let mut out = [0xAAu8; 3];
+        assert_eq!(
+            open_into(&K, &N, aad, ct, &guessed, &mut out),
+            Err(CcmError::AuthFailed)
+        );
+        assert_eq!(out, [0u8; 3]);
+    }
 }

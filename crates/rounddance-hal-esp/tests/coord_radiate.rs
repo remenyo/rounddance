@@ -519,3 +519,111 @@ fn build_short_poll(src_short: u16, seq: u8) -> [u8; 10] {
     build_data_poll_short(seq, PAN, COORD, src_short, &mut b).unwrap();
     b
 }
+
+/// Aux (APS security) frame counter riding inside a built
+/// transport-key frame: MAC header is 9 B, then the NWK codec splits
+/// off the APS payload whose bytes 3..7 are the counter (LE).
+fn transport_auxctr_of(frame: &[u8]) -> u32 {
+    use rounddance_nwk::decode as nwk_decode;
+    let dec = nwk_decode(&frame[9..]).expect("nwk decodes");
+    let aps = dec.payload;
+    u32::from_le_bytes([aps[3], aps[4], aps[5], aps[6]])
+}
+
+const TEST_NETKEY_EDGE: [u8; 16] = [
+    0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+];
+
+/// `take_transport_key` with nothing pending returns `Ok(0)` and must
+/// not touch the aux counter: the counter observed in the frame built
+/// after an idle take is exactly one past the previous frame (not two
+/// — an idle take consumes no counter value).
+#[test]
+fn take_transport_key_idle_returns_zero_without_touching_auxctr() {
+    use rounddance_commission::{ha_transport_key, TRANSPORT_FRAME_LEN};
+
+    let tkey = ha_transport_key().unwrap();
+    let mut app = formed_app();
+    let mut log = app::NullLog;
+    let mut out = [0u8; 128];
+    // Fresh app: nothing pending, idle take is `Ok(0)`.
+    assert!(!app.transport_pending());
+    assert_eq!(
+        app.take_transport_key(&mut out, &TEST_NETKEY_EDGE, &tkey)
+            .unwrap(),
+        0
+    );
+    assert!(!app.transport_pending());
+    // Latch an association and build frame 1; record its aux counter.
+    app.open_permit(&mut log, 600_000).unwrap();
+    app.admit_joiner(&mut log, 0).unwrap();
+    app.on_mac_psdu(&ota_assoc_req());
+    assert!(app.transport_pending());
+    let n1 = app
+        .take_transport_key(&mut out, &TEST_NETKEY_EDGE, &tkey)
+        .unwrap();
+    assert_eq!(n1, TRANSPORT_FRAME_LEN);
+    let aux1 = transport_auxctr_of(&out[..n1]);
+    // Idle take between two builds: still `Ok(0)`, still not pending.
+    assert!(!app.transport_pending());
+    assert_eq!(
+        app.take_transport_key(&mut out, &TEST_NETKEY_EDGE, &tkey)
+            .unwrap(),
+        0
+    );
+    assert!(!app.transport_pending());
+    // Re-arm + rebuild: exactly one counter step since frame 1, so the
+    // idle take consumed nothing.
+    app.rearm_transport();
+    assert!(app.transport_pending());
+    let n2 = app
+        .take_transport_key(&mut out, &TEST_NETKEY_EDGE, &tkey)
+        .unwrap();
+    assert_eq!(n2, TRANSPORT_FRAME_LEN);
+    assert_eq!(transport_auxctr_of(&out[..n2]), aux1.wrapping_add(1));
+}
+
+/// `rearm_assoc` / `rearm_transport` with nothing latched are pure
+/// no-ops: neither pending flag is set by the re-arm itself.
+#[test]
+fn rearm_with_nothing_latched_is_noop() {
+    let mut app = formed_app();
+    assert!(!app.is_associated());
+    assert!(!app.assoc_pending());
+    assert!(!app.transport_pending());
+    app.rearm_assoc();
+    app.rearm_transport();
+    assert!(!app.assoc_pending());
+    assert!(!app.transport_pending());
+}
+
+/// Transport build failure (undersized buffer) keeps `transport_pending`
+/// set so firmware can retry with a bigger buffer; the retry then
+/// succeeds and clears the flag.
+#[test]
+fn transport_build_failure_keeps_pending_for_retry() {
+    use rounddance_commission::{ha_transport_key, TRANSPORT_FRAME_LEN};
+    use rounddance_hal_esp::mac_cmd::MacCmdError;
+
+    let tkey = ha_transport_key().unwrap();
+    let mut app = formed_app();
+    let mut log = app::NullLog;
+    app.open_permit(&mut log, 600_000).unwrap();
+    app.admit_joiner(&mut log, 0).unwrap();
+    app.on_mac_psdu(&ota_assoc_req());
+    assert!(app.transport_pending());
+    // One octet short of the 71-octet frame: build refusal.
+    let mut small = [0u8; TRANSPORT_FRAME_LEN - 1];
+    assert_eq!(
+        app.take_transport_key(&mut small, &TEST_NETKEY_EDGE, &tkey),
+        Err(MacCmdError::BufferTooSmall)
+    );
+    // Still owed: the retry path rebuilds the full frame.
+    assert!(app.transport_pending());
+    let mut out = [0u8; 128];
+    let n = app
+        .take_transport_key(&mut out, &TEST_NETKEY_EDGE, &tkey)
+        .unwrap();
+    assert_eq!(n, TRANSPORT_FRAME_LEN);
+    assert!(!app.transport_pending());
+}

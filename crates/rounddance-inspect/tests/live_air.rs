@@ -110,6 +110,45 @@ fn acks_fold_without_device_attribution() {
 }
 
 // ---------------------------------------------------------------------------
+// w92 MG24 join window: short data-poll air shape.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn short_data_poll_from_w92_join_window_names_data_req() {
+    // Short-address data poll (10 B PSDU `63 88`: intra-PAN short
+    // dst + short src, 1-octet `04` MSDU). Verbatim PSDU from the
+    // w92 MG24 join-window capture (`~/hwscratch/w92-rung3c/
+    // sniff_joinwin4.txt` line 236, `received:
+    // 6388a62eee4992efbf041b00`, trailing `1b00` FCS stripped). The
+    // wave-47/48 pins cover only the long-address poll outer (`23 c8`
+    // ... `04`); the short `63 88` outer rode only synthetic
+    // codec-built frames (`mac_cmd` in `timeline.rs`), never real air
+    // bytes. MAC header + command octet are plaintext protocol — no
+    // key material involved.
+    let tree = chain::dissect(&hex("6388a62eee4992efbf04")).unwrap();
+    let m = tree.mac().expect("mac node");
+    assert_eq!(m.frame_type, 3);
+    assert_eq!(m.command_id, Some(0x04));
+    assert_eq!(m.dst_pan, Some(0xee2e));
+    assert_eq!(m.dst, tree::Addr::Short(0x9249));
+    assert_eq!(m.src, tree::Addr::Short(0xbfef));
+    let c = tree.maccmd().expect("command leg");
+    assert_eq!(c.command_id, 0x04);
+    assert_eq!(c.kind, tree::MacCmdKind::DataReq);
+    assert_eq!(note_reasons(&tree), vec!["mac-command"]);
+    // Polls open no session timeline, but still attribute to the
+    // short source device.
+    assert_eq!(session::classify_tree(&tree), None);
+    let mut eng = session::SessionEngine::new();
+    eng.note_tree(&tree);
+    assert!(eng.device(0xbfef).is_some());
+    assert!(eng.timeline(0xee2e, 0xbfef).is_none());
+    // The leg renders on both report shapes.
+    assert!(report::to_text(&tree).contains("data-req"));
+    assert!(report::to_json(&tree).contains("\"kind\":\"data-req\""));
+}
+
+// ---------------------------------------------------------------------------
 // RD-INSPECT-20: secured APS outer is `secured`, never a bogus command.
 // ---------------------------------------------------------------------------
 

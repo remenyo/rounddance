@@ -252,4 +252,249 @@ mod tests {
             Err(TransportError::TooSmall)
         );
     }
+
+    fn expected_plaintext(p: &TransportKeyParams) -> [u8; 35] {
+        let mut pt = [0u8; 35];
+        pt[0] = TRANSPORT_CMD;
+        pt[1] = TRANSPORT_KEY_TYPE_NETWORK;
+        pt[2..18].copy_from_slice(&p.netkey);
+        pt[18] = p.seq_no;
+        pt[19..27].copy_from_slice(&p.dst_eui);
+        pt[27..35].copy_from_slice(&p.src_eui);
+        pt
+    }
+
+    fn nonce_aad_from_frame(frame: &[u8; TRANSPORT_FRAME_LEN]) -> ([u8; 13], [u8; 15]) {
+        let mut nonce = [0u8; CCM_NONCE_LEN];
+        nonce[..8].copy_from_slice(&frame[24..32]);
+        nonce[8..12].copy_from_slice(&frame[20..24]);
+        nonce[12] = 0x35;
+        let mut aad = [0u8; 15];
+        aad[..2].copy_from_slice(&frame[17..19]);
+        aad[2] = 0x35;
+        aad[3..7].copy_from_slice(&frame[20..24]);
+        aad[7..15].copy_from_slice(&frame[24..32]);
+        (nonce, aad)
+    }
+
+    #[test]
+    fn rejects_truncated_buffers_and_accepts_exact_fit() {
+        // 0- and 70-octet buffers refuse; 71-octet exact fit succeeds;
+        // oversize succeeds returning 71 with slack untouched. Short
+        // refusal writes nothing (builder checks length first).
+        let p = params();
+        let mut zero = [0u8; 0];
+        assert_eq!(
+            build_transport_key_frame(&p, &mut zero),
+            Err(TransportError::TooSmall)
+        );
+        let mut short70 = [0xAAu8; 70];
+        assert_eq!(
+            build_transport_key_frame(&p, &mut short70),
+            Err(TransportError::TooSmall)
+        );
+        assert_eq!(short70, [0xAAu8; 70]);
+        let mut exact = [0u8; TRANSPORT_FRAME_LEN];
+        assert_eq!(
+            build_transport_key_frame(&p, &mut exact),
+            Ok(TRANSPORT_FRAME_LEN)
+        );
+        let mut oversize = [0x55u8; TRANSPORT_FRAME_LEN + 8];
+        assert_eq!(
+            build_transport_key_frame(&p, &mut oversize),
+            Ok(TRANSPORT_FRAME_LEN)
+        );
+        assert_eq!(&oversize[..TRANSPORT_FRAME_LEN], &exact[..]);
+        assert_eq!(&oversize[TRANSPORT_FRAME_LEN..], &[0x55u8; 8]);
+    }
+
+    #[test]
+    fn ha_transport_key_is_deterministic() {
+        // Same HA default input twice gives the same key-transport key.
+        let a = ha_transport_key().unwrap();
+        let b = ha_transport_key().unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn auxctr_boundaries_encode_verbatim_and_roundtrip() {
+        // Builder owns no counter state: it encodes the given auxctr
+        // verbatim LE both on air and in the CCM* nonce. It never
+        // increments or wraps; 0xFFFFFFFF does NOT wrap to 0 inside the
+        // builder (caller owns monotonicity/persistence). Pin both
+        // extremes: they build, differ on air/in tail, and both open.
+        use rounddance_security::ccm_star_open_into;
+        let mut frame_zero = [0u8; TRANSPORT_FRAME_LEN];
+        let mut p_zero = params();
+        p_zero.auxctr = 0x0000_0000;
+        assert_eq!(
+            build_transport_key_frame(&p_zero, &mut frame_zero),
+            Ok(TRANSPORT_FRAME_LEN)
+        );
+        assert_eq!(&frame_zero[20..24], &0u32.to_le_bytes());
+        let mut frame_max = [0u8; TRANSPORT_FRAME_LEN];
+        let mut p_max = params();
+        p_max.auxctr = 0xFFFF_FFFF;
+        assert_eq!(
+            build_transport_key_frame(&p_max, &mut frame_max),
+            Ok(TRANSPORT_FRAME_LEN)
+        );
+        assert_eq!(&frame_max[20..24], &0xFFFF_FFFFu32.to_le_bytes());
+        // Distinct counters give distinct on-air tails.
+        assert_ne!(&frame_zero[32..], &frame_max[32..]);
+        // Both tails open to the exact plaintext with their own nonce.
+        for (frame, p) in [(&frame_zero, &p_zero), (&frame_max, &p_max)] {
+            let (nonce, aad) = nonce_aad_from_frame(frame);
+            // Nonce mirrors the LE counter verbatim + control 0x35.
+            assert_eq!(&nonce[8..12], &p.auxctr.to_le_bytes());
+            assert_eq!(nonce[12], 0x35);
+            let (ct, tag) = frame[32..].split_at(35);
+            let mut tag4 = [0u8; 4];
+            tag4.copy_from_slice(&tag[..4]);
+            let mut pt = [0u8; 35];
+            assert_eq!(
+                ccm_star_open_into(&p.transport_key, &nonce, &aad, ct, &tag4, &mut pt),
+                Ok(35)
+            );
+            assert_eq!(pt, expected_plaintext(p));
+        }
+    }
+
+    #[test]
+    fn wrong_transport_key_fails_and_zeroes() {
+        // Open with any key other than the sealing key-transport key
+        // must fail with AuthFailed and zero the output buffer.
+        use rounddance_security::ccm_star_open_into;
+        let p = params();
+        let mut frame = [0u8; TRANSPORT_FRAME_LEN];
+        build_transport_key_frame(&p, &mut frame).unwrap();
+        let (nonce, aad) = nonce_aad_from_frame(&frame);
+        let (ct, tag) = frame[32..].split_at(35);
+        let mut tag4 = [0u8; 4];
+        tag4.copy_from_slice(&tag[..4]);
+        let mut wrong = p.transport_key;
+        wrong[0] ^= 0x01;
+        let mut out = [0xAAu8; 35];
+        assert_eq!(
+            ccm_star_open_into(&wrong, &nonce, &aad, ct, &tag4, &mut out),
+            Err(CcmError::AuthFailed)
+        );
+        assert_eq!(out, [0u8; 35]);
+    }
+
+    #[test]
+    fn tampered_tail_ciphertext_rejected() {
+        // Flip the first sealed-tail octet (encrypts cmd 0x05): the
+        // receiver rebuilding nonce/AAD from untampered aux still fails.
+        use rounddance_security::ccm_star_open_into;
+        let p = params();
+        let mut frame = [0u8; TRANSPORT_FRAME_LEN];
+        build_transport_key_frame(&p, &mut frame).unwrap();
+        let (nonce, aad) = nonce_aad_from_frame(&frame);
+        let mut bad_ct = [0u8; 35];
+        bad_ct.copy_from_slice(&frame[32..67]);
+        bad_ct[0] ^= 0x01;
+        let mut tag4 = [0u8; 4];
+        tag4.copy_from_slice(&frame[67..71]);
+        let mut out = [0xAAu8; 35];
+        assert_eq!(
+            ccm_star_open_into(&p.transport_key, &nonce, &aad, &bad_ct, &tag4, &mut out),
+            Err(CcmError::AuthFailed)
+        );
+        assert_eq!(out, [0u8; 35]);
+        // Flip the last ciphertext octet (covers src-EUI region) too.
+        let mut bad_last = [0u8; 35];
+        bad_last.copy_from_slice(&frame[32..67]);
+        bad_last[34] ^= 0x80;
+        let mut out2 = [0xAAu8; 35];
+        assert_eq!(
+            ccm_star_open_into(&p.transport_key, &nonce, &aad, &bad_last, &tag4, &mut out2),
+            Err(CcmError::AuthFailed)
+        );
+        assert_eq!(out2, [0u8; 35]);
+    }
+
+    #[test]
+    fn tampered_aux_counter_rejected() {
+        // Flip one on-air aux-counter octet: the receiver derives nonce
+        // and AAD from the tampered counter, so open of the untampered
+        // tail must fail (covers counter integrity, not just secrecy).
+        use rounddance_security::ccm_star_open_into;
+        let p = params();
+        let mut frame = [0u8; TRANSPORT_FRAME_LEN];
+        build_transport_key_frame(&p, &mut frame).unwrap();
+        let mut bad = frame;
+        bad[21] ^= 0x01;
+        let (bad_nonce, bad_aad) = nonce_aad_from_frame(&bad);
+        let (ct, tag) = bad[32..].split_at(35);
+        let mut tag4 = [0u8; 4];
+        tag4.copy_from_slice(&tag[..4]);
+        let mut out = [0xAAu8; 35];
+        assert_eq!(
+            ccm_star_open_into(&p.transport_key, &bad_nonce, &bad_aad, ct, &tag4, &mut out),
+            Err(CcmError::AuthFailed)
+        );
+        assert_eq!(out, [0u8; 35]);
+    }
+
+    #[test]
+    fn tampered_eui_nonce_rejected() {
+        // Flip one on-air aux-source (EUI) octet: the receiver derives
+        // the CCM* nonce from the tampered EUI, so open must fail.
+        use rounddance_security::ccm_star_open_into;
+        let p = params();
+        let mut frame = [0u8; TRANSPORT_FRAME_LEN];
+        build_transport_key_frame(&p, &mut frame).unwrap();
+        let mut bad = frame;
+        bad[25] ^= 0x01;
+        let (bad_nonce, bad_aad) = nonce_aad_from_frame(&bad);
+        let (ct, tag) = bad[32..].split_at(35);
+        let mut tag4 = [0u8; 4];
+        tag4.copy_from_slice(&tag[..4]);
+        let mut out = [0xAAu8; 35];
+        assert_eq!(
+            ccm_star_open_into(&p.transport_key, &bad_nonce, &bad_aad, ct, &tag4, &mut out),
+            Err(CcmError::AuthFailed)
+        );
+        assert_eq!(out, [0u8; 35]);
+    }
+
+    #[test]
+    fn truncated_tag_rejected() {
+        // A 70-octet frame (one tag octet missing) already refuses at
+        // build; a 38-octet tail (35 ct + 3 tag) cannot authenticate:
+        // any guess for the missing octet fails and the sealer needs 39.
+        use rounddance_security::{ccm_star_open_into, ccm_star_seal_into};
+        let p = params();
+        let mut frame = [0u8; TRANSPORT_FRAME_LEN];
+        build_transport_key_frame(&p, &mut frame).unwrap();
+        assert_eq!(frame[32..].len(), TRANSPORT_TAIL_LEN);
+        // First 38 octets of the tail (35 ct + 3 tag).
+        let truncated = &frame[32..32 + 38];
+        assert_eq!(truncated.len(), 38);
+        let (ct, tag3) = truncated.split_at(35);
+        assert_eq!(tag3.len(), 3);
+        // Guessing the missing tag octet must still fail.
+        let (nonce, aad) = nonce_aad_from_frame(&frame);
+        let mut guessed = [0u8; 4];
+        guessed[..3].copy_from_slice(tag3);
+        guessed[3] = frame[70] ^ 0x01;
+        // Ensure the guess is actually wrong (flip if it collided).
+        if guessed[3] == frame[70] {
+            guessed[3] ^= 0x01;
+        }
+        let mut out = [0xAAu8; 35];
+        assert_eq!(
+            ccm_star_open_into(&p.transport_key, &nonce, &aad, ct, &guessed, &mut out),
+            Err(CcmError::AuthFailed)
+        );
+        assert_eq!(out, [0u8; 35]);
+        // Sealing the 35-octet plaintext needs 39 octets; 38 refuses.
+        let pt = expected_plaintext(&p);
+        let mut short = [0u8; 38];
+        assert_eq!(
+            ccm_star_seal_into(&p.transport_key, &nonce, &aad, &pt, &mut short),
+            Err(CcmError::TooSmall)
+        );
+    }
 }
