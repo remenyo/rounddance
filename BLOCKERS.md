@@ -195,6 +195,27 @@ Status: OPEN (re-scoped 2026-10-31: MG21 DOES admit strangers — C6 silence iso
   flake from assoc policy; (b) NCP-side assoc trace if available;
   (c) single-shot C6 vs reference NCP TC of a different family
   (CC2652/nRF) to test OUI-keying. Evidence ~/hwscratch/w110/.
+- W111 healthy-TC control: fresh MG21 TC (third formation, NETWORK_UP
+  in-session, permit broadcast, beacon-verified permit-open) holds
+  still. SAME-TC split, minutes apart: C6 SINGLE assoc (one-off fw,
+  ACKed) -> ZERO RSPs (4th campaign); MG24 assoc -> ACKed AND answered
+  (63cc RSP 27 B on sniffer) but transport never completes
+  (NO_NETWORK_KEY_RECEIVED, 2nd instance). So: assoc answers NCP
+  strangers on ANY alive TC; C6 silence is now 4/4 across 2 TC
+  generations; transport completion is independently flaky (TC-side).
+  Storm hypothesis dead (single assoc per boot). New lead: interrogate
+  what, if anything, differs before the assoc (beacon-req patterns?
+  DSN state? TC child-table contents at decision time?) - needs either
+  NCP-side tracing or a second foreign TC family.
+- W111 incidentals: (a) cargo +esp mtime-trap AGAIN (0.13 s "fresh"
+  over an edited tree; `touch` alone failed this time, `clean -p`
+  + rebuild-verify loop is now the documented drill); (b) MG21 TC
+  liveness is session-correlated: dies across attaches AND
+  spontaneously (6+ datapoints; the w108 long-lived TC is the
+  outlier); (c) phantom C601 election input on ch25 (elected twice,
+  zero sniffer corroboration across 925 beacons; one byte-exact
+  7F68-shaped beacon logged at -35; undetermined transient-vs-log
+  artifact; election-hardening parked). Evidence ~/hwscratch/w111/.
 - Discriminator parked: whether ANY stranger gets an answer (MG24 NCP
   canonical-shape control) is blocked — MG24 locally refuses joinNetwork
   instantly (0.2 s NOT_JOINED, zero air frames) after a baud-mismatched
