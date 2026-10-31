@@ -271,6 +271,24 @@ impl<const N: usize> ReplayTable<N> {
         self.len == 0
     }
 
+    /// Forget `addr` (drop its counter): the Trust Center calls this
+    /// when it delivers a fresh key to a (re)joining device, whose
+    /// frame counter legitimately restarts (factory reset wipes the
+    /// NVM-persisted counter; same-key re-authentication opens a new
+    /// counter space). Without this, the joiner's post-join frames
+    /// are misclassified as replays after any same-boot rejoin (b007:
+    /// 8.2.2.0 auxctr restarts at 0, coordinator table still held the
+    /// previous join's counters).
+    pub fn remove(&mut self, addr: u64) {
+        if let Some(pos) = self.entries[..self.len]
+            .iter()
+            .position(|(a, _)| *a == addr)
+        {
+            self.entries.copy_within(pos + 1.., pos);
+            self.len -= 1;
+        }
+    }
+
     /// Last-seen counter for `addr`, if tracked.
     #[must_use]
     pub fn last(&self, addr: u64) -> Option<u32> {
@@ -953,5 +971,20 @@ mod tests {
         t.check(0x1111, 8).unwrap();
         t.check(0x2222, 0).unwrap();
         assert_eq!(t.len(), 2);
+    }
+
+    #[test]
+    fn replay_table_remove_restarts_counter_space() {
+        // b007: a rejoining device restarts its frame counter (factory
+        // reset wipes NVM); forgetting its entry re-accepts counter 0.
+        let mut t = ReplayTable::<4>::new();
+        t.check(0x1111, 5).unwrap();
+        assert_eq!(t.check(0x1111, 5), Err(SecError::Replay));
+        t.remove(0x1111);
+        assert_eq!(t.last(0x1111), None);
+        t.check(0x1111, 0).unwrap();
+        // Unknown address removal is a silent no-op.
+        t.remove(0x9999);
+        assert_eq!(t.len(), 1);
     }
 }

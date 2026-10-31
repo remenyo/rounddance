@@ -1027,3 +1027,74 @@ fn zdo_response_matches_open_transaction() {
     assert_eq!(app2.zdo_pending_open(), 8);
     assert!(app2.take_node_desc_req(&mut out, 0x0002, &KEY).is_err());
 }
+
+/// b007 regression: a factory-reset NCP restarts its NWK aux counter
+/// at 0 on rejoin; delivering a fresh transport key must reset that
+/// source's replay state, or its post-join frames misclassify as
+/// replays for the rest of the boot.
+#[test]
+fn transport_key_resets_replay_for_rejoin() {
+    use rounddance_commission::ha_transport_key;
+    use rounddance_hal_esp::app::NwkRxOutcome;
+    use rounddance_security::{KeySet, NetworkKey};
+
+    const KEY: [u8; 16] = [
+        0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e,
+        0x1f,
+    ];
+    const EUI: [u8; 8] = [0x6d, 0x49, 0x11, 0xfe, 0xff, 0x13, 0x8d, 0x34];
+    let keys = KeySet::new(NetworkKey::new(KEY, 0));
+    let tkey = ha_transport_key().unwrap();
+    let mut app = formed_app();
+    let mut log = app::NullLog;
+    app.open_permit(&mut log, 600_000).unwrap();
+    app.admit_extra(&mut log, EUI, 0x0002).unwrap();
+    // Air-order assoc-req for EUI (19 B MAC command shape).
+    let mut req = [0u8; 19];
+    req[..9].copy_from_slice(&[0x23, 0xc8, 0x49, 0x01, 0xc6, 0x00, 0x00, 0xff, 0xff]);
+    req[9..17].copy_from_slice(&EUI);
+    req[17..19].copy_from_slice(&[0x01, 0x8c]);
+    let join_once = |app: &mut app::CoordinatorApp, out: &mut [u8]| {
+        app.on_mac_psdu(&req);
+        assert!(app.assoc_pending());
+        assert_eq!(app.take_assoc_rsp(out).unwrap(), 25);
+        let n = app.take_transport_key(out, &KEY, &tkey).unwrap();
+        assert_eq!(n, 71);
+    };
+    let mut out = [0u8; 128];
+    join_once(&mut app, &mut out);
+    // Live annce shape (auxctr 0), sealed.
+    let mut aps = vec![
+        0x08, 0x00, 0x13, 0x00, 0x00, 0x00, 0x00, 0xec, 0x81, 0x02, 0x00,
+    ];
+    aps.extend_from_slice(&EUI);
+    aps.push(0x8c);
+    let frame = sealed_nwk(
+        &aps,
+        NwkType::Data,
+        0xfffd,
+        0x0002,
+        None,
+        Some(u64::from_le_bytes(EUI)),
+        0xf7,
+        0,
+        &KEY,
+        EUI,
+    );
+    match app.on_nwk_data(&frame, &keys, 1_000) {
+        NwkRxOutcome::Annce { short: 0x0002, .. } => {}
+        other => panic!("expected Annce, got {:?}", other),
+    }
+    // Same frame again: replay, entry retained.
+    assert!(matches!(
+        app.on_nwk_data(&frame, &keys, 2_000),
+        NwkRxOutcome::Ignored(_)
+    ));
+    // Rejoin after factory reset (same EUI, counter restarted):
+    // fresh transport resets the source's replay state.
+    join_once(&mut app, &mut out);
+    match app.on_nwk_data(&frame, &keys, 3_000) {
+        NwkRxOutcome::Annce { short: 0x0002, .. } => {}
+        other => panic!("expected Annce after rejoin, got {:?}", other),
+    }
+}

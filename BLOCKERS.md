@@ -71,7 +71,7 @@ Status: CLOSED (join path proven 2026-10-31, w94 — see verdict).
 - NCP internal-scan flakiness stands (mitigated by pre-scan retry loop).
 
 ### B-007 (2026-10-31): joined NCP drops within minutes (retention)
-Status: OPEN (new; join itself is proven — this is post-join loss).
+Status: QUARANTINED 2026-10-31 (stick-level verdict — join itself is proven; post-join loss is the unit under test).
 - Symptom: all 6 joins this campaign drop to `NO_NETWORK/0xFFFE`
   (key retained: `network_key_set=true`) within minutes, then silence:
   exactly one NWK-secured uplink ~85 ms post-transport, then zero polls,
@@ -93,8 +93,43 @@ Status: OPEN (new; join itself is proven — this is post-join loss).
   (~/hwscratch/w96/b007-reflash-prep.md — target identity, image
   options, exact procedure; DO NOT EXECUTE without explicit user
   approval of the image + the destructive flash).
+
+- VERDICT b007 (NCP reflash executed under destructive approval):
+  official Sonoff `dongle-pmg24_zigbee_ncp_8.2.2.0_460800_sw_flow.gbl`
+  (sha256-pinned, tool-validated NCP-UART image) flashed cleanly;
+  EUI preserved, EZSP v18 live. Result: joins fine (NETWORK_UP,
+  holds 32–60 s vs <13 s on 7.4.5.0) then drops IDENTICALLY —
+  against our C601 (2x) AND against the reference MG21 TC (10-min
+  zero-touch watch, EMPTY t+1..t+10, textbook join with annce + MG21
+  follow-up). 2 firmwares x 2 coordinators: the NCP image is ruled
+  out, our stack is ruled out as sole cause. Unit quarantined
+  (this MG24 stick; MG21 + C6 coordinators hold their networks
+  indefinitely). Pivot interop to the next peer (MG21-as-joiner vs
+  C601 per Phase 5). Evidence ~/hwscratch/b007/.
 - Lab at w96 closeout: 7F68 restored byte-identical to preflash backup
   (0 diff bytes); MG24 factory-reset EMPTY; MG21 left FORMED
   (documented lab-TC state); leases none, quarantine none. Evidence:
   ~/hwscratch/w96/ (observed join with full callbacks, RSP wire-order
   air proof, retry fw, reflash prep).
+
+### B-008 (2026-10-31): coordinator fw crash — ESP-IDF 15.4 driver assert
+Status: OPEN (new; blocks multi-join air proofs).
+- Symptom (4× in b007, zero in all prior waves): `assert failed:
+  isr_handle_tx_abort esp_ieee802154_dev.c:711
+  (s_ieee802154_state == IEEE802154_STATE_RX_ACK)` → `rst:0xc
+  (SW_CPU)` reboot. Each crash lands in the post-join beacon phase
+  (beacon-req → TX-BEACON → confirm → assert); beacon volume in b007
+  (300 reqs) was LOWER than crash-free w98/w99 (560+), and the NCP
+  sends zero polls on either firmware — not a TX storm.
+- Suspect: ESP-IDF driver ISR race (beacon TX abort colliding with an
+  in-flight ACK RX). Deltas in b007 vs crash-free runs: NCP peer on
+  8.2.2.0 (different ACK timing?) and a rebuilt fw image (code-layout
+  shift moving the race window). Both unproven — needs driver-level
+  investigation (backoff/pacing experiments around beacon TX), not a
+  blind retry-loop change.
+- Impact: every crash reboots the coordinator (replay table, aux
+  counter, permit state all reset), which INVALIDATES any multi-join
+  air proof attempted in a crash window (b007 joinNEW2 join4 Annce is
+  void for the replay fix for exactly this reason).
+- Evidence: ~/hwscratch/b007/coord3.log (4 assert+dump+`rst:0xc`+reboot
+  cycles at lines ~70/124, ~434/488, ~1127/1239, ~1482/1594).

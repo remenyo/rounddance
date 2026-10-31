@@ -830,6 +830,11 @@ impl CoordinatorApp {
                 self.transport_pending = false;
                 self.transport_sent = true;
                 self.nwk_auxctr = auxctr.wrapping_add(1);
+                // Fresh key = fresh counter space: the (re)joining
+                // device restarts its frame counter (factory reset
+                // wipes NVM). Without this, post-join frames after
+                // any same-boot rejoin misclassify as replays (b007).
+                self.rx_replay.remove(u64::from_le_bytes(eui));
                 Ok(n)
             }
             Err(_) => Err(MacCmdError::BufferTooSmall),
