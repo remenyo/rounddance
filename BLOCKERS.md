@@ -176,9 +176,7 @@ Status: OPEN (re-scoped 2026-10-31: MG21 DOES admit strangers — C6 silence iso
   the MAC layer (identical structure: `23 c8` + pan + `0000` +
   `ffff` + EUI + `01 8c`; only PAN/EUI/seq differ) — leading
   hypothesis for the w102 C6 silence is now TC-state-at-the-time
-  (that TC died detach-adjacent twice, documented). NEXT: re-attempt
-  C6 joiner × freshly-formed MG21 TC (ch25 joiner fw exists from
-  w102; 97A4 reflash + permit + sniffer). Evidence ~/hwscratch/w108/.
+  (that TC died detach-adjacent twice, documented). NEXT (ran w109 - still silent, 3rd campaign): 30 assocs on air to permit-open MG21 (first ACKed), ZERO RSPs on serial + sniffer (507 s capture). Fresh-TC control confounded (TC died detach-adjacent/spontaneously twice more - datapoints 4-5; bellows CLI flaky both ways, `form` silent-fail + `permit` NetworkNotFormed - new single-session direct-EZSP form+permit script pays both debts, NETWORK_UP confirmed in-session). New leading hypothesis: retry-storm suppression (MG24 answered on a SINGLE assoc in w108; our C6 retries every 2 s in all 3 silent campaigns - cheapest next: single-shot assoc one-off fw). ALSO NEW: phantom C601 election input - ch25 joiner twice elected/assoc'd 0xc601 with ZERO sniffer corroboration (925 beacons all MG21); one byte-exact 7F68-shaped beacon logged at -35 that never reached air per sniffer; cause UNDETERMINED (transient source vs log artifact); parked follow-up: election hardening (N-sighting confirmation before electing an unseen PAN). Evidence ~/hwscratch/w109/.
 - Discriminator parked: whether ANY stranger gets an answer (MG24 NCP
   canonical-shape control) is blocked — MG24 locally refuses joinNetwork
   instantly (0.2 s NOT_JOINED, zero air frames) after a baud-mismatched
