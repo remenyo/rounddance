@@ -59,6 +59,7 @@ use rounddance_zcl::{
     DispatchOutcome, Endpoint, ReportingEngine,
 };
 use rounddance_zdo::zdp::DeviceAnnce;
+use rounddance_zdo::PendingTable;
 
 /// Application channel (OTA-proven).
 pub const APP_CHANNEL: u8 = 15;
@@ -132,6 +133,17 @@ pub enum NwkRxOutcome {
         cluster: u16,
         /// APS profile identifier.
         profile: u16,
+    },
+    /// ZDO response matched to an open transaction (entry consumed).
+    ZdoResponse {
+        /// Response cluster identifier.
+        cluster: u16,
+        /// Echoed transaction sequence.
+        tsn: u8,
+        /// Response status octet, when present.
+        status: Option<u8>,
+        /// Request cluster the response correlates to.
+        req_cluster: u16,
     },
 }
 
@@ -377,6 +389,9 @@ pub struct CoordinatorApp {
     pub toggles_sent: u32,
     /// Successful Default Responses verified.
     pub defrsp_ok: u32,
+    /// Open ZDO transactions (request cluster + TSN) awaiting their
+    /// response; closed on match, never grows past 8.
+    zdo_pending: PendingTable<8>,
     /// NWK/ZDO frames classified (annce/command/data).
     pub nwk_rx_classified: u32,
     /// NWK frames refused without action (bad header, bad key,
@@ -408,6 +423,7 @@ impl CoordinatorApp {
             toggle_tsn: ZCL_TSN,
             toggles_sent: 0,
             defrsp_ok: 0,
+            zdo_pending: PendingTable::new(),
             nwk_rx_classified: 0,
             nwk_rx_ignored: 0,
         }
@@ -916,6 +932,11 @@ impl CoordinatorApp {
         use rounddance_commission::{build_secured_nwk_frame, SecuredNwkParams};
         use rounddance_zdo::zdp::NodeDescReq;
         let c = self.take_aps_counter();
+        if self.zdo_pending.open(0x0002, c).is_err() {
+            // Eight unanswered requests outstanding: refuse a ninth
+            // rather than send a transaction that can never correlate.
+            return Err(MacCmdError::TableFull);
+        }
         let zdo = NodeDescReq {
             tsn: c,
             nwk_of_interest: dst_short,
@@ -1081,6 +1102,9 @@ impl CoordinatorApp {
                 if d.header.profile_id == 0x0000 && d.header.cluster_id == 0x0013 {
                     return self.on_annce(d.payload, now_ms);
                 }
+                if d.header.profile_id == 0x0000 && d.header.cluster_id & 0x8000 != 0 {
+                    return self.on_zdo_response(d.header.cluster_id, d.payload);
+                }
                 NwkRxOutcome::Data {
                     cluster: d.header.cluster_id,
                     profile: d.header.profile_id,
@@ -1127,6 +1151,36 @@ impl CoordinatorApp {
             eui,
             capability: ann.capability,
         }
+    }
+
+    /// Match one ZDO response payload (TSN first) against the open
+    /// transactions: a hit consumes the entry and reports the
+    /// correlation; a stray TSN stays a counted `Data` (pending
+    /// entries retained); an empty payload is counted Ignored.
+    fn on_zdo_response(&mut self, cluster: u16, zdp: &[u8]) -> NwkRxOutcome {
+        use NwkIgnore as Ig;
+        let &[tsn, ..] = zdp else {
+            return NwkRxOutcome::Ignored(Ig::BadZdo);
+        };
+        let status = zdp.get(1).copied();
+        match self.zdo_pending.close(cluster, tsn) {
+            Some(req_cluster) => NwkRxOutcome::ZdoResponse {
+                cluster,
+                tsn,
+                status,
+                req_cluster,
+            },
+            None => NwkRxOutcome::Data {
+                cluster,
+                profile: 0x0000,
+            },
+        }
+    }
+
+    /// Open ZDO transactions currently awaiting a response.
+    #[must_use]
+    pub fn zdo_pending_open(&self) -> usize {
+        self.zdo_pending.len()
     }
 
     /// Run the install-code key exchange for the admitted joiner.

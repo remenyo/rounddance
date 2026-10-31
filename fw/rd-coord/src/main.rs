@@ -190,6 +190,7 @@ fn main() {
                 match app.take_node_desc_req(&mut tx_buf, short, &C6_NETKEY) {
                     Ok(n) if n > 0 => {
                         log_air(&mut log, "RDCOORD TX-NODE-DESC-REQ", &tx_buf[..n]);
+                        println!("RDCOORD ZDO-PENDING {}", app.zdo_pending_open());
                         if let Err(e) = adapter.transmit_mac(&tx_buf[..n]) {
                             println!("RDCOORD TX-NODE-DESC-FAILED {e:?}");
                         }

@@ -15,6 +15,10 @@ use rounddance_hal_esp::driver::RxFrame;
 use rounddance_hal_esp::mac_cmd::{CoordAssoc, GRATUITOUS_BEACON_INTERVAL_MS, MAC_ASSOC_RSP};
 use rounddance_hal_esp::{EspAdapter, MockDriver};
 use rounddance_mac_sap::{MacDataSap, MacMgmtSap};
+use rounddance_nwk::{FrameControl as NwkFc, FrameType as NwkType, NwkHeader};
+use rounddance_security::{
+    ccm_star_seal_into, AuxHeader, KeyIdMode, KeyIdentifier, SecurityControl,
+};
 
 const PAN: u16 = app::APP_PAN;
 const COORD: u16 = app::COORD_SHORT;
@@ -682,89 +686,85 @@ fn indirect_queue_enqueue_take_table() {
 /// still classify as Annce; a secured unicast NWK command reports
 /// its id; tamper/replay/truncation are counted Ignored, never
 /// silent.
+const KEY: [u8; 16] = [
+    0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+];
+const EUI: [u8; 8] = [0x6d, 0x49, 0x11, 0xfe, 0xff, 0x13, 0x8d, 0x34];
+const TC: [u8; 8] = [0x68, 0x7f, 0x86, 0xfe, 0xff, 0x62, 0xf2, 0xa0];
+
+#[allow(clippy::too_many_arguments)]
+fn sealed_nwk(
+    pt: &[u8],
+    ftype: NwkType,
+    dst: u16,
+    src: u16,
+    dst_ieee: Option<u64>,
+    src_ieee: Option<u64>,
+    seq: u8,
+    auxctr: u32,
+    key: &[u8; 16],
+    src_eui: [u8; 8],
+) -> Vec<u8> {
+    let ctl = NwkFc {
+        frame_type: ftype,
+        protocol_version: 0x02,
+        discover_route: rounddance_nwk::DiscoverRoute::Suppress,
+        multicast: false,
+        security: true,
+        source_route: false,
+        dst_ieee: dst_ieee.is_some(),
+        src_ieee: src_ieee.is_some(),
+        end_device_initiator: false,
+    };
+    let hdr = NwkHeader {
+        control: ctl,
+        dst_addr: dst,
+        src_addr: src,
+        radius: 0x1e,
+        seq,
+        dst_ieee,
+        src_ieee,
+        source_route: None,
+    };
+    let mut hdr_buf = [0u8; 32];
+    let hlen = hdr.encode_into(&[], &mut hdr_buf).unwrap();
+    let aux = AuxHeader {
+        control: SecurityControl::new(0, KeyIdMode::Index, true).unwrap(),
+        frame_counter: auxctr,
+        ext_source: Some(src_eui),
+        key_id: KeyIdentifier::Index(0),
+    };
+    let mut aux_buf = [0u8; 14];
+    let alen = aux.encode_into(&mut aux_buf).unwrap();
+    assert_eq!(alen, 14);
+    let restored = AuxHeader {
+        control: SecurityControl::new(5, KeyIdMode::Index, true).unwrap(),
+        frame_counter: auxctr,
+        ext_source: Some(src_eui),
+        key_id: KeyIdentifier::Index(0),
+    };
+    let mut rbuf = [0u8; 14];
+    let rlen = restored.encode_into(&mut rbuf).unwrap();
+    let mut aad = [0u8; 48];
+    aad[..hlen].copy_from_slice(&hdr_buf[..hlen]);
+    aad[hlen..hlen + rlen].copy_from_slice(&rbuf[..rlen]);
+    let aad = &aad[..hlen + rlen];
+    let mut nonce = [0u8; 13];
+    nonce[..8].copy_from_slice(&src_eui);
+    nonce[8..12].copy_from_slice(&auxctr.to_le_bytes());
+    nonce[12] = 0x2d;
+    let mut tail = [0u8; 128];
+    let tlen = ccm_star_seal_into(key, &nonce, aad, pt, &mut tail).unwrap();
+    let mut frame = Vec::with_capacity(hlen + alen + tlen);
+    frame.extend_from_slice(&hdr_buf[..hlen]);
+    frame.extend_from_slice(&aux_buf[..alen]);
+    frame.extend_from_slice(&tail[..tlen]);
+    frame
+}
+
 #[test]
 fn nwk_rx_opens_secured_and_handles_annce() {
-    use rounddance_nwk::{FrameControl as NwkFc, FrameType as NwkType, NwkHeader};
-    use rounddance_security::{
-        ccm_star_seal_into, AuxHeader, KeyIdMode, KeyIdentifier, KeySet, NetworkKey,
-        SecurityControl,
-    };
-
-    const KEY: [u8; 16] = [
-        0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e,
-        0x1f,
-    ];
-    const EUI: [u8; 8] = [0x6d, 0x49, 0x11, 0xfe, 0xff, 0x13, 0x8d, 0x34];
-    const TC: [u8; 8] = [0x68, 0x7f, 0x86, 0xfe, 0xff, 0x62, 0xf2, 0xa0];
-
-    #[allow(clippy::too_many_arguments)]
-    fn sealed(
-        pt: &[u8],
-        ftype: NwkType,
-        dst: u16,
-        src: u16,
-        dst_ieee: Option<u64>,
-        src_ieee: Option<u64>,
-        seq: u8,
-        auxctr: u32,
-        key: &[u8; 16],
-    ) -> Vec<u8> {
-        let ctl = NwkFc {
-            frame_type: ftype,
-            protocol_version: 0x02,
-            discover_route: rounddance_nwk::DiscoverRoute::Suppress,
-            multicast: false,
-            security: true,
-            source_route: false,
-            dst_ieee: dst_ieee.is_some(),
-            src_ieee: src_ieee.is_some(),
-            end_device_initiator: false,
-        };
-        let hdr = NwkHeader {
-            control: ctl,
-            dst_addr: dst,
-            src_addr: src,
-            radius: 0x1e,
-            seq,
-            dst_ieee,
-            src_ieee,
-            source_route: None,
-        };
-        let mut hdr_buf = [0u8; 32];
-        let hlen = hdr.encode_into(&[], &mut hdr_buf).unwrap();
-        let aux = AuxHeader {
-            control: SecurityControl::new(0, KeyIdMode::Index, true).unwrap(),
-            frame_counter: auxctr,
-            ext_source: Some(EUI),
-            key_id: KeyIdentifier::Index(0),
-        };
-        let mut aux_buf = [0u8; 14];
-        let alen = aux.encode_into(&mut aux_buf).unwrap();
-        assert_eq!(alen, 14);
-        let restored = AuxHeader {
-            control: SecurityControl::new(5, KeyIdMode::Index, true).unwrap(),
-            frame_counter: auxctr,
-            ext_source: Some(EUI),
-            key_id: KeyIdentifier::Index(0),
-        };
-        let mut rbuf = [0u8; 14];
-        let rlen = restored.encode_into(&mut rbuf).unwrap();
-        let mut aad = [0u8; 48];
-        aad[..hlen].copy_from_slice(&hdr_buf[..hlen]);
-        aad[hlen..hlen + rlen].copy_from_slice(&rbuf[..rlen]);
-        let aad = &aad[..hlen + rlen];
-        let mut nonce = [0u8; 13];
-        nonce[..8].copy_from_slice(&EUI);
-        nonce[8..12].copy_from_slice(&auxctr.to_le_bytes());
-        nonce[12] = 0x2d;
-        let mut tail = [0u8; 128];
-        let tlen = ccm_star_seal_into(key, &nonce, aad, pt, &mut tail).unwrap();
-        let mut frame = Vec::with_capacity(hlen + alen + tlen);
-        frame.extend_from_slice(&hdr_buf[..hlen]);
-        frame.extend_from_slice(&aux_buf[..alen]);
-        frame.extend_from_slice(&tail[..tlen]);
-        frame
-    }
+    use rounddance_security::{KeySet, NetworkKey};
 
     // Live annce class: APS broadcast + ep 0x00 + 0x0013/0x0000.
     let mut aps = vec![
@@ -772,7 +772,7 @@ fn nwk_rx_opens_secured_and_handles_annce() {
     ];
     aps.extend_from_slice(&EUI);
     aps.push(0x8c);
-    let frame = sealed(
+    let frame = sealed_nwk(
         &aps,
         NwkType::Data,
         0xfffd,
@@ -782,6 +782,7 @@ fn nwk_rx_opens_secured_and_handles_annce() {
         0xf7,
         0,
         &KEY,
+        EUI,
     );
     let keys = KeySet::new(NetworkKey::new(KEY, 0));
     let mut app = formed_app();
@@ -805,7 +806,7 @@ fn nwk_rx_opens_secured_and_handles_annce() {
     }
     assert_eq!(app.nwk_rx_classified, before + 1);
     // Secured unicast NWK command (live 0x0B class): id reported.
-    let cmd = sealed(
+    let cmd = sealed_nwk(
         &[0x0b, 0x08, 0x00],
         NwkType::Command,
         0x0000,
@@ -815,6 +816,7 @@ fn nwk_rx_opens_secured_and_handles_annce() {
         0xf8,
         1,
         &KEY,
+        EUI,
     );
     match app.on_nwk_data(&cmd, &keys, 1_000) {
         app::NwkRxOutcome::NwkCommand { id } => assert_eq!(id, 0x0b),
@@ -921,4 +923,107 @@ fn node_desc_req_builds_sealed_and_classifies() {
     // Short buffer refused.
     let mut tiny = [0u8; 16];
     assert!(app.take_node_desc_req(&mut tiny, 0x0002, &KEY).is_err());
+}
+
+/// Phase 1 response matching: a ZDO response whose cluster + TSN
+/// close an open transaction classifies as ZdoResponse (pending
+/// entry consumed); stray TSNs stay Data with the entry retained;
+/// an empty response payload is counted Ignored; the 9th open
+/// transaction is refused.
+#[test]
+fn zdo_response_matches_open_transaction() {
+    use rounddance_hal_esp::app::NwkRxOutcome;
+    use rounddance_security::{KeySet, NetworkKey};
+
+    const KEY: [u8; 16] = [
+        0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e,
+        0x1f,
+    ];
+    const EUI: [u8; 8] = [0x6d, 0x49, 0x11, 0xfe, 0xff, 0x13, 0x8d, 0x34];
+    const TC: [u8; 8] = [0x68, 0x7f, 0x86, 0xfe, 0xff, 0x62, 0xf2, 0xa0];
+    let keys = KeySet::new(NetworkKey::new(KEY, 0));
+    let mut app = formed_app();
+    assert_eq!(app.zdo_pending_open(), 0);
+    // Open one transaction: fresh app hands out TSN 0.
+    let mut out = [0u8; 160];
+    app.take_node_desc_req(&mut out, 0x0002, &KEY).unwrap();
+    assert_eq!(app.zdo_pending_open(), 1);
+    // Synthetic Node_desc_rsp (cluster 0x8002, TSN 0, status + body).
+    let mut zdo = vec![0x00, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05];
+    let mut aps = vec![0x00, 0x00, 0x02, 0x80, 0x00, 0x00, 0x00, 0x09];
+    aps.append(&mut zdo);
+    let rsp = sealed_nwk(
+        &aps,
+        NwkType::Data,
+        0x0000,
+        0x0002,
+        Some(u64::from_le_bytes(TC)),
+        Some(u64::from_le_bytes(EUI)),
+        0x42,
+        7,
+        &KEY,
+        EUI,
+    );
+    match app.on_nwk_data(&rsp, &keys, 9_000) {
+        NwkRxOutcome::ZdoResponse {
+            cluster,
+            tsn,
+            status,
+            req_cluster,
+        } => {
+            assert_eq!(cluster, 0x8002);
+            assert_eq!(tsn, 0x00);
+            assert_eq!(status, Some(0x00));
+            assert_eq!(req_cluster, 0x0002);
+        }
+        other => panic!("expected ZdoResponse, got {:?}", other),
+    }
+    assert_eq!(app.zdo_pending_open(), 0);
+    // Stray TSN: no open entry → counted Data, nothing consumed.
+    let aps2 = vec![0x00, 0x00, 0x02, 0x80, 0x00, 0x00, 0x00, 0x09, 0x07, 0x00];
+    let stray = sealed_nwk(
+        &aps2,
+        NwkType::Data,
+        0x0000,
+        0x0002,
+        Some(u64::from_le_bytes(TC)),
+        Some(u64::from_le_bytes(EUI)),
+        0x43,
+        8,
+        &KEY,
+        EUI,
+    );
+    let before = app.nwk_rx_classified;
+    match app.on_nwk_data(&stray, &keys, 9_001) {
+        NwkRxOutcome::Data { cluster, profile } => {
+            assert_eq!((cluster, profile), (0x8002, 0x0000));
+        }
+        other => panic!("expected Data, got {:?}", other),
+    }
+    assert_eq!(app.nwk_rx_classified, before + 1);
+    // Empty response payload: counted Ignored.
+    let aps3 = vec![0x00, 0x00, 0x02, 0x80, 0x00, 0x00, 0x00, 0x09];
+    let empty = sealed_nwk(
+        &aps3,
+        NwkType::Data,
+        0x0000,
+        0x0002,
+        Some(u64::from_le_bytes(TC)),
+        Some(u64::from_le_bytes(EUI)),
+        0x44,
+        9,
+        &KEY,
+        EUI,
+    );
+    assert!(matches!(
+        app.on_nwk_data(&empty, &keys, 9_002),
+        NwkRxOutcome::Ignored(_)
+    ));
+    // Table fills at 8 opens; the 9th take is refused outright.
+    let mut app2 = formed_app();
+    for _ in 0..8 {
+        app2.take_node_desc_req(&mut out, 0x0002, &KEY).unwrap();
+    }
+    assert_eq!(app2.zdo_pending_open(), 8);
+    assert!(app2.take_node_desc_req(&mut out, 0x0002, &KEY).is_err());
 }
