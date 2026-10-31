@@ -56,7 +56,40 @@ Status: CLOSED (fixed w92 — first Ember discovery 2026-10-31, see verdict).
 - Verdict 2026-10-31 (head, w92): FIXED. Standalone active scans report `panId=0xC601 ... allowingJoin=true, stackProfile=2, LQI 255, -35 dBm` repeatedly (stack byte 0x02 → 0x22 also landed). Evidence ~/hwscratch/w92-rung3c/ (`mg24_scan_ch15*.log`, prescan hits). Discovery no longer the gate; join now fails later (see B-006).
 
 ### B-006 (2026-10-31): Ember post-assoc JOIN_FAILED + NCP scan flakiness
-Status: OPEN, narrowed (w93: NCP healthy, our RSP fixed, TC key transport next).
+Status: CLOSED (join path proven 2026-10-31, w94 — see verdict).
+- w94 root causes, all fixed + air-verified: (1) assoc-rsp short-source
+  (`63 8c`) rejected post-association → long-source `63 cc` (`152e2bd`,
+  MG21 wire bytes pinned); (2) no Transport-Key → implemented
+  (`c5c9882`: CCM* MIC-32 + HA-derived key, golden pinned from the
+  independent Python model, app pending/take/rearm, fw TX branch).
+- Verdict: NCP reports `NETWORK_UP (144)`, `END_DEVICE`, C601, short
+  0x0002, `JOINED_NETWORK` — 4× (join2/joinR/joinS/joinT). Coord serial
+  shows RX-ASSOCREQ → TX-ASSOC-RSP → TX-TRANSPORT-KEY (+Delivered);
+  sniffer confirms req (+HW ACK ~1 ms), RSP, transport on air; the NCP's
+  post-join uplink is NWK-secured with our key (key adoption proven).
+  Evidence ~/hwscratch/w94/SUMMARY.md + coord/sniff/join logs.
+- NCP internal-scan flakiness stands (mitigated by pre-scan retry loop).
+
+### B-007 (2026-10-31): joined NCP drops within minutes (retention)
+Status: OPEN (new; join itself is proven — this is post-join loss).
+- Symptom: all 6 joins this campaign drop to `NO_NETWORK/0xFFFE`
+  (key retained: `network_key_set=true`) within minutes, then silence:
+  exactly one NWK-secured uplink ~85 ms post-transport, then zero polls,
+  zero rejoin scans, nothing addressed to the joiner (660 s audit).
+- Excluded: host contact (zero-touch 4-min + 10-min watches),
+  USB power/events (no dmesg USB lines, no by-id re-enumeration,
+  autosuspend already `on`), our coordinator (control arm: identical
+  drop from the reference MG21 TC after a textbook join with annce +
+  follow-ups), NCP state dirt (factory-reset before each run).
+- Leading hypothesis: NCP-internal loss (partial token flush — key
+  present, net params zeroed; no rejoin attempt suggests local
+  reset-to-empty, not a protocol event). Next: rapid 5 s polling at
+  the next join to pin the drop window + exact last-air-frame; or
+  stick-level action (reflash known-good NCP image — procurement
+  queued since wave-36).
+- Lab at w94 closeout: 7F68 restored to preflash backup (1995 B
+  NVS-only delta); MG24 factory-reset EMPTY; MG21 left FORMED
+  (documented lab-TC state); leases none, quarantine none.
 - w93 differential: MG24 joins reference MG21 TC (0x3761/ch25) FIRST TRY
   (`NETWORK_UP`, short 0xC5C1) → NCP fully healthy; defect is ours alone.
 - w93 root cause: assoc-rsp source addressing. Real NCPs answer `FC 63 cc`

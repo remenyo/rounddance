@@ -1039,6 +1039,7 @@ dependencies = [
  "esp-idf-hal",
  "esp-idf-svc",
  "esp-idf-sys",
+ "rounddance-commission",
  "rounddance-hal-esp",
  "rounddance-mac-sap",
 ]
