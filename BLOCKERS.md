@@ -56,9 +56,24 @@ Status: CLOSED (fixed w92 — first Ember discovery 2026-10-31, see verdict).
 - Verdict 2026-10-31 (head, w92): FIXED. Standalone active scans report `panId=0xC601 ... allowingJoin=true, stackProfile=2, LQI 255, -35 dBm` repeatedly (stack byte 0x02 → 0x22 also landed). Evidence ~/hwscratch/w92-rung3c/ (`mg24_scan_ch15*.log`, prescan hits). Discovery no longer the gate; join now fails later (see B-006).
 
 ### B-006 (2026-10-31): Ember post-assoc JOIN_FAILED + NCP scan flakiness
-Status: OPEN (blocks rung-3 join; parked per PARK-AND-CONTINUE, alleviation done).
-- Symptom A: NCP internal scan misses C601 stochastically (0.1–0.2 s instant JOIN_FAILED, zero air activity: g1/h1/i1) while standalone startScan on the same NCP/channel hits ~90% (incl. LQI 255). Same-minute hit/miss pairs observed — not air, not params.
-- Symptom B: after a COMPLETE on-air MAC handshake (MG24 assoc-req → our HW ACK ~1 ms → our assoc-rsp short 0x0002 status 0 → TX-CONFIRM Delivered → MG24 ACK ~1 ms; all byte-verified in `sniff_joinwin12.txt` + `coord-listen8.log`), Ember still reports JOIN_FAILED (+1.0 s). Content suspects: RSP FCF frame-version nibble 0, or a post-assoc Ember precondition; NCP gives reason 148 only.
-- Proven NOT the cause (w92 air evidence): beacon shape (Ember parses: allowingJoin/stackProfile), EPAN order (NCP-verbatim tried both), channels mask vs 0 (mask NEVER scans — w87diag A1–A7 + #3/#4 all zero-air; channels=0 scans+assocs — w87diag never tried it), NCP state (clean NO_NETWORK every attempt), security state (SUCCESS every attempt), permit window (fresh 1 h boot), allow-list (both ADMITS logged at boot), TX loss (re-armed `9e79e3b`; e5/j1 RSPs confirmed on air).
-- Needed from human (pick one): (1) approve MG24 join against a REFERENCE coordinator (MG21 PAN 0x3761/ch25 or nRF ZBOSS TC; join+leave to clean) to isolate NCP-vs-us; (2) approve C6-joiner fw effort (second C6 as joiner vs rd-coord — tests our RSP against another stack + builds the joiner path anyway); (3) NCP-image/token review (factory-reset lineage; token restore = invasive, needs approval).
-- Lab policy meanwhile: rung-3 join attempts PAUSED (flaky-scan burn); 7F68 restored to preflash backup (1995 B NVS-only delta, app identical); MG24 left NO_NETWORK/NOT_JOINED clean; leases none, quarantine none. Evidence: ~/hwscratch/w92-rung3c/SUMMARY.md (full).
+Status: OPEN, narrowed (w93: NCP healthy, our RSP fixed, TC key transport next).
+- w93 differential: MG24 joins reference MG21 TC (0x3761/ch25) FIRST TRY
+  (`NETWORK_UP`, short 0xC5C1) → NCP fully healthy; defect is ours alone.
+- w93 root cause: assoc-rsp source addressing. Real NCPs answer `FC 63 cc`
+  (both addrs long, coordinator EUI source); ours was `63 8c` (short
+  source) → received-but-rejected. Fixed `152e2bd` (ASSOC_RSP_LEN 19→25,
+  MG21 wire frame pinned as regression vector), air-verified: NCP now
+  reports `NO_NETWORK_KEY_RECEIVED (173)` (was `JOIN_FAILED (148)`) —
+  association ACCEPTED, NCP waits for APS Transport-Key (0x05) we never
+  send. THAT is the current gate: Trust-Center key transport must be
+  implemented (repo assets: `derive_key_transport_key`, k1 golden frame
+  in `sim/tests/join_tc_first.rs`).
+- Stick reset (user-suggested, w93 step 1): tokenFactoryReset → identical
+  instant fail. Token state excluded (again).
+- NCP internal-scan flakiness stands (standalone scans hit, joinNetwork
+  internal scan often misses in 0.2 s); harness pre-scan retry loop
+  mitigates.
+- Lab state at w93 closeout: 7F68 restored to preflash backup (1995 B
+  NVS-only delta, app identical); MG24 factory-reset EMPTY; MG21 left
+  FORMED (documented lab-TC state, 0 children); leases none, quarantine
+  none. Evidence: ~/hwscratch/w93/SUMMARY.md.
