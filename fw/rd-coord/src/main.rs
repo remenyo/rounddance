@@ -250,6 +250,9 @@ fn main() {
     let mut node_desc_retries: u8 = 4;
     let mut node_desc_short: Option<u16> = None;
     let mut node_desc_pending: Option<u16> = None;
+    // Join-rate policy log state (change-triggered only).
+    let mut last_policy_th: u32 = 0;
+    let mut last_policy_dn: u32 = 0;
     // Network key: build-time provisioned. `RD_NETKEY_HEX` (32 hex
     // digits) bakes a deployment key into this image; unset means the
     // explicit lab default below (with a build warning — never silent).
@@ -455,6 +458,19 @@ fn main() {
                     }
                 }
                 Err(e) => println!("RDCOORD GRAT-BUILD-FAILED {e:?}"),
+            }
+        }
+        // Join-rate policy observability (Phase 4): the app counts
+        // throttled + denied associations; log the totals on change
+        // (checked every loop, silent otherwise — the quiet lab pair
+        // must not spam the tap).
+        {
+            let th = app.assoc_throttled();
+            let dn = app.assoc_denied();
+            if th != last_policy_th || dn != last_policy_dn {
+                println!("RDCOORD ASSOC-POLICY throttled={th} denied={dn}");
+                last_policy_th = th;
+                last_policy_dn = dn;
             }
         }
         std::thread::sleep(std::time::Duration::from_millis(10));

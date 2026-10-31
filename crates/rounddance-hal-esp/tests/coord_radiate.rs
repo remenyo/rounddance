@@ -1605,3 +1605,151 @@ fn joiner_aux_resume_skips_rewind() {
     assert!(c3 > c1, "resumed {c3:#x} must exceed radiated {c1:#x}");
     assert_eq!(c3, (c1 / AUX_CHUNK + 1) * AUX_CHUNK);
 }
+
+/// Phase 4 join-rate policy: a storm of NEW-EUI associations is
+/// throttled (bounded accepts per window) while re-assocs from the
+/// latched EUI always pass (legit retry/rejoin must never break).
+/// Reproduce-then-fix: without the policy the 5th new EUI is
+/// accepted and nothing is counted.
+#[test]
+fn assoc_rate_policy_throttles_new_eui_storm() {
+    // Five distinct display-order EUIs; air order is the full
+    // reverse (rung-3/MG21 lesson: middle ff:fe -> fe:ff on air).
+    const EUIS: [[u8; 8]; 5] = [
+        [0x01, 0x02, 0x03, 0xff, 0xfe, 0x06, 0x07, 0x08],
+        [0x11, 0x12, 0x13, 0xff, 0xfe, 0x16, 0x17, 0x18],
+        [0x21, 0x22, 0x23, 0xff, 0xfe, 0x26, 0x27, 0x28],
+        [0x31, 0x32, 0x33, 0xff, 0xfe, 0x36, 0x37, 0x38],
+        [0x41, 0x42, 0x43, 0xff, 0xfe, 0x46, 0x47, 0x48],
+    ];
+    fn air_for(eui: &[u8; 8], seq: u8) -> [u8; 19] {
+        let mut air = [0u8; 19];
+        air[..9].copy_from_slice(&[0x23, 0xc8, seq, 0x01, 0xc6, 0x00, 0x00, 0xff, 0xff]);
+        let mut wire = *eui;
+        wire.reverse();
+        air[9..17].copy_from_slice(&wire);
+        air[17..19].copy_from_slice(&[0x01, 0x8c]);
+        air
+    }
+    let mut app = formed_app();
+    let mut log = app::NullLog;
+    app.open_permit(&mut log, 600_000).unwrap();
+    for (i, eui) in EUIS.iter().enumerate() {
+        app.admit_extra(&mut log, *eui, 0x0010 + i as u16).unwrap();
+    }
+    app.tick(0, 0);
+    let mut out = [0u8; 32];
+    // Budget is 4 new accepts per 60 s window: first four pass.
+    for (i, eui) in EUIS[..4].iter().enumerate() {
+        let air = air_for(eui, i as u8);
+        app.on_mac_psdu(&air);
+        assert_eq!(
+            app.take_assoc_rsp(&mut out).unwrap(),
+            25,
+            "new EUI {i} accepted"
+        );
+    }
+    assert_eq!(app.assoc_throttled(), 0);
+    // Fifth new EUI inside the window: throttled, nothing pended.
+    let air = air_for(&EUIS[4], 0x40);
+    app.on_mac_psdu(&air);
+    assert_eq!(
+        app.take_assoc_rsp(&mut out).unwrap(),
+        0,
+        "5th new EUI throttled"
+    );
+    assert_eq!(app.assoc_throttled(), 1);
+    assert_eq!(app.assoc_denied(), 0);
+    // Window rolls: the same EUI is admitted on retry.
+    app.tick(61_000, 61_000);
+    let air = air_for(&EUIS[4], 0x41);
+    app.on_mac_psdu(&air);
+    assert_eq!(
+        app.take_assoc_rsp(&mut out).unwrap(),
+        25,
+        "post-window accept"
+    );
+    assert_eq!(app.assoc_throttled(), 1);
+}
+
+/// Re-assocs from the latched EUI never consume budget (the joiner
+/// retries assoc-req every 2 s on RSP loss and rejoins after every
+/// reboot; throttling those would wedge the legit path).
+#[test]
+fn reassoc_from_latched_eui_ignores_budget() {
+    const EUIS: [[u8; 8]; 4] = [
+        [0x51, 0x52, 0x53, 0xff, 0xfe, 0x56, 0x57, 0x58],
+        [0x61, 0x62, 0x63, 0xff, 0xfe, 0x66, 0x67, 0x68],
+        [0x71, 0x72, 0x73, 0xff, 0xfe, 0x76, 0x77, 0x78],
+        [0x81, 0x82, 0x83, 0xff, 0xfe, 0x86, 0x87, 0x88],
+    ];
+    fn air_for(eui: &[u8; 8], seq: u8) -> [u8; 19] {
+        let mut air = [0u8; 19];
+        air[..9].copy_from_slice(&[0x23, 0xc8, seq, 0x01, 0xc6, 0x00, 0x00, 0xff, 0xff]);
+        let mut wire = *eui;
+        wire.reverse();
+        air[9..17].copy_from_slice(&wire);
+        air[17..19].copy_from_slice(&[0x01, 0x8c]);
+        air
+    }
+    let mut app = formed_app();
+    let mut log = app::NullLog;
+    app.open_permit(&mut log, 600_000).unwrap();
+    for (i, eui) in EUIS.iter().enumerate() {
+        app.admit_extra(&mut log, *eui, 0x0020 + i as u16).unwrap();
+    }
+    app.tick(0, 0);
+    let mut out = [0u8; 32];
+    for (i, eui) in EUIS.iter().enumerate() {
+        let air = air_for(eui, i as u8);
+        app.on_mac_psdu(&air);
+        assert_eq!(app.take_assoc_rsp(&mut out).unwrap(), 25);
+    }
+    // Budget exhausted (4/4); the latched (last) EUI retries freely.
+    for s in 0x10..0x13u8 {
+        let air = air_for(&EUIS[3], s);
+        app.on_mac_psdu(&air);
+        assert_eq!(
+            app.take_assoc_rsp(&mut out).unwrap(),
+            25,
+            "latched re-assoc passes"
+        );
+    }
+    assert_eq!(app.assoc_throttled(), 0);
+    assert_eq!(app.assoc_denied(), 0);
+}
+
+/// Denied associations (unlisted EUI, closed window) are counted as
+/// denied — never throttled, never answered. Previously silent.
+#[test]
+fn denied_assoc_counted_not_throttled() {
+    const LISTED: [u8; 8] = [0x91, 0x92, 0x93, 0xff, 0xfe, 0x96, 0x97, 0x98];
+    const STRANGER: [u8; 8] = [0xa1, 0xa2, 0xa3, 0xff, 0xfe, 0xa6, 0xa7, 0xa8];
+    fn air_for(eui: &[u8; 8], seq: u8) -> [u8; 19] {
+        let mut air = [0u8; 19];
+        air[..9].copy_from_slice(&[0x23, 0xc8, seq, 0x01, 0xc6, 0x00, 0x00, 0xff, 0xff]);
+        let mut wire = *eui;
+        wire.reverse();
+        air[9..17].copy_from_slice(&wire);
+        air[17..19].copy_from_slice(&[0x01, 0x8c]);
+        air
+    }
+    let mut app = formed_app();
+    let mut log = app::NullLog;
+    app.open_permit(&mut log, 600_000).unwrap();
+    app.admit_extra(&mut log, LISTED, 0x0030).unwrap();
+    app.tick(0, 0);
+    let mut out = [0u8; 32];
+    // Stranger under open permit: denied, counted, silent.
+    app.on_mac_psdu(&air_for(&STRANGER, 0x01));
+    assert_eq!(app.take_assoc_rsp(&mut out).unwrap(), 0);
+    assert_eq!(app.assoc_denied(), 1);
+    assert_eq!(app.assoc_throttled(), 0);
+    // Listed EUI after the window closes: denied the same way.
+    app.tick(601_000, 601_000);
+    assert!(!app.permit_open());
+    app.on_mac_psdu(&air_for(&LISTED, 0x02));
+    assert_eq!(app.take_assoc_rsp(&mut out).unwrap(), 0);
+    assert_eq!(app.assoc_denied(), 2);
+    assert_eq!(app.assoc_throttled(), 0);
+}

@@ -155,7 +155,7 @@ Status: CLOSED 2026-10-31 (measurement artifact — retention PROVEN while hoste
   ~/hwscratch/w101/.
 
 ### B-009 (2026-10-31): MG21 TC answers no stranger assoc (C6 joiner blocked at assoc)
-Status: PARKED with cause (MG21-side; needs human replug for the discriminator).
+Status: OPEN (re-scoped 2026-10-31: MG21 DOES admit strangers — C6 silence isolated as C6-specific or TC-state-at-the-time; C6 x foreign-TC still unproven).
 - Symptom (2 campaigns): our C6 joiner scans/ch25, elects MG21 (permit=true
   beacons, EPAN-verified), adopts PAN, TXs assoc-reqs (15+, MAC-ACKed each
   time on sniffer) — MG21 NEVER transmits an assoc-rsp. Reproduced w102
@@ -163,6 +163,22 @@ Status: PARKED with cause (MG21-side; needs human replug for the discriminator).
   open permit window, fresh random-key TC formed via direct-EZSP script
   (bellows CLI `form` silent-fails on v13: exit 0 + empty log, no network
   — host-tool debt, direct script pays it).
+- Discriminator RESOLVED w108 (no human replug needed — the w102 wedge
+  cleared on its own between turns: MG24 answers EZSP v18, factory_reset
+  OK, then joins cleanly; probable cause remains the baud-mismatched
+  reset ASH-session wedge, cleared by an unobserved USB/power cycle):
+  factory-reset EMPTY MG24 vs freshly-formed MG21 TC (random key,
+  ch25) → `NETWORK_UP`/`JOINED_NETWORK`/0x51DE (FRESH short, not the
+  stale 0xC5C1 slot — genuine stranger admission) with full air
+  handshake on sniffer: assoc-req ACKed → 63cc RSP 27 B → transport →
+  annce → ZDO exchange, all ACKed. "MG21 admits no one new" is
+  REFUTED. Byte-compare of the assoc frames exonerates C6 shape at
+  the MAC layer (identical structure: `23 c8` + pan + `0000` +
+  `ffff` + EUI + `01 8c`; only PAN/EUI/seq differ) — leading
+  hypothesis for the w102 C6 silence is now TC-state-at-the-time
+  (that TC died detach-adjacent twice, documented). NEXT: re-attempt
+  C6 joiner × freshly-formed MG21 TC (ch25 joiner fw exists from
+  w102; 97A4 reflash + permit + sniffer). Evidence ~/hwscratch/w108/.
 - Discriminator parked: whether ANY stranger gets an answer (MG24 NCP
   canonical-shape control) is blocked — MG24 locally refuses joinNetwork
   instantly (0.2 s NOT_JOINED, zero air frames) after a baud-mismatched

@@ -76,6 +76,15 @@ pub const UNASSOC_SHORT: u16 = 0xFFFF;
 /// value; disjoint from the coordinator's `TRANSPORT_AUX_BASE` range
 /// so captures attribute direction unambiguously).
 pub const JOINER_AUX_BASE: u32 = 0x0000_2000;
+/// Join-rate policy window: new-EUI associations accepted per
+/// window before throttling (Phase 4 hardening). Re-assocs from the
+/// latched EUI never consume budget (legit retry/rejoin); the lab
+/// pair joins at most twice per boot, so 4/60 s is generous headroom
+/// with real churn protection (each accept burns a transport build +
+/// an aux counter + an NVS write).
+pub const ASSOC_WINDOW_MS: u64 = 60_000;
+/// New-EUI association accepts per [`ASSOC_WINDOW_MS`].
+pub const ASSOC_NEW_MAX: u8 = 4;
 /// Indirect-queue depth: at most this many shorts hold queued
 /// frames (Phase 1 leg 1b; leg 1c transmits them post-poll).
 pub const INDIRECT_DEPTH: usize = 4;
@@ -458,6 +467,21 @@ pub struct CoordinatorApp {
     /// MIC failure, replay, truncation). Never silent: every refusal
     /// increments this counter (Phase 1 leg RX-1).
     pub nwk_rx_ignored: u32,
+    /// Last timestamp seen by [`tick`](CoordinatorApp::tick): the
+    /// join-rate window clock (association input carries no time).
+    last_tick_ms: u64,
+    /// Start of the current join-rate window (`None` until the first
+    /// policed association).
+    assoc_window_start: Option<u64>,
+    /// New-EUI associations accepted inside the current window.
+    assoc_new_in_window: u8,
+    /// New-EUI associations refused by the rate policy (counted,
+    /// never answered — the fw logs the total on change).
+    pub assoc_throttled: u32,
+    /// Association requests denied without answer (unlisted EUI or
+    /// closed window). Previously silent; counted since the Phase 4
+    /// permit-policy leg.
+    pub assoc_denied: u32,
 }
 
 impl CoordinatorApp {
@@ -486,6 +510,11 @@ impl CoordinatorApp {
             zdo_pending: PendingTable::new(),
             nwk_rx_classified: 0,
             nwk_rx_ignored: 0,
+            last_tick_ms: 0,
+            assoc_window_start: None,
+            assoc_new_in_window: 0,
+            assoc_throttled: 0,
+            assoc_denied: 0,
         }
     }
 
@@ -651,6 +680,74 @@ impl CoordinatorApp {
         self.assoc.assoc_pending()
     }
 
+    /// New-EUI associations refused by the join-rate policy so far.
+    #[must_use]
+    pub fn assoc_throttled(&self) -> u32 {
+        self.assoc_throttled
+    }
+
+    /// Associations denied without answer so far (unlisted EUI or
+    /// closed permit window).
+    #[must_use]
+    pub fn assoc_denied(&self) -> u32 {
+        self.assoc_denied
+    }
+
+    /// Whether `req` comes from the currently latched EUI
+    /// (re-assoc: retry/rejoin path, always free of budget).
+    fn is_latched_reassoc(&self, req: &crate::mac_cmd::AssocReq) -> bool {
+        match self.assoc.device_eui() {
+            Some(latched) => eui_matches(&latched, &req.src_eui),
+            None => false,
+        }
+    }
+
+    /// Join-rate police for one assoc-req: true when the request must
+    /// be dropped answered-nothing (budget exhausted for a NEW EUI).
+    /// Re-assocs from the latched EUI always pass (legit retry/rejoin
+    /// path); requests that would be denied anyway (closed window,
+    /// misaddressed, unlisted EUI) are NOT throttled — they fall
+    /// through to the normal deny path and count as denied. Callers
+    /// must invoke [`note_assoc_accept`](CoordinatorApp::note_assoc_accept)
+    /// with the pre-accept [`is_latched_reassoc`](CoordinatorApp::is_latched_reassoc)
+    /// verdict when the request is subsequently accepted.
+    fn police_assoc(&mut self, req: &crate::mac_cmd::AssocReq) -> bool {
+        // Re-assoc from the latched EUI: free (retry/rejoin path).
+        if self.is_latched_reassoc(req) {
+            return false;
+        }
+        // Mirror the CoordAssoc accept gate so only would-be accepts
+        // consume budget; denials stay denials.
+        if !self.machine.permit_open() {
+            return false;
+        }
+        if req.dst_pan != APP_PAN || req.dst_short != COORD_SHORT {
+            return false;
+        }
+        if !self.assoc.is_allowed(&req.src_eui) {
+            return false;
+        }
+        // Roll the window on the tick clock.
+        let start = self.assoc_window_start.unwrap_or(self.last_tick_ms);
+        if self.last_tick_ms.wrapping_sub(start) >= ASSOC_WINDOW_MS {
+            self.assoc_window_start = Some(self.last_tick_ms);
+            self.assoc_new_in_window = 0;
+        } else if self.assoc_window_start.is_none() {
+            self.assoc_window_start = Some(self.last_tick_ms);
+        }
+        self.assoc_new_in_window >= ASSOC_NEW_MAX
+    }
+
+    /// Record one accepted association against the rate budget (only
+    /// NEW EUIs consume; call with the latch state from BEFORE the
+    /// accept — [`CoordAssoc::on_assoc_req`](crate::mac_cmd::CoordAssoc::on_assoc_req)
+    /// overwrites it).
+    fn note_assoc_accept(&mut self, was_latched_same: bool) {
+        if !was_latched_same {
+            self.assoc_new_in_window = self.assoc_new_in_window.saturating_add(1);
+        }
+    }
+
     /// Resolve an assigned short to its admitted EUI (the reverse of
     /// the [`CoordinatorApp::take_assoc_rsp`] short selection): extra
     /// admissions first, then the [`JOINER_SHORT`] fallback. Unknown
@@ -683,8 +780,10 @@ impl CoordinatorApp {
     }
 
     /// Advance the permit window and child aging, keeping the MAC
-    /// responder permit bit in sync (closed on expiry).
+    /// responder permit bit in sync (closed on expiry). Also advances
+    /// the join-rate window clock (association input is untimed).
     pub fn tick(&mut self, now_ms: u64, elapsed_ms: u64) {
+        self.last_tick_ms = now_ms;
         self.machine.tick(now_ms, elapsed_ms);
         self.assoc.set_permit(self.machine.permit_open());
     }
@@ -706,12 +805,30 @@ impl CoordinatorApp {
         match inc {
             MacIncoming::BeaconReq { .. } => self.assoc.on_beacon_req(),
             MacIncoming::AssocReq(ref req) => {
-                if self.assoc.on_assoc_req(req) {
+                // Capture the pre-accept latch verdict FIRST:
+                // `on_assoc_req` overwrites the latch, after which a
+                // new EUI and a repeat are indistinguishable.
+                let repeat = self.is_latched_reassoc(req);
+                if self.police_assoc(req) {
+                    // Rate-throttled new EUI: counted, never answered
+                    // (no latch, no pend, no transport — the churn that
+                    // burns transport builds + aux counters + NVS
+                    // writes stops here).
+                    self.assoc_throttled = self.assoc_throttled.saturating_add(1);
+                } else if self.assoc.on_assoc_req(req) {
                     // Latched: the Trust-Center key delivery is owed too
                     // (the NCP waits for the 0x05 frame after the RSP).
                     // New cycle: a later transport no longer counts.
                     self.transport_pending = true;
                     self.transport_sent = false;
+                    // Only NEW EUIs consume rate budget; repeats (the
+                    // retry/rejoin path) ride free.
+                    self.note_assoc_accept(repeat);
+                } else {
+                    // Denied without answer (closed window, misaddress,
+                    // unlisted EUI): counted since the permit-policy leg
+                    // (previously silent).
+                    self.assoc_denied = self.assoc_denied.saturating_add(1);
                 }
             }
             MacIncoming::DataPoll(ref poll) => {
