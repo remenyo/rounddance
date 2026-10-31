@@ -53,6 +53,85 @@ impl SerialLog for ConsoleLog {
     }
 }
 
+/// NVS namespace + key for the aux-counter chunk high-water (Phase 4:
+/// anti-replay across reboots). Short ASCII names per the NVS
+/// 15-octet limit, NUL-terminated for the C API.
+const NVS_NS_AUX: &[u8] = b"rdcoord\0";
+const NVS_KEY_AUXCHUNK: &[u8] = b"aux_chunk\0";
+
+/// Read the persisted aux chunk (`None` = fresh part, missing key, or
+/// any NVS failure — all degrade to the deployment floor, never
+/// panic). Call only after the driver ran `nvs_flash_init`.
+fn nvs_aux_read() -> Option<u32> {
+    // SAFETY: synchronous scalar FFI; the out-param borrows a live
+    // stack slot for the call only; the handle is closed on every
+    // path. Pointer/size contract matches the IDF v6.1 `nvs.h`
+    // signatures (`nvs_open`, `nvs_get_u32`, `nvs_close`).
+    unsafe {
+        let mut handle: esp_idf_sys::nvs_handle_t = 0;
+        if esp_idf_sys::nvs_open(
+            NVS_NS_AUX.as_ptr().cast(),
+            esp_idf_sys::nvs_open_mode_t_NVS_READONLY,
+            &mut handle,
+        ) != esp_idf_sys::ESP_OK
+        {
+            return None;
+        }
+        let mut val: u32 = 0;
+        let rc = esp_idf_sys::nvs_get_u32(handle, NVS_KEY_AUXCHUNK.as_ptr().cast(), &mut val);
+        esp_idf_sys::nvs_close(handle);
+        if rc == esp_idf_sys::ESP_OK {
+            Some(val)
+        } else {
+            None
+        }
+    }
+}
+
+/// Persist the aux chunk best-effort (Phase 4: persist-before-use —
+/// the caller writes each new chunk BEFORE sealing any frame under
+/// it). A failed write only logs: the counter keeps advancing in RAM
+/// (availability over perfect durability; worst case is one chunk of
+/// reuse after a crash, never a rewind while running).
+fn nvs_aux_write(chunk: u32) {
+    // SAFETY: as for [`nvs_aux_read`], plus `nvs_set_u32` /
+    // `nvs_commit` with the same borrow discipline (commit flushes to
+    // flash so a power loss right after still holds the chunk).
+    unsafe {
+        let mut handle: esp_idf_sys::nvs_handle_t = 0;
+        if esp_idf_sys::nvs_open(
+            NVS_NS_AUX.as_ptr().cast(),
+            esp_idf_sys::nvs_open_mode_t_NVS_READWRITE,
+            &mut handle,
+        ) != esp_idf_sys::ESP_OK
+        {
+            println!("RDCOORD NVS-WRITE-FAILED open chunk={chunk}");
+            return;
+        }
+        let rc = esp_idf_sys::nvs_set_u32(handle, NVS_KEY_AUXCHUNK.as_ptr().cast(), chunk);
+        if rc == esp_idf_sys::ESP_OK {
+            let rc = esp_idf_sys::nvs_commit(handle);
+            if rc != esp_idf_sys::ESP_OK {
+                println!("RDCOORD NVS-WRITE-FAILED commit chunk={chunk} rc={rc}");
+            } else {
+                println!("RDCOORD NVS-WROTE aux_chunk={chunk}");
+            }
+        } else {
+            println!("RDCOORD NVS-WRITE-FAILED set chunk={chunk} rc={rc}");
+        }
+        esp_idf_sys::nvs_close(handle);
+    }
+}
+
+/// Poll the app's checkpoint and persist any new chunk (Phase 4:
+/// call after every secured-frame build, before the frame goes on
+/// air — the persist-before-use half of the protocol).
+fn persist_aux_chunk(app: &mut CoordinatorApp) {
+    if let Some(chunk) = app.aux_checkpoint() {
+        nvs_aux_write(chunk);
+    }
+}
+
 fn main() {
     // `EspIdfDriver::init` runs `link_patches` + NVS-first init before
     // touching the radio; antenna select stays board-side here.
@@ -109,6 +188,16 @@ fn main() {
         Err(e) => println!("RDCOORD ed-failed {e:?}"),
     }
     let mut app = CoordinatorApp::new();
+    // NVM-backed aux counter (Phase 4): resume from the persisted
+    // chunk so a reboot never rewinds into a live peer's replay
+    // window. Reads after `init` (the driver NVS-first-inits there);
+    // every failure degrades to the deployment floor, never panics.
+    let aux_saved = nvs_aux_read();
+    app.resume_auxctr(aux_saved);
+    match aux_saved {
+        Some(c) => println!("RDCOORD AUX-RESUME chunk={c}"),
+        None => println!("RDCOORD AUX-RESUME fresh"),
+    }
     app.begin_formation(&mut log).expect("formation");
     app.formation_done(&mut log, true);
     // Key provenance tag (never key material): operators confirm from
@@ -287,6 +376,7 @@ fn main() {
                 Ok(n) if n > 0 => {
                     log_air(&mut log, "RDCOORD TX-NODE-DESC-REQ", &tx_buf[..n]);
                     println!("RDCOORD ZDO-PENDING {}", app.zdo_pending_open());
+                    persist_aux_chunk(&mut app);
                     match adapter.transmit_mac(&tx_buf[..n]) {
                         Ok(h) => node_desc_handle = Some(h),
                         // Submit-time refusal: logged, not re-queued
@@ -325,6 +415,7 @@ fn main() {
             match app.take_transport_key(&mut tx_buf, &C6_NETKEY, &transport_key) {
                 Ok(n) if n > 0 => {
                     log_air(&mut log, "RDCOORD TX-TRANSPORT-KEY", &tx_buf[..n]);
+                    persist_aux_chunk(&mut app);
                     match adapter.transmit_mac(&tx_buf[..n]) {
                         Ok(h) => transport_handle = Some(h),
                         Err(e) => {

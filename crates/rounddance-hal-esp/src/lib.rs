@@ -71,6 +71,7 @@ extern crate std;
 
 pub mod adapter;
 pub mod app;
+pub mod auxctr;
 pub mod driver;
 #[cfg(feature = "esp")]
 pub mod esp;

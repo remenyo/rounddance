@@ -30,6 +30,7 @@
 //! Requirement IDs: corpus role/commission IDs are reused inline;
 //! `RD-APP-C6-*` rows are repo-minted (MINTED-pending-confirm).
 
+pub use crate::auxctr::{AuxCounter, AUX_CHUNK};
 use crate::mac_cmd::{
     beacon_net_caps, build_assoc_req, eui_matches, CoordAssoc, DataPoll, Incoming as MacIncoming,
     MacCmdError, SUPERFRAME_ASSOC_PERMIT,
@@ -427,10 +428,12 @@ pub struct CoordinatorApp {
     /// is unaffected by this flag.
     transport_sent: bool,
     /// Auxiliary frame counter for NWK-secured transmission (strictly
-    /// monotonic per network key; starts at the lab base). One counter
-    /// space per sender per key: the transport delivery and all later
-    /// secured frames (ZDO requests, ...) share it.
-    nwk_auxctr: u32,
+    /// monotonic per network key). One counter space per sender per
+    /// key: the transport delivery and all later secured frames (ZDO
+    /// requests, ...) share it. NVM-backed (Phase 4): the firmware
+    /// resumes it from the persisted chunk at boot so a reboot never
+    /// rewinds into a live peer's replay window.
+    nwk_auxctr: AuxCounter,
     /// Bounded indirect-message queue (Phase 1 leg 1b): payloads held
     /// per destination short until the device polls (leg 1c transmits
     /// them). While a short holds an entry it stays OUT of the
@@ -473,7 +476,7 @@ impl CoordinatorApp {
             aps_counter: 0,
             transport_pending: false,
             transport_sent: false,
-            nwk_auxctr: TRANSPORT_AUX_BASE,
+            nwk_auxctr: AuxCounter::fresh(TRANSPORT_AUX_BASE),
             indirect: [None; INDIRECT_DEPTH],
             tx_counter: FrameCounter::new(100, 4),
             rx_replay: ReplayTable::<8>::new(),
@@ -828,6 +831,23 @@ impl CoordinatorApp {
         self.transport_pending
     }
 
+    /// Resume the NWK aux counter from the NVS-persisted chunk (Phase
+    /// 4: the firmware reads the chunk at boot and calls this before
+    /// any secured frame goes on air; without it a reboot rewinds
+    /// into live peers' replay windows). `None` on a fresh part
+    /// starts at the deployment floor.
+    pub fn resume_auxctr(&mut self, saved_chunk: Option<u32>) {
+        self.nwk_auxctr = AuxCounter::resume(saved_chunk, TRANSPORT_AUX_BASE);
+    }
+
+    /// Chunk index due for NVS persistence, if any (Phase 4:
+    /// persist-before-use — call after every secured-frame build and
+    /// write the returned chunk to NVS *before* transmitting).
+    /// Returns `None` when the current chunk is already reported.
+    pub fn aux_checkpoint(&mut self) -> Option<u32> {
+        self.nwk_auxctr.poll_checkpoint()
+    }
+
     /// Re-pend the key-transport answer for the latched EUI
     /// (TX-loss recovery, mirror of [`rearm_assoc`](Self::rearm_assoc)).
     /// No-op when no EUI is latched.
@@ -873,7 +893,7 @@ impl CoordinatorApp {
         // Source EUI rides LSB-first (wire order, `TC_EUI_WIRE`),
         // like every other address field the NCP parses (w93: MG21's
         // aux source is the LE bytes of its EUI).
-        let auxctr = self.nwk_auxctr;
+        let auxctr = self.nwk_auxctr.take();
         let params = TransportKeyParams {
             dst_pan: APP_PAN,
             dst_short: short,
@@ -892,7 +912,7 @@ impl CoordinatorApp {
             Ok(n) => {
                 self.transport_pending = false;
                 self.transport_sent = true;
-                self.nwk_auxctr = auxctr.wrapping_add(1);
+
                 // Fresh key = fresh counter space: the (re)joining
                 // device restarts its frame counter (factory reset
                 // wipes NVM). Without this, post-join frames after
@@ -1025,7 +1045,7 @@ impl CoordinatorApp {
         let alen = aps
             .encode_into(&zbuf, &mut abuf)
             .map_err(|_| MacCmdError::BufferTooSmall)?;
-        let auxctr = self.nwk_auxctr;
+        let auxctr = self.nwk_auxctr.take();
         let params = SecuredNwkParams {
             dst_pan: APP_PAN,
             dst_short,
@@ -1039,10 +1059,7 @@ impl CoordinatorApp {
             netkey: *netkey,
         };
         match build_secured_nwk_frame(&abuf[..alen], &params, out) {
-            Ok(n) => {
-                self.nwk_auxctr = auxctr.wrapping_add(1);
-                Ok(n)
-            }
+            Ok(n) => Ok(n),
             Err(_) => Err(MacCmdError::BufferTooSmall),
         }
     }
@@ -1399,9 +1416,10 @@ pub struct JoinerApp<'a> {
     /// secures all later joiner traffic).
     netkey: Option<([u8; 16], u8)>,
     /// Joiner-side NWK auxiliary counter space (strictly monotonic
-    /// per key; starts at the lab base, disjoint from the
-    /// coordinator's range so captures attribute cleanly).
-    join_auxctr: u32,
+    /// per key, disjoint from the coordinator's range so captures
+    /// attribute cleanly). Same NVM-backed type as the coordinator
+    /// side; joiner NVS wiring is a parked follow-up.
+    join_auxctr: AuxCounter,
     /// Frames answered with a Default Response.
     pub defrsp_sent: u32,
     /// NWK/ZDO frames classified (joiner side).
@@ -1442,7 +1460,7 @@ impl<'a> JoinerApp<'a> {
             mac_seq: 0,
             assoc_short: None,
             netkey: None,
-            join_auxctr: JOINER_AUX_BASE,
+            join_auxctr: AuxCounter::fresh(JOINER_AUX_BASE),
             defrsp_sent: 0,
             nwk_rx_classified: 0,
             nwk_rx_ignored: 0,
@@ -1585,6 +1603,20 @@ impl<'a> JoinerApp<'a> {
     #[must_use]
     pub fn adopted_netkey(&self) -> Option<([u8; 16], u8)> {
         self.netkey
+    }
+
+    /// Resume the joiner aux counter from NVS (same contract as
+    /// [`resume_auxctr`](CoordinatorApp::resume_auxctr); joiner-side
+    /// NVS wiring is a parked follow-up, the type already supports
+    /// it).
+    pub fn resume_auxctr(&mut self, saved_chunk: Option<u32>) {
+        self.join_auxctr = AuxCounter::resume(saved_chunk, JOINER_AUX_BASE);
+    }
+
+    /// Joiner-side checkpoint, mirroring
+    /// [`aux_checkpoint`](CoordinatorApp::aux_checkpoint).
+    pub fn aux_checkpoint(&mut self) -> Option<u32> {
+        self.join_auxctr.poll_checkpoint()
     }
 
     /// Selected candidate PAN (valid once the survey elects one).
@@ -1915,7 +1947,7 @@ impl<'a> JoinerApp<'a> {
         pt[..8].copy_from_slice(&abuf);
         pt[8..8 + DeviceAnnce::LEN].copy_from_slice(&zbuf);
         let pt = &pt[..8 + DeviceAnnce::LEN];
-        let auxctr = self.join_auxctr;
+        let auxctr = self.join_auxctr.take();
         let params = SecuredNwkParams {
             dst_pan: APP_PAN,
             dst_short: 0xFFFD,
@@ -1929,10 +1961,7 @@ impl<'a> JoinerApp<'a> {
             netkey,
         };
         match build_secured_nwk_frame(pt, &params, out) {
-            Ok(n) => {
-                self.join_auxctr = auxctr.wrapping_add(1);
-                Ok(n)
-            }
+            Ok(n) => Ok(n),
             Err(_) => Err(MacCmdError::BufferTooSmall),
         }
     }
@@ -1997,7 +2026,7 @@ impl<'a> JoinerApp<'a> {
         let alen = aps
             .encode_into(&zbuf[..zlen], &mut abuf)
             .map_err(|_| MacCmdError::BufferTooSmall)?;
-        let auxctr = self.join_auxctr;
+        let auxctr = self.join_auxctr.take();
         let params = SecuredNwkParams {
             dst_pan: APP_PAN,
             dst_short,
@@ -2011,10 +2040,7 @@ impl<'a> JoinerApp<'a> {
             netkey,
         };
         match build_secured_nwk_frame(&abuf[..alen], &params, out) {
-            Ok(n) => {
-                self.join_auxctr = auxctr.wrapping_add(1);
-                Ok(n)
-            }
+            Ok(n) => Ok(n),
             Err(_) => Err(MacCmdError::BufferTooSmall),
         }
     }
