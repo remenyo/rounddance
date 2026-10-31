@@ -1042,6 +1042,7 @@ dependencies = [
  "rounddance-commission",
  "rounddance-hal-esp",
  "rounddance-mac-sap",
+ "rounddance-security",
 ]
 
 [[package]]
