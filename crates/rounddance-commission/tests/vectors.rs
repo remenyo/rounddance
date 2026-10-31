@@ -200,8 +200,13 @@ fn vector_candidate_ranking_22_65816_030_91_01() {
         end_device_capacity: true,
         protocol_version: 2,
     };
+    // Doubled: N-sighting confirmation needs >=2 rows per PAN
+    // (Phase 4 election hardening); ranking semantics unchanged.
+    m.ingest(row(0x2222, 200, -40, true)).unwrap();
     m.ingest(row(0x2222, 200, -40, true)).unwrap();
     m.ingest(row(0x1111, 200, -40, true)).unwrap();
+    m.ingest(row(0x1111, 200, -40, true)).unwrap();
+    m.ingest(row(0x3333, 250, -40, false)).unwrap();
     m.ingest(row(0x3333, 250, -40, false)).unwrap();
     m.finish_scan(&BaselineSteeringPolicy {
         min_lqi: 100,
@@ -1907,6 +1912,8 @@ fn vector_field_policy_admits_flat_lqi_strong_link() {
     let mut m = SteeringMachine::new();
     m.begin_scan(ChannelMask::from_list(&[15]).unwrap(), 3)
         .unwrap();
+    // Doubled: N-sighting confirmation (Phase 4 election hardening).
+    m.ingest(entry).unwrap();
     m.ingest(entry).unwrap();
     m.finish_scan(&LinkEvidencePolicy::default());
     assert_eq!(m.state(), SteeringState::CandidateSelected);
@@ -1995,8 +2002,13 @@ fn vector_field_policy_ranking_and_opt_in_floor() {
     };
     let mut m = SteeringMachine::new();
     m.begin_scan(ChannelMask::all_24g(), 3).unwrap();
+    // Doubled per PAN: N-sighting confirmation needs >=2 rows
+    // (Phase 4 election hardening); ranking semantics unchanged.
+    m.ingest(row(0x2222, 11)).unwrap();
     m.ingest(row(0x2222, 11)).unwrap();
     m.ingest(row(0x1111, 11)).unwrap();
+    m.ingest(row(0x1111, 11)).unwrap();
+    m.ingest(row(0x3333, 10)).unwrap();
     m.ingest(row(0x3333, 10)).unwrap();
     m.finish_scan(&LinkEvidencePolicy::default());
     assert_eq!(m.state(), SteeringState::CandidateSelected);
@@ -2574,4 +2586,70 @@ fn vector_utility_response_edges_07_5123_08_133237_01() {
     let m = efull.encode_into(&mut buf).unwrap();
     assert!(m <= MAX_TOUCHLINK_PAYLOAD);
     assert_eq!(GetEndpointListResponse::decode(&buf[..m]).unwrap(), efull);
+}
+
+// Phase 4 election hardening (N-sighting confirmation): a lone
+// phantom row — one FCS-passing decode with no corroborating beacons
+// (w109: a single C601 row elected ahead of the repeatedly-heard
+// network, sending the joiner associating into the void) — must
+// never elect, even when it would win the old ranking outright
+// (highest LQI + lowest-PAN tie-break).
+#[test]
+fn vector_phantom_single_sighting_never_elected() {
+    let row = |pan, lqi| BeaconSurveyEntry {
+        pan_id: pan,
+        channel: 15,
+        lqi,
+        rssi: -28,
+        permit_joining: true,
+        router_capacity: true,
+        end_device_capacity: true,
+        protocol_version: 2,
+    };
+    // Phantom alone: parks, never elects.
+    let mut m = SteeringMachine::new();
+    m.begin_scan(ChannelMask::from_list(&[15]).unwrap(), 3)
+        .unwrap();
+    m.ingest(row(0xC601, 220)).unwrap();
+    m.finish_scan(&LinkEvidencePolicy::default());
+    assert_eq!(m.state(), SteeringState::NoSuitableNetwork);
+    assert!(m.candidate().is_none());
+    // Phantom with the ranking-winning shape (highest LQI, lowest
+    // PAN) plus a twice-heard real network with worse meters: the
+    // corroborated network wins despite losing every old tie-break.
+    let mut m = SteeringMachine::new();
+    m.begin_scan(ChannelMask::from_list(&[15]).unwrap(), 3)
+        .unwrap();
+    m.ingest(row(0xC601, 220)).unwrap();
+    m.ingest(row(0x3761, 10)).unwrap();
+    m.ingest(row(0x3761, 10)).unwrap();
+    m.finish_scan(&LinkEvidencePolicy::default());
+    assert_eq!(m.state(), SteeringState::CandidateSelected);
+    assert_eq!(m.candidate().unwrap().pan_id, 0x3761);
+}
+
+// Phase 4 election hardening: two sightings in one window elect
+// immediately (no added latency for live networks — beacons arrive
+// ~1/s on their own plus solicited answers, so a 4 s window always
+// holds several rows for a real neighbour).
+#[test]
+fn vector_two_sightings_elect_first_window() {
+    let row = |pan, lqi| BeaconSurveyEntry {
+        pan_id: pan,
+        channel: 15,
+        lqi,
+        rssi: -28,
+        permit_joining: true,
+        router_capacity: true,
+        end_device_capacity: true,
+        protocol_version: 2,
+    };
+    let mut m = SteeringMachine::new();
+    m.begin_scan(ChannelMask::from_list(&[15]).unwrap(), 3)
+        .unwrap();
+    m.ingest(row(0x3761, 10)).unwrap();
+    m.ingest(row(0x3761, 10)).unwrap();
+    m.finish_scan(&LinkEvidencePolicy::default());
+    assert_eq!(m.state(), SteeringState::CandidateSelected);
+    assert_eq!(m.candidate().unwrap().pan_id, 0x3761);
 }

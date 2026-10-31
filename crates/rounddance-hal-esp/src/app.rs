@@ -1624,7 +1624,11 @@ impl<'a> JoinerApp<'a> {
     }
 
     /// Close the scan window: rank acceptable rows and elect the
-    /// winner. Returns the elected PAN, if any.
+    /// winner. Returns the elected PAN, if any. Election requires
+    /// [`MIN_ELECTION_SIGHTINGS`](crate::commission::MIN_ELECTION_SIGHTINGS)
+    /// acceptable rows for the winning PAN in this window (Phase 4:
+    /// a lone phantom beacon can never elect, while any live network
+    /// clears the bar in its first window).
     pub fn finish_scan<L: SerialLog>(&mut self, log: &mut L) -> Option<u16> {
         self.steering.finish_scan(&LinkEvidencePolicy::default());
         // Forward the election once per join attempt: a repeat

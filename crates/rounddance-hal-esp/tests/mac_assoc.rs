@@ -321,18 +321,22 @@ fn joiner_handoff_values_from_air() {
     static DEF: rounddance_zcl::onoff::ServerDef = rounddance_zcl::onoff::ServerDef;
     let mut joiner = app::JoinerApp::new(&DEF).unwrap();
     joiner.begin_scan(&mut NullLog).unwrap();
-    joiner
-        .ingest_beacon(rounddance_commission::BeaconSurveyEntry {
-            pan_id: bi.src_pan,
-            channel: 15,
-            lqi: 200,
-            rssi: -40,
-            permit_joining: bi.assoc_permit,
-            router_capacity: true,
-            end_device_capacity: true,
-            protocol_version: 2,
-        })
-        .unwrap();
+    // Doubled ingest: the N-sighting gate needs >=2 rows
+    // (Phase 4 election hardening).
+    for _ in 0..2 {
+        joiner
+            .ingest_beacon(rounddance_commission::BeaconSurveyEntry {
+                pan_id: bi.src_pan,
+                channel: 15,
+                lqi: 200,
+                rssi: -40,
+                permit_joining: bi.assoc_permit,
+                router_capacity: true,
+                end_device_capacity: true,
+                protocol_version: 2,
+            })
+            .unwrap();
+    }
     assert_eq!(joiner.finish_scan(&mut NullLog), Some(bi.src_pan));
     joiner.assoc_confirm(&mut NullLog, rsp.status == 0x00);
     assert_eq!(

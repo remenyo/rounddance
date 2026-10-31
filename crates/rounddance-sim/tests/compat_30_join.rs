@@ -60,23 +60,26 @@ fn run_30_transaction(seed: u64) -> CompatOutcome {
     assert_eq!(level, BASELINE_SEC_LEVEL);
 
     // Steering over a version-2 beacon, admitted by both the policy
-    // floor and the compat version gate.
+    // floor and the compat version gate. Doubled ingest: the
+    // N-sighting gate needs >=2 rows (Phase 4 election hardening).
     let mut steering = SteeringMachine::new();
     steering
         .begin_scan(ChannelMask::from_list(&[15]).unwrap(), 3)
         .unwrap();
-    steering
-        .ingest(BeaconSurveyEntry {
-            pan_id: PAN,
-            channel: 15,
-            lqi: 220,
-            rssi: -40,
-            permit_joining: true,
-            router_capacity: true,
-            end_device_capacity: true,
-            protocol_version: 2,
-        })
-        .unwrap();
+    for _ in 0..2 {
+        steering
+            .ingest(BeaconSurveyEntry {
+                pan_id: PAN,
+                channel: 15,
+                lqi: 220,
+                rssi: -40,
+                permit_joining: true,
+                router_capacity: true,
+                end_device_capacity: true,
+                protocol_version: 2,
+            })
+            .unwrap();
+    }
     steering.finish_scan(&BaselineSteeringPolicy {
         min_lqi: 100,
         min_version: 2,
@@ -353,18 +356,22 @@ fn compat_unknown_nwk_version_never_joins() {
     steering
         .begin_scan(ChannelMask::from_list(&[15]).unwrap(), 3)
         .unwrap();
-    steering
-        .ingest(BeaconSurveyEntry {
-            pan_id: PAN,
-            channel: 15,
-            lqi: 220,
-            rssi: -40,
-            permit_joining: true,
-            router_capacity: true,
-            end_device_capacity: true,
-            protocol_version: 9,
-        })
-        .unwrap();
+    // Doubled ingest (N-sighting gate); the compat gate still
+    // refuses version 9 afterwards.
+    for _ in 0..2 {
+        steering
+            .ingest(BeaconSurveyEntry {
+                pan_id: PAN,
+                channel: 15,
+                lqi: 220,
+                rssi: -40,
+                permit_joining: true,
+                router_capacity: true,
+                end_device_capacity: true,
+                protocol_version: 9,
+            })
+            .unwrap();
+    }
     steering.finish_scan(&BaselineSteeringPolicy {
         min_lqi: 100,
         min_version: 2,

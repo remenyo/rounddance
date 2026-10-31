@@ -77,18 +77,23 @@ fn survey_and_select(log: &mut HostLog, run_id: u64, now: u64) -> SteeringMachin
     steering
         .begin_scan(ChannelMask::from_list(&[15]).expect("15 valid"), 3)
         .expect("scan starts");
-    steering
-        .ingest(BeaconSurveyEntry {
-            pan_id: HOST_PAN,
-            channel: 15,
-            lqi: 220,
-            rssi: -40,
-            permit_joining: true,
-            router_capacity: true,
-            end_device_capacity: true,
-            protocol_version: 2,
-        })
-        .expect("beacon ingested");
+    // Doubled ingest: the N-sighting gate needs >=2 rows before a
+    // PAN may elect (Phase 4 election hardening); the scripted host
+    // beacon is strong, so both sightings land in one window.
+    for _ in 0..2 {
+        steering
+            .ingest(BeaconSurveyEntry {
+                pan_id: HOST_PAN,
+                channel: 15,
+                lqi: 220,
+                rssi: -40,
+                permit_joining: true,
+                router_capacity: true,
+                end_device_capacity: true,
+                protocol_version: 2,
+            })
+            .expect("beacon ingested");
+    }
     log.transition(
         now,
         "commission",

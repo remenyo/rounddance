@@ -60,6 +60,7 @@ pub use secured::{
 pub use steering::{
     BaselineSteeringPolicy, BeaconSurveyEntry, DiscoveryScan, LinkEvidencePolicy, SteeringMachine,
     SteeringPolicy, SteeringState, SurveyError, SurveyTable, MAX_SURVEY_ENTRIES,
+    MIN_ELECTION_SIGHTINGS,
 };
 pub use touchlink::{
     decrypt_network_key, development_block, encrypt_network_key, select_key_index, transport_block,

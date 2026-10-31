@@ -278,18 +278,22 @@ fn rcp_join_announce_over_uart() {
     steering
         .begin_scan(ChannelMask::from_list(&[15]).unwrap(), 3)
         .unwrap();
-    steering
-        .ingest(BeaconSurveyEntry {
-            pan_id: PAN,
-            channel: 15,
-            lqi: 220,
-            rssi: -40,
-            permit_joining: true,
-            router_capacity: true,
-            end_device_capacity: true,
-            protocol_version: 2,
-        })
-        .unwrap();
+    // Doubled ingest: the N-sighting gate needs >=2 rows
+    // (Phase 4 election hardening).
+    for _ in 0..2 {
+        steering
+            .ingest(BeaconSurveyEntry {
+                pan_id: PAN,
+                channel: 15,
+                lqi: 220,
+                rssi: -40,
+                permit_joining: true,
+                router_capacity: true,
+                end_device_capacity: true,
+                protocol_version: 2,
+            })
+            .unwrap();
+    }
     steering.finish_scan(&BaselineSteeringPolicy {
         min_lqi: 100,
         min_version: 2,

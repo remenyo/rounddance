@@ -149,18 +149,22 @@ impl FullStack {
         // Joiner: survey → candidate → assoc → vendor-frame tolerance
         // (wave-23 captured 0x30) → key → verify → announced.
         self.joiner.begin_scan(&mut self.joiner_log).unwrap();
-        self.joiner
-            .ingest_beacon(BeaconSurveyEntry {
-                pan_id: APP_PAN,
-                channel: APP_CHANNEL,
-                lqi: 220,
-                rssi: -40,
-                permit_joining: true,
-                router_capacity: true,
-                end_device_capacity: true,
-                protocol_version: 2,
-            })
-            .unwrap();
+        // Doubled ingest: the N-sighting gate needs >=2 rows
+        // (Phase 4 election hardening).
+        for _ in 0..2 {
+            self.joiner
+                .ingest_beacon(BeaconSurveyEntry {
+                    pan_id: APP_PAN,
+                    channel: APP_CHANNEL,
+                    lqi: 220,
+                    rssi: -40,
+                    permit_joining: true,
+                    router_capacity: true,
+                    end_device_capacity: true,
+                    protocol_version: 2,
+                })
+                .unwrap();
+        }
         assert_eq!(self.joiner.finish_scan(&mut self.joiner_log), Some(APP_PAN));
         self.joiner.assoc_confirm(&mut self.joiner_log, true);
         // Association assigns the short address, as on device.
@@ -339,6 +343,9 @@ fn joiner_on_mac_psdu_scans_and_hands_off_assoc() {
     joiner.begin_scan(&mut joiner_log).unwrap();
     let inc3 = joiner.on_mac_psdu(&mut joiner_log, &bc, APP_CHANNEL, -61, 221);
     assert!(matches!(inc3, Incoming::Beacon(_)));
+    // Second ingest: the N-sighting gate (Phase 4) needs >=2 rows.
+    let inc3b = joiner.on_mac_psdu(&mut joiner_log, &bc, APP_CHANNEL, -62, 221);
+    assert!(matches!(inc3b, Incoming::Beacon(_)));
     assert_eq!(joiner.finish_scan(&mut joiner_log), Some(APP_PAN));
     assert_eq!(joiner.state(), JoinerState::AwaitingCandidate);
     assert_eq!(joiner.candidate_pan(), Some(APP_PAN));
@@ -349,6 +356,8 @@ fn joiner_on_mac_psdu_scans_and_hands_off_assoc() {
     joiner.begin_scan(&mut joiner_log).unwrap();
     let inc3 = joiner.on_mac_psdu(&mut joiner_log, &bc, APP_CHANNEL, -61, 221);
     assert!(matches!(inc3, Incoming::Beacon(_)));
+    let inc3b = joiner.on_mac_psdu(&mut joiner_log, &bc, APP_CHANNEL, -62, 221);
+    assert!(matches!(inc3b, Incoming::Beacon(_)));
     assert_eq!(joiner.finish_scan(&mut joiner_log), Some(APP_PAN));
     assert_eq!(joiner.state(), JoinerState::AwaitingCandidate);
     assert_eq!(joiner.candidate_pan(), Some(APP_PAN));
@@ -406,6 +415,51 @@ fn scan_window_brackets_collection_interval() {
     bc[14..22].copy_from_slice(&EXT_PAN_ID);
     bc[22..25].copy_from_slice(&[0xff, 0xff, 0xff]);
     joiner.on_mac_psdu(&mut log, &bc, APP_CHANNEL, -60, 220);
+    // Second sighting: the N-sighting gate (Phase 4 election
+    // hardening) needs >=2 rows before a PAN may elect — one lone
+    // beacon (even permit-open) parks the window.
+    joiner.on_mac_psdu(&mut log, &bc, APP_CHANNEL, -59, 220);
     assert_eq!(joiner.finish_scan(&mut log), Some(APP_PAN));
     assert_eq!(joiner.candidate_pan(), Some(APP_PAN));
+}
+
+/// Phase 4 election hardening, app level: a lone phantom beacon —
+/// one FCS-passing decode with no corroboration (w109: a single
+/// C601 row elected ahead of the repeatedly-heard network) — parks
+/// the window instead of electing, even with the ranking-winning
+/// shape. Two sightings of the real network elect normally.
+#[test]
+fn phantom_single_beacon_parks_window() {
+    static DEF: rounddance_zcl::onoff::ServerDef = rounddance_zcl::onoff::ServerDef;
+    let mut log = VecLog::default();
+    let mut joiner = JoinerApp::new(&DEF).unwrap();
+    // Phantom: permit-open C601-shaped beacon, strongest LQI.
+    let mut phantom = [0u8; 26];
+    phantom[..14].copy_from_slice(&[
+        0x00, 0x80, 0x5a, 0x01, 0xc6, 0x00, 0x00, 0xff, 0xcf, 0x00, 0x00, 0x00, 0x22, 0x8c,
+    ]);
+    phantom[14..22].copy_from_slice(&EXT_PAN_ID);
+    phantom[22..25].copy_from_slice(&[0xff, 0xff, 0xff]);
+    // Real neighbour: permit-open, weaker meters (MG21-shaped:
+    // 0x84 capacity octet, any EPAN — election never reads it).
+    let mut real = [0u8; 26];
+    real[..14].copy_from_slice(&[
+        0x00, 0x80, 0x5b, 0x61, 0x37, 0x00, 0x00, 0xff, 0xcf, 0x00, 0x00, 0x00, 0x22, 0x84,
+    ]);
+    real[14..22].copy_from_slice(&EXT_PAN_ID);
+    real[22..25].copy_from_slice(&[0xff, 0xff, 0xff]);
+    joiner.begin_scan(&mut log).unwrap();
+    joiner.on_mac_psdu(&mut log, &phantom, APP_CHANNEL, -35, 220);
+    joiner.on_mac_psdu(&mut log, &real, APP_CHANNEL, -44, 200);
+    joiner.on_mac_psdu(&mut log, &real, APP_CHANNEL, -44, 200);
+    // Corroborated 0x3761 wins despite losing every old tie-break
+    // (lower LQI, higher PAN); the lone phantom cannot elect.
+    assert_eq!(joiner.finish_scan(&mut log), Some(0x3761));
+    assert_eq!(joiner.candidate_pan(), Some(0x3761));
+    // And a phantom alone parks the window outright.
+    let mut joiner2 = JoinerApp::new(&DEF).unwrap();
+    joiner2.begin_scan(&mut log).unwrap();
+    joiner2.on_mac_psdu(&mut log, &phantom, APP_CHANNEL, -35, 220);
+    assert_eq!(joiner2.finish_scan(&mut log), None);
+    assert_eq!(joiner2.candidate_pan(), None);
 }

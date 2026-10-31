@@ -1169,6 +1169,20 @@ fn joiner_transport_open_adopts_key_and_answers() {
             protocol_version: 2,
         })
         .unwrap();
+    // Doubled: N-sighting gate needs >=2 rows (Phase 4 election
+    // hardening).
+    joiner
+        .ingest_beacon(rounddance_commission::BeaconSurveyEntry {
+            pan_id: 0xC601,
+            channel: 15,
+            lqi: 200,
+            rssi: -40,
+            permit_joining: true,
+            router_capacity: true,
+            end_device_capacity: true,
+            protocol_version: 2,
+        })
+        .unwrap();
     assert_eq!(joiner.finish_scan(&mut log), Some(0xC601));
     // Assoc-rsp handoff assigns the short (long-source, status 0).
     let mut rsp = [0u8; 25];
@@ -1460,6 +1474,20 @@ fn node_desc_rsp_rebuilds_advance_auxctr() {
             protocol_version: 2,
         })
         .unwrap();
+    // Doubled: N-sighting gate needs >=2 rows (Phase 4 election
+    // hardening).
+    joiner
+        .ingest_beacon(rounddance_commission::BeaconSurveyEntry {
+            pan_id: 0xC601,
+            channel: 15,
+            lqi: 200,
+            rssi: -40,
+            permit_joining: true,
+            router_capacity: true,
+            end_device_capacity: true,
+            protocol_version: 2,
+        })
+        .unwrap();
     assert_eq!(joiner.finish_scan(&mut log), Some(0xC601));
     let mut rsp = [0u8; 25];
     rsp[..5].copy_from_slice(&[0x63, 0xcc, 0x02, 0x01, 0xc6]);
@@ -1540,6 +1568,20 @@ fn joiner_aux_resume_skips_rewind() {
         let mut log = app::NullLog;
         let mut joiner = app::JoinerApp::new(&DEF).unwrap();
         joiner.begin_scan(&mut log).unwrap();
+        joiner
+            .ingest_beacon(rounddance_commission::BeaconSurveyEntry {
+                pan_id: 0xC601,
+                channel: 15,
+                lqi: 200,
+                rssi: -40,
+                permit_joining: true,
+                router_capacity: true,
+                end_device_capacity: true,
+                protocol_version: 2,
+            })
+            .unwrap();
+        // Doubled: N-sighting gate needs >=2 rows (Phase 4 election
+        // hardening).
         joiner
             .ingest_beacon(rounddance_commission::BeaconSurveyEntry {
                 pan_id: 0xC601,

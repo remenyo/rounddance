@@ -21,6 +21,17 @@
 /// suitability inputs).
 pub const MAX_SURVEY_ENTRIES: usize = 16;
 
+/// Minimum acceptable sightings of one PAN within a single scan
+/// window for it to be electable (Phase 4 election hardening). A
+/// lone phantom row — one FCS-passing decode with no corroborating
+/// beacons (observed w109: a single C601 row elected ahead of the
+/// real, repeatedly-heard network, sending the joiner associating
+/// into the void) — can never win. Any live network qualifies in
+/// its first window: beacons arrive ~1/s on their own and the
+/// joiner solicits answers continuously while unassociated, so a
+/// 4 s window always holds several rows for a real neighbour.
+pub const MIN_ELECTION_SIGHTINGS: usize = 2;
+
 /// One heard beacon: the discovery-table row the application judges.
 ///
 /// Requirement `05-3474-23-3613-01` (beacon processing feeds
@@ -363,7 +374,10 @@ impl SteeringMachine {
     /// Close the scan: rank acceptable rows by link quality (highest
     /// first, ties broken by lower PAN) and select the winner; with no
     /// acceptable row the machine parks in `NoSuitableNetwork` (the
-    /// application may rescan with different channels).
+    /// application may rescan with different channels). A PAN is
+    /// eligible only with at least [`MIN_ELECTION_SIGHTINGS`]
+    /// acceptable rows in this window (N-sighting confirmation:
+    /// single-phantom rows never elect).
     pub fn finish_scan<P: SteeringPolicy>(&mut self, policy: &P) {
         if self.state != SteeringState::Scanning {
             return;
@@ -371,6 +385,14 @@ impl SteeringMachine {
         let mut best: Option<BeaconSurveyEntry> = None;
         for entry in self.survey.iter() {
             if !policy.acceptable(entry) {
+                continue;
+            }
+            let sightings = self
+                .survey
+                .iter()
+                .filter(|e| policy.acceptable(e) && e.pan_id == entry.pan_id)
+                .count();
+            if sightings < MIN_ELECTION_SIGHTINGS {
                 continue;
             }
             let wins = match best {
