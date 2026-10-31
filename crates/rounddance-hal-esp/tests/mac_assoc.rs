@@ -50,11 +50,12 @@ fn ota_beacon() -> [u8; 26] {
     b
 }
 
-fn ota_assoc_rsp() -> [u8; 19] {
-    let mut b = [0u8; 19];
-    b[..5].copy_from_slice(&[0x63, 0x8c, 0x02, 0x01, 0xc6]);
+fn ota_assoc_rsp() -> [u8; 25] {
+    let mut b = [0u8; 25];
+    b[..5].copy_from_slice(&[0x63, 0xcc, 0x02, 0x01, 0xc6]);
     b[5..13].copy_from_slice(&JOINER_EUI);
-    b[13..19].copy_from_slice(&[0x00, 0x00, 0x02, 0x01, 0x00, 0x00]);
+    b[13..21].copy_from_slice(&app::TC_EUI);
+    b[21..25].copy_from_slice(&[0x02, 0x01, 0x00, 0x00]);
     b
 }
 
@@ -87,11 +88,19 @@ fn builders_match_ota_pins() {
     );
     assert_eq!(&out[..26], &ota_beacon());
     assert_eq!(
-        mac_cmd::build_assoc_rsp(0x02, PAN, &JOINER_EUI, COORD, JOINER_SHORT, 0x00, &mut out)
-            .unwrap(),
-        19
+        mac_cmd::build_assoc_rsp(
+            0x02,
+            PAN,
+            &JOINER_EUI,
+            &app::TC_EUI,
+            JOINER_SHORT,
+            0x00,
+            &mut out
+        )
+        .unwrap(),
+        25
     );
-    assert_eq!(&out[..19], &ota_assoc_rsp());
+    assert_eq!(&out[..25], &ota_assoc_rsp());
 }
 
 #[test]
@@ -108,10 +117,16 @@ fn builders_reject_small_buffers() {
         &mut tiny
     )
     .is_err());
-    assert!(
-        mac_cmd::build_assoc_rsp(0x02, PAN, &JOINER_EUI, COORD, JOINER_SHORT, 0x00, &mut tiny)
-            .is_err()
-    );
+    assert!(mac_cmd::build_assoc_rsp(
+        0x02,
+        PAN,
+        &JOINER_EUI,
+        &app::TC_EUI,
+        JOINER_SHORT,
+        0x00,
+        &mut tiny
+    )
+    .is_err());
 }
 
 #[test]
@@ -151,7 +166,7 @@ fn parsers_round_trip_ota_vectors() {
     let rsp = mac_cmd::parse_assoc_rsp(&ota_assoc_rsp()).expect("assoc-rsp parses");
     assert_eq!(rsp.seq, 0x02);
     assert_eq!(rsp.dst_eui, JOINER_EUI);
-    assert_eq!(rsp.src_short, COORD);
+    assert_eq!(rsp.src_eui, app::TC_EUI);
     assert_eq!(rsp.short, JOINER_SHORT);
     assert_eq!(rsp.status, 0x00);
     assert_eq!(MAC_ASSOC_RSP, 0x02);
@@ -171,7 +186,7 @@ fn parsers_reject_malformed_without_panic() {
     // Truncated tails.
     assert!(mac_cmd::parse_beacon_req(&ota_beacon_req()[..7]).is_none());
     assert!(mac_cmd::parse_assoc_req(&ota_assoc_req()[..18]).is_none());
-    assert!(mac_cmd::parse_assoc_rsp(&ota_assoc_rsp()[..18]).is_none());
+    assert!(mac_cmd::parse_assoc_rsp(&ota_assoc_rsp()[..24]).is_none());
     assert!(mac_cmd::parse_beacon(&ota_beacon()[..11]).is_none());
     // Wrong command id in an otherwise valid shape.
     let mut bad = ota_assoc_req();
@@ -209,7 +224,7 @@ fn parsers_reject_malformed_without_panic() {
 #[test]
 fn coordinator_answers_beacon_req_while_serving() {
     let mut coord = CoordAssoc::new();
-    coord.provision(PAN, COORD);
+    coord.provision(PAN, COORD, &app::TC_EUI);
     let mut out = [0u8; 32];
     // Nothing pending: idle, no bytes radiated.
     assert_eq!(coord.take_beacon(0x01, &EXT_PAN, &mut out).unwrap(), 0);
@@ -226,7 +241,7 @@ fn coordinator_answers_beacon_req_while_serving() {
 #[test]
 fn coordinator_assoc_needs_permit_and_allow_list() {
     let mut coord = CoordAssoc::new();
-    coord.provision(PAN, COORD);
+    coord.provision(PAN, COORD, &app::TC_EUI);
     let areq = mac_cmd::parse_assoc_req(&ota_assoc_req()).unwrap();
     let mut out = [0u8; 32];
     // Closed window: no latch, no pending, no response bytes.
@@ -255,9 +270,9 @@ fn coordinator_assoc_needs_permit_and_allow_list() {
         coord
             .take_assoc_rsp(0x02, JOINER_SHORT, 0x00, &mut out)
             .unwrap(),
-        19
+        25
     );
-    assert_eq!(&out[..19], &ota_assoc_rsp());
+    assert_eq!(&out[..25], &ota_assoc_rsp());
     assert!(!coord.assoc_pending(), "one response per request");
     // Long poll from the latched EUI re-arms the response (fetch edge).
     let poll = mac_cmd::parse_data_poll_long(&ota_poll_long()).unwrap();
@@ -277,7 +292,7 @@ fn coordinator_assoc_needs_permit_and_allow_list() {
 #[test]
 fn coordinator_ignores_foreign_pan_assoc() {
     let mut coord = CoordAssoc::new();
-    coord.provision(PAN, COORD);
+    coord.provision(PAN, COORD, &app::TC_EUI);
     coord.set_permit(true);
     coord.allow(JOINER_EUI).unwrap();
     let mut foreign_pan = ota_assoc_req();
@@ -356,4 +371,32 @@ fn adapter_routes_command_frames_to_mac_queue_closed_gap() {
 struct NullLog;
 impl app::SerialLog for NullLog {
     fn log(&mut self, _line: &str) {}
+}
+
+/// w93 MG21 reference (live Ember NCP, ch20): the wire-proven
+/// association-response shape — `FC 63 cc` (both addrs long),
+/// coordinator EUI as source. The old short-source `... 8c` layout
+/// never appears on air from a real NCP; MG24 accepts this form and
+/// joins (NETWORK_UP, short 0xC5C1). Captured verbatim in
+/// `~/hwscratch/w93/sniff_mg21ref.txt` (footer stripped).
+#[test]
+fn parse_mg21_reference_assoc_rsp_long_source() {
+    let raw = "63cc9d61376d4911feff138d345f75f4feffe5e30402c1c500";
+    let psdu: Vec<u8> = (0..raw.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&raw[i..i + 2], 16).unwrap())
+        .collect();
+    assert_eq!(psdu.len(), 25);
+    let rsp = mac_cmd::parse_assoc_rsp(&psdu).expect("MG21 RSP parses");
+    assert_eq!(rsp.seq, 0x9d);
+    assert_eq!(
+        rsp.dst_eui,
+        [0x6d, 0x49, 0x11, 0xfe, 0xff, 0x13, 0x8d, 0x34]
+    );
+    assert_eq!(
+        rsp.src_eui,
+        [0x5f, 0x75, 0xf4, 0xfe, 0xff, 0xe5, 0xe3, 0x04]
+    );
+    assert_eq!(rsp.short, 0xc5c1);
+    assert_eq!(rsp.status, 0x00);
 }

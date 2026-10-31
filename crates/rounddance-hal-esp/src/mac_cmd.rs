@@ -97,7 +97,7 @@ pub const DATA_POLL_SHORT_LEN: usize = 10;
 /// Beacon PSDU length (superframe + GTS + pending + 15 B payload).
 pub const BEACON_LEN: usize = 26;
 /// Association-response PSDU length (assigned short + status).
-pub const ASSOC_RSP_LEN: usize = 19;
+pub const ASSOC_RSP_LEN: usize = 25;
 /// Beacon network-payload length (marker + stack + caps + ext PAN +
 /// offsets + update id).
 pub const BEACON_PAYLOAD_LEN: usize = 15;
@@ -225,8 +225,9 @@ pub struct AssocRsp {
     pub seq: u8,
     /// Destination joiner long address.
     pub dst_eui: [u8; 8],
-    /// Responding coordinator short.
-    pub src_short: u16,
+    /// Responding coordinator long address (long-source form, as real
+    /// NCPs emit; see [`build_assoc_rsp`]).
+    pub src_eui: [u8; 8],
     /// Assigned short (`0xFFFF` = denied at this layer by status).
     pub short: u16,
     /// Association status (`0x00` = success).
@@ -538,8 +539,13 @@ pub fn beacon_payload_is_ours(payload: &[u8], ext_pan: &[u8; 8]) -> bool {
 
 /// Build an association-response PSDU into `out` (19 B).
 ///
-/// Layout: `FC 63 8c | seq | dst pan | dst eui | src short |
-/// cmd 0x02 | short LE | status`. Denied requests get no response at
+/// Layout: `FC 63 cc | seq | dst pan | dst eui | src eui |
+/// cmd 0x02 | short LE | status`. Source is the coordinator LONG
+/// address: real Ember NCPs answer with `FC ... cc` (both addrs
+/// long); a short-source `... 8c` response is received but rejected
+/// post-association (w93 MG21 reference capture:
+/// `63 cc 4b 61 37 <dstEUI> <srcEUI> 02 <short> 00`).
+/// Denied requests get no response at
 /// all (scratch `ASSOC-DENY` leg); `status` is the success value the
 /// application authorized.
 ///
@@ -552,7 +558,7 @@ pub fn build_assoc_rsp(
     seq: u8,
     dst_pan: u16,
     dst_eui: &[u8; 8],
-    src_short: u16,
+    src_eui: &[u8; 8],
     short: u16,
     status: u8,
     out: &mut [u8],
@@ -561,14 +567,14 @@ pub fn build_assoc_rsp(
         return Err(MacCmdError::BufferTooSmall);
     }
     out[0] = 0x63;
-    out[1] = 0x8c;
+    out[1] = 0xcc;
     out[2] = seq;
     out[3..5].copy_from_slice(&dst_pan.to_le_bytes());
     out[5..13].copy_from_slice(dst_eui);
-    out[13..15].copy_from_slice(&src_short.to_le_bytes());
-    out[15] = MAC_ASSOC_RSP;
-    out[16..18].copy_from_slice(&short.to_le_bytes());
-    out[18] = status;
+    out[13..21].copy_from_slice(src_eui);
+    out[21] = MAC_ASSOC_RSP;
+    out[22..24].copy_from_slice(&short.to_le_bytes());
+    out[24] = status;
     Ok(ASSOC_RSP_LEN)
 }
 
@@ -578,20 +584,22 @@ pub fn parse_assoc_rsp(psdu: &[u8]) -> Option<AssocRsp> {
     if psdu.len() != ASSOC_RSP_LEN {
         return None;
     }
-    if psdu[0] != 0x63 || psdu[1] != 0x8c {
+    if psdu[0] != 0x63 || psdu[1] != 0xcc {
         return None;
     }
-    if psdu[15] != MAC_ASSOC_RSP {
+    if psdu[21] != MAC_ASSOC_RSP {
         return None;
     }
     let mut dst_eui = [0u8; 8];
     dst_eui.copy_from_slice(&psdu[5..13]);
+    let mut src_eui = [0u8; 8];
+    src_eui.copy_from_slice(&psdu[13..21]);
     Some(AssocRsp {
         seq: psdu[2],
         dst_eui,
-        src_short: u16::from_le_bytes([psdu[13], psdu[14]]),
-        short: u16::from_le_bytes([psdu[16], psdu[17]]),
-        status: psdu[18],
+        src_eui,
+        short: u16::from_le_bytes([psdu[22], psdu[23]]),
+        status: psdu[24],
     })
 }
 
@@ -632,6 +640,7 @@ pub fn classify(psdu: &[u8]) -> Incoming {
 pub struct CoordAssoc {
     pan: u16,
     short: u16,
+    coord_eui: [u8; 8],
     permit: bool,
     allowed: [Option<[u8; 8]>; MAX_ALLOW],
     pending_beacon: u32,
@@ -646,6 +655,7 @@ impl CoordAssoc {
         Self {
             pan: 0xFFFF,
             short: 0xFFFF,
+            coord_eui: [0u8; 8],
             permit: false,
             allowed: [None; MAX_ALLOW],
             pending_beacon: 0,
@@ -654,10 +664,12 @@ impl CoordAssoc {
         }
     }
 
-    /// Provision our PAN + short (destination match for requests).
-    pub fn provision(&mut self, pan: u16, short: u16) {
+    /// Provision our PAN + short + coordinator EUI (destination match
+    /// for requests, long source for responses).
+    pub fn provision(&mut self, pan: u16, short: u16, eui: &[u8; 8]) {
         self.pan = pan;
         self.short = short;
+        self.coord_eui = *eui;
     }
 
     /// Open (`true`) or close the permit window.
@@ -813,7 +825,7 @@ impl CoordAssoc {
             self.pending_assoc = false;
             return Ok(0);
         };
-        build_assoc_rsp(seq, self.pan, &eui, self.short, short, status, out)?;
+        build_assoc_rsp(seq, self.pan, &eui, &self.coord_eui, short, status, out)?;
         self.pending_assoc = false;
         Ok(ASSOC_RSP_LEN)
     }

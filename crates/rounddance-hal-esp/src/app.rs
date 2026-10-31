@@ -271,7 +271,7 @@ impl CoordinatorApp {
     #[must_use]
     pub fn new() -> Self {
         let mut assoc = CoordAssoc::new();
-        assoc.provision(APP_PAN, COORD_SHORT);
+        assoc.provision(APP_PAN, COORD_SHORT, &TC_EUI);
         Self {
             machine: CoordinatorMachine::new(AgingPolicy::default()),
             tc: TrustCenter::new(),

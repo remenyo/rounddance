@@ -120,15 +120,15 @@ fn app_permit_allow_wiring_drives_assoc_answers() {
     // Closed window: no answer.
     app.on_mac_psdu(&assoc);
     assert_eq!(app.take_assoc_rsp(&mut out).unwrap(), 0);
-    // Open + admit: exact 19-octet assoc-rsp, command 0x02.
+    // Open + admit: exact 25-octet assoc-rsp, command 0x02.
     app.open_permit(&mut log, 600_000).unwrap();
     app.admit_joiner(&mut log, 0).unwrap();
     app.on_mac_psdu(&assoc);
     let n = app.take_assoc_rsp(&mut out).unwrap();
-    assert_eq!(n, 19);
-    assert_eq!(out[15], MAC_ASSOC_RSP);
-    assert_eq!(u16::from_le_bytes([out[16], out[17]]), app::JOINER_SHORT);
-    assert_eq!(out[18], 0x00);
+    assert_eq!(n, 25);
+    assert_eq!(out[21], MAC_ASSOC_RSP);
+    assert_eq!(u16::from_le_bytes([out[22], out[23]]), app::JOINER_SHORT);
+    assert_eq!(out[24], 0x00);
     // Foreign EUI: denied (no pending answer latched).
     let mut foreign = assoc;
     foreign[9..17].copy_from_slice(&[0xde, 0xad, 0xbe, 0xef, 0x00, 0x11, 0x22, 0x33]);
@@ -187,19 +187,19 @@ fn coord_assoc_still_gates_permit_allow_deny_directly() {
     assert!(!assoc.permit());
     assert!(!assoc.on_assoc_req(&req));
     // Provision identity, open permit, no allow: still denied.
-    assoc.provision(PAN, COORD);
+    assoc.provision(PAN, COORD, &TC_EUI);
     assoc.set_permit(true);
     assert!(!assoc.on_assoc_req(&req));
     assert_eq!(
         assoc.take_assoc_rsp(0x02, 0x0001, 0x00, &mut out).unwrap(),
         0
     );
-    // Allow the joiner: exact 19-octet answer, command 0x02.
+    // Allow the joiner: exact 25-octet answer, command 0x02.
     assoc.allow(JOINER_EUI).unwrap();
     assert!(assoc.on_assoc_req(&req));
     let n = assoc.take_assoc_rsp(0x02, 0x0001, 0x00, &mut out).unwrap();
-    assert_eq!(n, 19);
-    assert_eq!(out[15], MAC_ASSOC_RSP);
+    assert_eq!(n, 25);
+    assert_eq!(out[21], MAC_ASSOC_RSP);
     // Beacon leg stays independent of assoc state.
     assert_eq!(assoc.take_beacon(0x5a, &EXT_PAN, &mut out).unwrap(), 0);
 }
@@ -230,9 +230,9 @@ fn admit_extra_answers_air_order_mg24_assoc_req() {
         .unwrap();
     app.on_mac_psdu(&air);
     let n = app.take_assoc_rsp(&mut out).unwrap();
-    assert_eq!(n, 19);
-    assert_eq!(out[15], MAC_ASSOC_RSP);
-    assert_eq!(u16::from_le_bytes([out[16], out[17]]), app::MG24_SHORT);
+    assert_eq!(n, 25);
+    assert_eq!(out[21], MAC_ASSOC_RSP);
+    assert_eq!(u16::from_le_bytes([out[22], out[23]]), app::MG24_SHORT);
     // A never-admitted EUI stays silent in both orientations.
     let mut app2 = formed_app();
     let mut foreign = air;
@@ -293,16 +293,16 @@ fn short_poll_rearms_assoc_answer_through_adapter() {
     app.open_permit(&mut log, 600_000).unwrap();
     app.admit_joiner(&mut log, 0).unwrap();
     app.on_mac_psdu(&ota_assoc_req());
-    assert_eq!(app.take_assoc_rsp(&mut out).unwrap(), 19);
+    assert_eq!(app.take_assoc_rsp(&mut out).unwrap(), 25);
     assert!(!app.assoc_pending());
     app.on_mac_psdu(&air);
     assert!(app.assoc_pending(), "short poll re-arms");
     let n = app.take_assoc_rsp(&mut out).unwrap();
-    assert_eq!(n, 19);
-    assert_eq!(u16::from_le_bytes([out[16], out[17]]), app::JOINER_SHORT);
+    assert_eq!(n, 25);
+    assert_eq!(u16::from_le_bytes([out[22], out[23]]), app::JOINER_SHORT);
     // Unknown short re-arms nothing.
     app.on_mac_psdu(&ota_assoc_req());
-    assert_eq!(app.take_assoc_rsp(&mut out).unwrap(), 19);
+    assert_eq!(app.take_assoc_rsp(&mut out).unwrap(), 25);
     let mut stranger = air;
     stranger[7..9].copy_from_slice(&0x00feu16.to_le_bytes());
     app.on_mac_psdu(&stranger);
@@ -354,13 +354,13 @@ fn rearm_assoc_repends_after_consumed_take() {
     app.on_mac_psdu(&ota_assoc_req());
     assert!(app.assoc_pending());
     let mut out = [0u8; 32];
-    assert_eq!(app.take_assoc_rsp(&mut out).unwrap(), 19);
+    assert_eq!(app.take_assoc_rsp(&mut out).unwrap(), 25);
     assert!(!app.assoc_pending());
     // TX loss: re-arm re-pends the same answer.
     app.rearm_assoc();
     assert!(app.assoc_pending());
     let n = app.take_assoc_rsp(&mut out).unwrap();
-    assert_eq!(n, 19);
-    assert_eq!(out[15], MAC_ASSOC_RSP);
+    assert_eq!(n, 25);
+    assert_eq!(out[21], MAC_ASSOC_RSP);
     assert!(!app.assoc_pending());
 }
