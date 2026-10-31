@@ -87,6 +87,11 @@ pub const EXT_PAN_ID: [u8; 8] = [0x43, 0x36, 0x4a, 0x4f, 0x49, 0x4e, 0x30, 0x31]
 /// proven `ff:fe` rule (matches `esptool read-mac` EUI
 /// `a0:f2:62:ff:fe:86:7f:68`).
 pub const TC_EUI: [u8; 8] = [0xa0, 0xf2, 0x62, 0xff, 0xfe, 0x86, 0x7f, 0x68];
+/// Coordinator long address on the air: LSB-first wire order (as the
+/// MG21 reference emits its aux source and assoc-rsp source). NCPs
+/// parse address fields in wire order; the display-order [`TC_EUI`]
+/// is only for logs and host-side matching.
+pub const TC_EUI_WIRE: [u8; 8] = [0x68, 0x7f, 0x86, 0xfe, 0xff, 0x62, 0xf2, 0xa0];
 /// Joiner long address: [`JOINER_BASE_MAC`] expanded the same way
 /// (`a0:f2:62:ff:fe:85:97:a4` on the air).
 pub const JOINER_EUI: [u8; 8] = [0xa0, 0xf2, 0x62, 0xff, 0xfe, 0x85, 0x97, 0xa4];
@@ -261,6 +266,13 @@ pub struct CoordinatorApp {
     /// Trust-Center key-transport owed (set on every accepted
     /// association; the NCP waits for the 0x05 frame after the RSP).
     transport_pending: bool,
+    /// Set once a transport frame has been built for the latched
+    /// joiner (cleared on every new association accept). Gates the
+    /// *unsolicited* short-poll re-arm: after the joiner moved past
+    /// association, stray polls must not re-pend stale answers.
+    /// Explicit TX-loss recovery (`rearm_assoc`, `rearm_transport`)
+    /// is unaffected by this flag.
+    transport_sent: bool,
     /// Auxiliary frame counter for transport delivery (strictly
     /// monotonic per network key; starts at the lab base).
     transport_auxctr: u32,
@@ -278,7 +290,7 @@ impl CoordinatorApp {
     #[must_use]
     pub fn new() -> Self {
         let mut assoc = CoordAssoc::new();
-        assoc.provision(APP_PAN, COORD_SHORT, &TC_EUI);
+        assoc.provision(APP_PAN, COORD_SHORT, &TC_EUI_WIRE);
         Self {
             machine: CoordinatorMachine::new(AgingPolicy::default()),
             tc: TrustCenter::new(),
@@ -288,6 +300,7 @@ impl CoordinatorApp {
             nwk_seq: 0,
             aps_counter: 0,
             transport_pending: false,
+            transport_sent: false,
             transport_auxctr: TRANSPORT_AUX_BASE,
             tx_counter: FrameCounter::new(100, 4),
             rx_replay: ReplayTable::<8>::new(),
@@ -517,18 +530,26 @@ impl CoordinatorApp {
                 if self.assoc.on_assoc_req(req) {
                     // Latched: the Trust-Center key delivery is owed too
                     // (the NCP waits for the 0x05 frame after the RSP).
+                    // New cycle: a later transport no longer counts.
                     self.transport_pending = true;
+                    self.transport_sent = false;
                 }
             }
             MacIncoming::DataPoll(ref poll) => {
                 let _ = self.assoc.on_data_poll(poll);
             }
             MacIncoming::ShortPoll(ref poll) => {
-                if let Some(eui) = self.short_to_eui(poll.src_short) {
-                    let _ = self.assoc.on_data_poll(&DataPoll {
-                        seq: poll.seq,
-                        src_eui: eui,
-                    });
+                // No unsolicited re-arm once this latch moved past
+                // association (transport built): stray polls from a
+                // joined device must not re-pend stale answers. The
+                // explicit TX-loss path (`rearm_assoc`) is unaffected.
+                if !self.transport_sent {
+                    if let Some(eui) = self.short_to_eui(poll.src_short) {
+                        let _ = self.assoc.on_data_poll(&DataPoll {
+                            seq: poll.seq,
+                            src_eui: eui,
+                        });
+                    }
                 }
             }
             MacIncoming::Other => {}
@@ -667,18 +688,15 @@ impl CoordinatorApp {
             .find(|(a, _)| eui_matches(a, &eui))
             .map(|(_, s)| *s)
             .unwrap_or(JOINER_SHORT);
-        // Source EUI goes on air LSB-first (wire order), like every
-        // other EUI field the NCP parses (w93: MG21's aux source is
-        // the LE bytes of its EUI); the TC_EUI const is display
-        // order, so reverse it here.
-        let mut src_wire = TC_EUI;
-        src_wire.reverse();
+        // Source EUI rides LSB-first (wire order, `TC_EUI_WIRE`),
+        // like every other address field the NCP parses (w93: MG21's
+        // aux source is the LE bytes of its EUI).
         let auxctr = self.transport_auxctr;
         let params = TransportKeyParams {
             dst_pan: APP_PAN,
             dst_short: short,
             dst_eui: eui,
-            src_eui: src_wire,
+            src_eui: TC_EUI_WIRE,
             mac_seq: self.take_mac_seq(),
             nwk_seq: self.take_nwk_seq(),
             nwk_radius: 0x1e,
@@ -691,6 +709,7 @@ impl CoordinatorApp {
         match build_transport_key_frame(&params, out) {
             Ok(n) => {
                 self.transport_pending = false;
+                self.transport_sent = true;
                 self.transport_auxctr = auxctr.wrapping_add(1);
                 Ok(n)
             }

@@ -233,6 +233,8 @@ fn admit_extra_answers_air_order_mg24_assoc_req() {
     assert_eq!(n, 25);
     assert_eq!(out[21], MAC_ASSOC_RSP);
     assert_eq!(u16::from_le_bytes([out[22], out[23]]), app::MG24_SHORT);
+    // Source is the wire-order coordinator EUI (MG21 parity).
+    assert_eq!(&out[13..21], &app::TC_EUI_WIRE);
     // A never-admitted EUI stays silent in both orientations.
     let mut app2 = formed_app();
     let mut foreign = air;
@@ -456,4 +458,64 @@ fn transport_key_builds_and_opens_with_ha_key() {
     // TX loss re-pends (mirror of the assoc re-arm).
     app.rearm_transport();
     assert!(app.transport_pending());
+}
+
+/// Short-poll gating (w96 residue): once the transport frame has been
+/// built for the latched joiner, stray polls no longer re-pend stale
+/// answers; a fresh association re-opens the cycle. Explicit TX-loss
+/// re-arm stays unconditional.
+#[test]
+fn short_poll_gated_after_transport_sent() {
+    use rounddance_commission::{ha_transport_key, TRANSPORT_FRAME_LEN};
+
+    const TEST_NETKEY: [u8; 16] = [
+        0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e,
+        0x1f,
+    ];
+    let tkey = ha_transport_key().unwrap();
+    let mut app = formed_app();
+    let mut log = app::NullLog;
+    app.open_permit(&mut log, 600_000).unwrap();
+    app.admit_joiner(&mut log, 0).unwrap();
+    app.on_mac_psdu(&ota_assoc_req());
+    assert!(app.assoc_pending());
+    // Pre-transport polls still re-arm (join flow intact).
+    app.on_mac_psdu(&ota_assoc_req());
+    let mut out = [0u8; 128];
+    assert_eq!(app.take_assoc_rsp(&mut out).unwrap(), 25);
+    let air = build_short_poll(app::JOINER_SHORT, 0x05);
+    app.on_mac_psdu(&air);
+    assert!(app.assoc_pending(), "pre-transport poll re-arms");
+    assert_eq!(app.take_assoc_rsp(&mut out).unwrap(), 25);
+    // Build the transport: the joiner moved past association.
+    let n = app
+        .take_transport_key(&mut out, &TEST_NETKEY, &tkey)
+        .unwrap();
+    assert_eq!(n, TRANSPORT_FRAME_LEN);
+    assert!(!app.transport_pending());
+    // Stray polls no longer re-pend anything...
+    app.on_mac_psdu(&air);
+    assert!(!app.assoc_pending());
+    assert!(!app.transport_pending());
+    // ...but explicit TX-loss re-arm still works...
+    app.rearm_assoc();
+    assert!(app.assoc_pending());
+    app.rearm_transport();
+    assert!(app.transport_pending());
+    // ...and a fresh association re-opens the whole cycle.
+    app.on_mac_psdu(&ota_assoc_req());
+    let mut out2 = [0u8; 32];
+    assert_eq!(app.take_assoc_rsp(&mut out2).unwrap(), 25);
+    let n2 = app
+        .take_transport_key(&mut out, &TEST_NETKEY, &tkey)
+        .unwrap();
+    assert_eq!(n2, TRANSPORT_FRAME_LEN);
+}
+
+/// 10-octet short data-request poll via the codec under test.
+fn build_short_poll(src_short: u16, seq: u8) -> [u8; 10] {
+    use rounddance_hal_esp::mac_cmd::build_data_poll_short;
+    let mut b = [0u8; 10];
+    build_data_poll_short(seq, PAN, COORD, src_short, &mut b).unwrap();
+    b
 }
