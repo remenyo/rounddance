@@ -216,6 +216,21 @@ Status: OPEN (re-scoped 2026-10-31: MG21 DOES admit strangers — C6 silence iso
   zero sniffer corroboration across 925 beacons; one byte-exact
   7F68-shaped beacon logged at -35; undetermined transient-vs-log
   artifact; election-hardening parked). Evidence ~/hwscratch/w111/.
+- W112 long-lived-TC attempt: fresh MG21 TC (NETWORK_UP in-session,
+  permit broadcast, beacon-verified permit-open) HELD 2+ hours and
+  counting (reproducibly alive across every passive check; the w111
+  instant deaths track ATTACH events, not time - attach-kills-TC is
+  now the standing mechanism, 3rd datapoint: pre-attach beacons,
+  EMPTY read at attach+1.4 s, zero beacons after). On this healthy
+  TC, minutes apart: MG24 assoc ACKed AND answered (63cc RSP,
+  then NO_NETWORK_KEY_RECEIVED - transport still never completes on
+  any MG21 TC since w108) vs C6 single-shot assoc x3 (one per boot,
+  ACKed) -> ZERO RSPs (5th campaign). C6-specific assoc silence now
+  spans 3 TC generations with NCP answers interleaved on the same
+  TCs; wire bytes identical except EUI+seq. NEXT: cross-family NCP
+  TC (CC2652/nRF) to test OUI-keying; NCP-side assoc trace if the
+  mapping ever opens; election-hardening parked separately.
+  Evidence ~/hwscratch/w112/.
 - Discriminator parked: whether ANY stranger gets an answer (MG24 NCP
   canonical-shape control) is blocked — MG24 locally refuses joinNetwork
   instantly (0.2 s NOT_JOINED, zero air frames) after a baud-mismatched
