@@ -113,7 +113,7 @@ Status: QUARANTINED 2026-10-31 (stick-level verdict — join itself is proven; p
   air proof, retry fw, reflash prep).
 
 ### B-008 (2026-10-31): coordinator fw crash — ESP-IDF 15.4 driver assert
-Status: OPEN (new; blocks multi-join air proofs).
+Status: CLOSED 2026-10-31 (fix air-proven; mechanism root-caused in IDF source + our hook).
 - Symptom (4× in b007, zero in all prior waves): `assert failed:
   isr_handle_tx_abort esp_ieee802154_dev.c:711
   (s_ieee802154_state == IEEE802154_STATE_RX_ACK)` → `rst:0xc
@@ -133,3 +133,12 @@ Status: OPEN (new; blocks multi-join air proofs).
   void for the replay fix for exactly this reason).
 - Evidence: ~/hwscratch/b007/coord3.log (4 assert+dump+`rst:0xc`+reboot
   cycles at lines ~70/124, ~434/488, ~1127/1239, ~1482/1594).
+
+
+- CLOSED b008: our `transmit_done` hook never released the driver ACK
+  buffer (header-mandated `receive_handle_done`), leaking one RX slot
+  per ACKed TX into the abort path that asserted. One-line ISR fix;
+  air proof: 2 joins same boot + 10-min beacon soak, zero asserts
+  (was 4/4), auxctr chain 0x1000→0x1004 proves one boot. The same
+  run air-proved the replay fix (join-2 Annce classifies).
+  Evidence ~/hwscratch/b008/.
