@@ -103,8 +103,13 @@ fn main() {
     app.begin_formation(&mut log).expect("formation");
     app.formation_done(&mut log, true);
     // Bounded permit window; the MAC responder permit + allow-list are
-    // wired inside the app (`open_permit` / `admit_joiner`).
+    // wired inside the app (`open_permit` / `admit_joiner` + rung-3
+    // MG24 `admit_extra` so the NCP-side joiner's assoc-req is
+    // answered instead of denied).
     app.open_permit(&mut log, 600_000).expect("permit");
+    app.admit_joiner(&mut log, 0).expect("admit 97A4");
+    app.admit_extra(&mut log, [0x34, 0x8d, 0x13, 0xff, 0xfe, 0x11, 0x49, 0x6d], 0x0002)
+        .expect("admit MG24");
 
     let start = Instant::now();
     let mut last_grat_ms: u64 = 0;
