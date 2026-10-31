@@ -34,10 +34,11 @@
 //!
 //! # How the radio paths carry these
 //!
-//! * ESP: board code enables promiscuous on the coordinator
-//!   (broadcast beacon-requests never pass the hardware filter —
-//!   scratch `main.rs` stays promiscuous on the coordinator for
-//!   exactly this reason), feeds received PSDUs from
+//! * ESP: board code runs the coordinator ADDRESSED (filtering ON,
+//!   programmed PAN + short 0x0000): broadcast beacon-requests pass
+//!   the hardware filter, unicast association requests pass with
+//!   hardware auto-ACK (promiscuous would suppress HW ACK and break
+//!   association — w92 air proof). Received PSDUs flow from
 //!   [`EspAdapter`](crate::adapter::EspAdapter) `poll_mac_indication`
 //!   to [`classify`]/[`CoordAssoc`], and radiates answers plus
 //!   gratuitous beacons via `transmit_mac` (single-flight through the

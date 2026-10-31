@@ -90,9 +90,12 @@ fn main() {
     // asserted, not assumed.
     let ch = Channel::new(APP_CHANNEL).expect("app channel 11-26");
     adapter.set_channel(ch).expect("tune ch15");
-    // Coordinator RX must be promiscuous: broadcast beacon-requests
-    // never pass the hardware filter.
-    adapter.set_promiscuous(true).expect("promiscuous");
+    // Addressed receive (filtering ON, as programmed above): broadcast
+    // beacon-requests pass the hardware filter (broadcast dst), and
+    // unicast association requests to our short pass too — with
+    // hardware auto-ACK. Promiscuous mode must stay OFF: it disables
+    // HW ACK, and unacked assoc-reqs make the joiner retry-then-fail
+    // (w92 air proof: 8 unacked `23 c8` retries, zero ACKs).
 
     // Formation conflict-check: ED scan first, then mark formed.
     match adapter.energy_scan(ch) {

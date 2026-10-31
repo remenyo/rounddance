@@ -308,3 +308,32 @@ fn short_poll_rearms_assoc_answer_through_adapter() {
     app.on_mac_psdu(&stranger);
     assert!(!app.assoc_pending());
 }
+
+/// Addressed-mode contract (w92 rung-3): the coordinator runs with
+/// hardware filtering ON (promiscuous OFF) and programmed PAN/short.
+/// Broadcast beacon-requests AND unicast association requests must
+/// both dispatch to the MAC queue with zero drops — filtering must
+/// not cost either RX path. (Promiscuous previously carried both,
+/// but suppresses HW auto-ACK, which broke association on air: 8
+/// unacked `23 c8` retries, zero ACKs in joinwin6. This test pins the
+/// dispatch half; the ACK half is proven on air post-fix.)
+#[test]
+fn addressed_mode_routes_broadcast_and_unicast() {
+    let mut a = EspAdapter::new(MockDriver::new());
+    a.set_pan_id(PAN);
+    a.set_short_addr(COORD);
+    a.init().unwrap();
+    // Filtering stays ON: the addressed-mode invariant.
+    assert_eq!(a.driver().promiscuous(), Some(false));
+    let bcn = ota_beacon_req();
+    let asc = ota_assoc_req();
+    a.driver_mut().inject_rx(&[
+        RxFrame::from_slice(&len2_frame(&bcn), 15, -40, 200).unwrap(),
+        RxFrame::from_slice(&len2_frame(&asc), 15, -35, 210).unwrap(),
+    ]);
+    let first = a.poll_mac_indication().expect("beacon-req routes");
+    assert_eq!(first.psdu(), &bcn);
+    let second = a.poll_mac_indication().expect("assoc-req routes");
+    assert_eq!(second.psdu(), &asc);
+    assert_eq!(a.rx_dropped(), 0);
+}
