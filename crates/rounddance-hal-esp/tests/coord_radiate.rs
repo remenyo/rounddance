@@ -627,3 +627,51 @@ fn transport_build_failure_keeps_pending_for_retry() {
     assert_eq!(n, TRANSPORT_FRAME_LEN);
     assert!(!app.transport_pending());
 }
+
+/// Phase 1 leg 1b (indirect queue): bounded per-short payload store —
+/// enqueue/has/take roundtrip, table-full + oversize refusals, take
+/// semantics (absent → Ok(0), short buffer keeps the entry),
+/// same-short replace without consuming a slot.
+#[test]
+fn indirect_queue_enqueue_take_table() {
+    use rounddance_hal_esp::mac_cmd::MacCmdError;
+    let mut app = formed_app();
+    assert!(!app.has_indirect(0x0002));
+    let mut out = [0u8; 96];
+    assert_eq!(app.indirect_take(0x0002, &mut out), Ok(0));
+    // Roundtrip.
+    app.indirect_enqueue(0x0002, &[0x01, 0x02, 0x03]).unwrap();
+    assert!(app.has_indirect(0x0002));
+    assert!(!app.has_indirect(0x0003));
+    assert_eq!(app.indirect_take(0x0002, &mut out), Ok(3));
+    assert_eq!(&out[..3], &[0x01, 0x02, 0x03]);
+    assert!(!app.has_indirect(0x0002));
+    // Oversize refused.
+    let big = [0xAAu8; 97];
+    assert_eq!(
+        app.indirect_enqueue(0x0002, &big),
+        Err(MacCmdError::BufferTooSmall)
+    );
+    assert!(!app.has_indirect(0x0002));
+    // Fill to capacity (4 slots).
+    for s in [0x0002u16, 0x0003, 0x0004, 0x0005] {
+        app.indirect_enqueue(s, &[0x09]).unwrap();
+    }
+    assert_eq!(
+        app.indirect_enqueue(0x0006, &[0x09]),
+        Err(MacCmdError::TableFull)
+    );
+    // Same-short replace: no new slot, payload updated.
+    app.indirect_enqueue(0x0002, &[0x07, 0x08]).unwrap();
+    assert_eq!(app.indirect_take(0x0002, &mut out), Ok(2));
+    assert_eq!(&out[..2], &[0x07, 0x08]);
+    // Short take buffer: refusal, entry retained.
+    let mut tiny = [0u8; 1];
+    app.indirect_enqueue(0x0002, &[0x0A, 0x0B]).unwrap();
+    assert_eq!(
+        app.indirect_take(0x0002, &mut tiny),
+        Err(MacCmdError::BufferTooSmall)
+    );
+    assert!(app.has_indirect(0x0002));
+    assert_eq!(app.indirect_take(0x0002, &mut out), Ok(2));
+}

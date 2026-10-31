@@ -66,6 +66,20 @@ pub const COORD_SHORT: u16 = 0x0000;
 pub const JOINER_SHORT: u16 = 0x0001;
 /// Short address placeholder before association.
 pub const UNASSOC_SHORT: u16 = 0xFFFF;
+/// Indirect-queue depth: at most this many shorts hold queued
+/// frames (Phase 1 leg 1b; leg 1c transmits them post-poll).
+pub const INDIRECT_DEPTH: usize = 4;
+/// Largest single indirect payload in octets (covers a NWK-secured
+/// ZDO frame with margin; full MAC PSDU assembly happens at TX).
+pub const INDIRECT_MAX: usize = 96;
+
+/// One queued indirect payload, keyed by destination short.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct IndirectSlot {
+    short: u16,
+    len: usize,
+    buf: [u8; INDIRECT_MAX],
+}
 /// Unit-MAC last octet selecting the coordinator role (low byte of
 /// [`COORD_BASE_MAC`]; kept for log/discipline continuity, NOT used
 /// for selection — selection compares the full base MAC).
@@ -276,6 +290,14 @@ pub struct CoordinatorApp {
     /// Auxiliary frame counter for transport delivery (strictly
     /// monotonic per network key; starts at the lab base).
     transport_auxctr: u32,
+    /// Bounded indirect-message queue (Phase 1 leg 1b): payloads held
+    /// per destination short until the device polls (leg 1c transmits
+    /// them). While a short holds an entry it stays OUT of the
+    /// hardware source-match table, so its Data-Request ACKs carry
+    /// frame-pending=1; shorts with no entry are programmed IN
+    /// (pending=0). Table programming itself lands with leg 1c's fw
+    /// wiring + air proof.
+    indirect: [Option<IndirectSlot>; INDIRECT_DEPTH],
     tx_counter: FrameCounter,
     rx_replay: ReplayTable<8>,
     toggle_tsn: u8,
@@ -302,6 +324,7 @@ impl CoordinatorApp {
             transport_pending: false,
             transport_sent: false,
             transport_auxctr: TRANSPORT_AUX_BASE,
+            indirect: [None; INDIRECT_DEPTH],
             tx_counter: FrameCounter::new(100, 4),
             rx_replay: ReplayTable::<8>::new(),
             toggle_tsn: ZCL_TSN,
@@ -715,6 +738,82 @@ impl CoordinatorApp {
             }
             Err(_) => Err(MacCmdError::BufferTooSmall),
         }
+    }
+
+    /// Whether `short` holds a queued indirect payload (Phase 1 leg
+    /// 1b). The fw poll handler uses this to program the hardware
+    /// source-match table: entries present → leave OUT (ACK
+    /// frame-pending=1, "data waiting"); absent → program IN
+    /// (pending=0, "nothing queued").
+    #[must_use]
+    pub fn has_indirect(&self, short: u16) -> bool {
+        self.indirect
+            .iter()
+            .flatten()
+            .any(|slot| slot.short == short)
+    }
+
+    /// Queue an indirect payload for `short` (overwrites any existing
+    /// entry for that short without consuming a new slot).
+    ///
+    /// # Errors
+    ///
+    /// [`MacCmdError::BufferTooSmall`] when the payload exceeds
+    /// [`INDIRECT_MAX`] octets; [`MacCmdError::TableFull`] when no
+    /// slot is free.
+    pub fn indirect_enqueue(&mut self, short: u16, payload: &[u8]) -> Result<(), MacCmdError> {
+        if payload.len() > INDIRECT_MAX {
+            return Err(MacCmdError::BufferTooSmall);
+        }
+        if let Some(slot) = self
+            .indirect
+            .iter_mut()
+            .flatten()
+            .find(|slot| slot.short == short)
+        {
+            slot.len = payload.len();
+            slot.buf[..payload.len()].copy_from_slice(payload);
+            return Ok(());
+        }
+        let Some(free) = self.indirect.iter_mut().find(|slot| slot.is_none()) else {
+            return Err(MacCmdError::TableFull);
+        };
+        let mut buf = [0u8; INDIRECT_MAX];
+        buf[..payload.len()].copy_from_slice(payload);
+        *free = Some(IndirectSlot {
+            short,
+            len: payload.len(),
+            buf,
+        });
+        Ok(())
+    }
+
+    /// Take (and free) the queued indirect payload for `short`,
+    /// copying it into `out`. Returns `Ok(0)` when no entry is
+    /// queued — the same idle convention as
+    /// [`take_assoc_rsp`](Self::take_assoc_rsp).
+    ///
+    /// # Errors
+    ///
+    /// [`MacCmdError::BufferTooSmall`] when `out` is shorter than the
+    /// queued payload (the entry is retained for retry with a bigger
+    /// buffer).
+    pub fn indirect_take(&mut self, short: u16, out: &mut [u8]) -> Result<usize, MacCmdError> {
+        let Some(pos) = self
+            .indirect
+            .iter()
+            .position(|slot| slot.is_some_and(|s| s.short == short))
+        else {
+            return Ok(0);
+        };
+        let slot = self.indirect[pos].expect("position names a live slot");
+        if out.len() < slot.len {
+            return Err(MacCmdError::BufferTooSmall);
+        }
+        out[..slot.len].copy_from_slice(&slot.buf[..slot.len]);
+        let n = slot.len;
+        self.indirect[pos] = None;
+        Ok(n)
     }
 
     /// Run the install-code key exchange for the admitted joiner.
