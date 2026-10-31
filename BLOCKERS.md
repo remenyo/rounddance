@@ -177,6 +177,24 @@ Status: OPEN (re-scoped 2026-10-31: MG21 DOES admit strangers — C6 silence iso
   `ffff` + EUI + `01 8c`; only PAN/EUI/seq differ) — leading
   hypothesis for the w102 C6 silence is now TC-state-at-the-time
   (that TC died detach-adjacent twice, documented). NEXT (ran w109 - still silent, 3rd campaign): 30 assocs on air to permit-open MG21 (first ACKed), ZERO RSPs on serial + sniffer (507 s capture). Fresh-TC control confounded (TC died detach-adjacent/spontaneously twice more - datapoints 4-5; bellows CLI flaky both ways, `form` silent-fail + `permit` NetworkNotFormed - new single-session direct-EZSP form+permit script pays both debts, NETWORK_UP confirmed in-session). New leading hypothesis: retry-storm suppression (MG24 answered on a SINGLE assoc in w108; our C6 retries every 2 s in all 3 silent campaigns - cheapest next: single-shot assoc one-off fw). ALSO NEW: phantom C601 election input - ch25 joiner twice elected/assoc'd 0xc601 with ZERO sniffer corroboration (925 beacons all MG21); one byte-exact 7F68-shaped beacon logged at -35 that never reached air per sniffer; cause UNDETERMINED (transient source vs log artifact); parked follow-up: election hardening (N-sighting confirmation before electing an unseen PAN). Evidence ~/hwscratch/w109/.
+- W110 single-shot test KILLS the storm hypothesis: one-off fw
+  (ASSOC_RETRIES_MAX 30->1, ch25) sends exactly ONE assoc per boot
+  (sniffer-confirmed, seq 00, ACKed) to a freshly-formed permit-open
+  MG21 — still ZERO RSPs (2 boots). Silence is not storm-caused.
+- W110 same-TC split (minutes apart, permit-open TC): C6 single
+  assoc ACKed, never answered; MG24 assoc ACKed AND answered with
+  63cc RSP — then MG24 fails at key transport
+  (ZIGBEE_NO_NETWORK_KEY_RECEIVED). Common factor: MG21 currently
+  never completes key transport for anyone (TC flaky/dying:
+  forms fine, dead within minutes even untouched — 6th datapoint;
+  w108's healthier TC completed it). C6-specific assoc silence now
+  isolated HARD (same TC answers MG24, ignores C6; frames identical
+  except EUI+seq) — but the EUI-difference mechanism is unknown
+  (byte excludable: no other frame bytes differ). NEXT: (a) MG24
+  retest vs a LONG-LIVED healthy MG21 TC to separate transport
+  flake from assoc policy; (b) NCP-side assoc trace if available;
+  (c) single-shot C6 vs reference NCP TC of a different family
+  (CC2652/nRF) to test OUI-keying. Evidence ~/hwscratch/w110/.
 - Discriminator parked: whether ANY stranger gets an answer (MG24 NCP
   canonical-shape control) is blocked — MG24 locally refuses joinNetwork
   instantly (0.2 s NOT_JOINED, zero air frames) after a baud-mismatched
