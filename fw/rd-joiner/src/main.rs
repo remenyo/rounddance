@@ -14,7 +14,9 @@
 
 use esp_idf_hal::gpio::PinDriver;
 use esp_idf_hal::peripherals::Peripherals;
-use rounddance_hal_esp::app::{eui_from_mac, log_air, role_from_mac, UNASSOC_SHORT};
+use rounddance_hal_esp::app::{
+    eui_from_mac, log_air, role_from_mac, JoinerNwkOutcome, UNASSOC_SHORT,
+};
 use rounddance_hal_esp::mac_cmd::Incoming as MacIncoming;
 use rounddance_hal_esp::{AppRole, EspAdapter, EspIdfDriver, JoinerApp, SerialLog};
 use rounddance_mac_sap::{Channel, MacDataSap, MacMgmtSap};
@@ -26,11 +28,6 @@ use std::time::Instant;
 const JOINER_SCAN_CHANNEL: u8 = 15;
 // Beacon-req / assoc-req retry cadence while unassociated.
 const REQ_INTERVAL_MS: u64 = 2_000;
-// Re-scan cadence while unelected: the first beacons may arrive
-// with permit closed (or park the table NoSuitableNetwork); without
-// this the joiner latches onto the first scan forever and ignores
-// later open beacons (w97 MG21 leg).
-const SCAN_RETRY_MS: u64 = 10_000;
 // Stop re-transmitting the assoc-req after this many tries (the
 // coordinator answers in one when healthy; silence past this bound
 // is evidence, not a reason to burn the band).
@@ -96,9 +93,7 @@ fn main() {
     let mut ext = eui;
     ext.reverse();
     adapter.set_extended_addr(u64::from_le_bytes(ext));
-    adapter
-        .set_tx_power(10)
-        .expect("standing +10 dBm cap");
+    adapter.set_tx_power(10).expect("standing +10 dBm cap");
     adapter.init().expect("radio init");
     let ch = Channel::new(JOINER_SCAN_CHANNEL).expect("scan channel 11-26");
     adapter.set_channel(ch).expect("tune scan channel");
@@ -107,10 +102,18 @@ fn main() {
         Box::leak(Box::new(JoinerApp::new(&LAMP_DEF).expect("joiner app")));
     app.begin_scan(&mut log).expect("begin scan");
 
-    let mut tx_buf = [0u8; 32];
+    let mut tx_buf = [0u8; 160];
+    // 160 B: the largest single frame this leg builds is a secured
+    // NWK data frame (9 MAC + 8 NWK + 14 aux + ~100 payload + 4 MIC).
     let mut mac_seq: u8 = 0;
-    let mut last_req_ms: u64 = 0;
+    // Scan-cycle state: begin_scan opens a window, beacons ingest
+    // through on_mac_psdu, and finish_scan elects once the window
+    // elapses (w97: finishing per-beacon parks the table on the first
+    // non-permit neighbour). A window with no candidate re-opens
+    // immediately — the joiner scans until it elects.
     let mut last_scan_ms: u64 = 0;
+    const SCAN_WINDOW_MS: u64 = 4_000;
+    let mut last_req_ms: u64 = 0;
     let mut assoc_tries: u32 = 0;
     let mut assoc_done_logged = false;
     // PAN adopted from the elected candidate (0xFFFF until then).
@@ -118,32 +121,36 @@ fn main() {
     // PAN — without this the coordinator's assoc-rsp never reaches
     // the app (w97 C601 leg: RSPs on air, joiner deaf, NoAck storm).
     let mut adopted_pan: Option<u16> = None;
+    // Short address adopted from the assoc-rsp (0xFFFF until then).
+    // Same filter class as the PAN: the Trust-Center transport-key
+    // is unicast to the assigned short, so the radio must learn it
+    // or the key delivery never arrives (w98 leg 2).
+    let mut adopted_short: Option<u16> = None;
+    // Announce once the Trust-Center key is adopted.
+    let mut annce_pending = false;
     let start = Instant::now();
     loop {
         adapter.pump();
         let now_ms = start.elapsed().as_millis() as u64;
-        // Periodic rescan while unelected (see SCAN_RETRY_MS): safe
-        // from any parked state; a no-op while already scanning.
-        if app.candidate_pan().is_none()
-            && now_ms.wrapping_sub(last_scan_ms) >= SCAN_RETRY_MS
-        {
+        // Windowed scan: collect beacons, then finish + elect once
+        // per window. Finishing per-beacon parks the table on the
+        // first heard network (usually a non-permit neighbour); a
+        // window with no candidate re-opens immediately.
+        if app.candidate_pan().is_none() && now_ms.wrapping_sub(last_scan_ms) >= SCAN_WINDOW_MS {
             last_scan_ms = now_ms;
             match app.begin_scan(&mut log) {
-                Ok(()) => println!("RDJOIN RESCAN"),
+                Ok(()) => {}
                 Err(_) => {} // already scanning; keep collecting
+            }
+            if let Some(pan) = app.finish_scan(&mut log) {
+                println!("RDJOIN CANDIDATE pan={pan:#06x}");
             }
         }
         // MAC-command RX: beacon survey + assoc-rsp handoff, logged.
         while let Some(ind) = adapter.poll_mac_indication() {
             let psdu = ind.psdu();
             log_air(&mut log, "RDJOIN RX-MAC", psdu);
-            match app.on_mac_psdu(
-                &mut log,
-                psdu,
-                ind.channel_number(),
-                ind.rssi(),
-                ind.lqi(),
-            ) {
+            match app.on_mac_psdu(&mut log, psdu, ind.channel_number(), ind.rssi(), ind.lqi()) {
                 MacIncoming::Beacon(bi) => {
                     println!(
                         "RDJOIN RX-BEACON pan={:#06x} permit={} rssi={} lqi={}",
@@ -205,11 +212,74 @@ fn main() {
                 }
             }
         } else if let Some(short) = app.assoc_short() {
+            if adopted_short != Some(short) {
+                adopted_short = Some(short);
+                adapter.set_short_addr(short);
+                println!("RDJOIN ADOPTED-SHORT short={short:#06x}");
+            }
             if !assoc_done_logged {
                 assoc_done_logged = true;
-                println!(
-                    "RDJOIN ASSOC-DONE short={short:#06x} (transport open is the next leg)"
-                );
+                println!("RDJOIN ASSOC-DONE short={short:#06x} (waiting for Trust-Center key)");
+            }
+        }
+        // NWK RX: Trust-Center key open (adopt) + post-adoption
+        // dispatch (ZDO answers). Sealed frames only; anything else
+        // is counted, never latched.
+        while let Some(ind) = adapter.poll_indication() {
+            log_air(&mut log, "RDJOIN RX-NWK", ind.msdu.as_slice());
+            match app.on_nwk_joiner(ind.msdu.as_slice()) {
+                JoinerNwkOutcome::TransportAccepted { auxctr } => {
+                    println!("RDJOIN TRANSPORT-OPEN auxctr={auxctr:#010x}");
+                    annce_pending = true;
+                }
+                JoinerNwkOutcome::NodeDescReq {
+                    src_short,
+                    tsn,
+                    subject,
+                } => {
+                    println!("RDJOIN RX-NODE-DESC-REQ tsn={tsn}");
+                    match app.take_node_desc_rsp(&mut tx_buf, src_short, tsn, subject) {
+                        Ok(n) if n > 0 => {
+                            log_air(&mut log, "RDJOIN TX-NODE-DESC-RSP", &tx_buf[..n]);
+                            if let Err(e) = adapter.transmit_mac(&tx_buf[..n]) {
+                                println!("RDJOIN TX-RSP-FAILED {e:?}");
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(e) => println!("RDJOIN RSP-BUILD-FAILED {e:?}"),
+                    }
+                }
+                JoinerNwkOutcome::Data { cluster, profile } => {
+                    println!("RDJOIN RX-NWK-DATA cluster={cluster:#06x} profile={profile:#06x}");
+                }
+                JoinerNwkOutcome::NwkCommand { id } => {
+                    println!("RDJOIN RX-NWK-CMD id={id:#04x}");
+                }
+                JoinerNwkOutcome::Ignored(why) => {
+                    println!("RDJOIN RX-NWK-IGNORED {why:?}");
+                }
+            }
+        }
+        // Announce once the key is adopted (single unsolicited
+        // broadcast); then verify + close out the join.
+        if annce_pending {
+            match app.take_annce(&mut tx_buf) {
+                Ok(n) if n > 0 => {
+                    log_air(&mut log, "RDJOIN TX-ANNCE", &tx_buf[..n]);
+                    match adapter.transmit_mac(&tx_buf[..n]) {
+                        Ok(_) => {
+                            annce_pending = false;
+                            app.verify_confirm(&mut log);
+                            app.close_out(&mut log);
+                        }
+                        Err(e) => println!("RDJOIN TX-ANNCE-FAILED {e:?}"),
+                    }
+                }
+                Ok(_) => {
+                    // Nothing to announce (key or short missing).
+                    annce_pending = false;
+                }
+                Err(e) => println!("RDJOIN ANNCE-BUILD-FAILED {e:?}"),
             }
         }
         // TX confirms drain (shared queue); joiner ignores outcomes

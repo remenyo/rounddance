@@ -762,6 +762,40 @@ fn sealed_nwk(
     frame
 }
 
+/// Open a joiner-received NWK-secured tail with the adopted key:
+/// returns (aux counter, plaintext). Mirrors the app's
+/// `open_network_data` construction (nonce/AAD per the w45 battery).
+fn open_joiner_tail(
+    key: &[u8; 16],
+    ct: &[u8],
+    tag: &[u8],
+    nwk_hdr: &[u8],
+    src_eui: &[u8; 8],
+    auxctr: u32,
+) -> (u32, Vec<u8>) {
+    use rounddance_security::{ccm_star_open_into, CCM_TAG_LEN};
+    assert_eq!(tag.len(), CCM_TAG_LEN);
+    let mut tag4 = [0u8; CCM_TAG_LEN];
+    tag4.copy_from_slice(tag);
+    let mut aad = [0u8; 64];
+    let mut restored = [0u8; 16];
+    restored[0] = 0x2d;
+    restored[1..5].copy_from_slice(&auxctr.to_le_bytes());
+    restored[5..13].copy_from_slice(src_eui);
+    restored[13] = 0x00;
+    aad[..nwk_hdr.len()].copy_from_slice(nwk_hdr);
+    aad[nwk_hdr.len()..nwk_hdr.len() + 14].copy_from_slice(&restored[..14]);
+    let mut nonce = [0u8; 13];
+    nonce[..8].copy_from_slice(src_eui);
+    nonce[8..12].copy_from_slice(&auxctr.to_le_bytes());
+    nonce[12] = 0x2d;
+    let mut pt = vec![0u8; ct.len()];
+    let n = ccm_star_open_into(key, &nonce, &aad[..nwk_hdr.len() + 14], ct, &tag4, &mut pt)
+        .expect("test tail opens");
+    pt.truncate(n);
+    (auxctr, pt)
+}
+
 #[test]
 fn nwk_rx_opens_secured_and_handles_annce() {
     use rounddance_security::{KeySet, NetworkKey};
@@ -1097,4 +1131,207 @@ fn transport_key_resets_replay_for_rejoin() {
         NwkRxOutcome::Annce { short: 0x0002, .. } => {}
         other => panic!("expected Annce after rejoin, got {:?}", other),
     }
+}
+
+/// Phase 3 leg 2: joiner transport open + annce + node_desc answer.
+/// Byte-exact transport frames come from the committed builder; the
+/// joiner adopts the key, answers its own annce, and replies to a
+/// secured Node_desc_req. Tamper/replay/wrong-state are counted,
+/// and a duplicate delivery is idempotent (never a wedge).
+#[test]
+fn joiner_transport_open_adopts_key_and_answers() {
+    use rounddance_commission::{
+        build_secured_nwk_frame, build_transport_key_frame, ha_transport_key, SecuredNwkParams,
+        TransportKeyParams,
+    };
+    use rounddance_hal_esp::app::{JoinerNwkOutcome, NwkIgnore};
+
+    const KEY: [u8; 16] = [
+        0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e,
+        0x1f,
+    ];
+    const TCW: [u8; 8] = [0x68, 0x7f, 0x86, 0xfe, 0xff, 0x62, 0xf2, 0xa0];
+    // Joiner's own wire-order EUI (the transport destination must name us).
+    const JW: [u8; 8] = [0xa4, 0x97, 0x85, 0xfe, 0xff, 0x62, 0xf2, 0xa0];
+    static DEF: rounddance_zcl::onoff::ServerDef = rounddance_zcl::onoff::ServerDef;
+    let mut log = app::NullLog;
+    let mut joiner = app::JoinerApp::new(&DEF).unwrap();
+    joiner.begin_scan(&mut log).unwrap();
+    joiner
+        .ingest_beacon(rounddance_commission::BeaconSurveyEntry {
+            pan_id: 0xC601,
+            channel: 15,
+            lqi: 200,
+            rssi: -40,
+            permit_joining: true,
+            router_capacity: true,
+            end_device_capacity: true,
+            protocol_version: 2,
+        })
+        .unwrap();
+    assert_eq!(joiner.finish_scan(&mut log), Some(0xC601));
+    // Assoc-rsp handoff assigns the short (long-source, status 0).
+    let mut rsp = [0u8; 25];
+    rsp[..5].copy_from_slice(&[0x63, 0xcc, 0x02, 0x01, 0xc6]);
+    rsp[5..13].copy_from_slice(&JW);
+    rsp[13..21].copy_from_slice(&TCW);
+    rsp[21..25].copy_from_slice(&[0x02, 0x02, 0x00, 0x00]);
+    let inc = joiner.on_mac_psdu(&mut log, &rsp, 15, -40, 200);
+    assert!(matches!(
+        inc,
+        rounddance_hal_esp::mac_cmd::Incoming::AssocRsp(_)
+    ));
+    assert_eq!(joiner.assoc_short(), Some(0x0002));
+    let tkey = ha_transport_key().unwrap();
+    // Byte-exact proactive transport-key delivery for our EUI.
+    let tp = TransportKeyParams {
+        dst_pan: 0xC601,
+        dst_short: 0x0002,
+        dst_eui: JW,
+        src_eui: TCW,
+        mac_seq: 0x5a,
+        nwk_seq: 0x21,
+        nwk_radius: 0x1e,
+        aps_ctr: 0x51,
+        auxctr: 0x0000_1000,
+        seq_no: 0x00,
+        netkey: KEY,
+        transport_key: tkey,
+    };
+    let mut tf = [0u8; 128];
+    let tn = build_transport_key_frame(&tp, &mut tf).unwrap();
+    // MAC header stripped, as the driver/adapter path delivers.
+    let tf = &tf[9..tn];
+    // Wrong state first (fresh joiner, pre-assoc): counted, no latch.
+    let mut fresh = app::JoinerApp::new(&DEF).unwrap();
+    assert!(matches!(
+        fresh.on_nwk_joiner(tf),
+        JoinerNwkOutcome::Ignored(NwkIgnore::WrongState)
+    ));
+    assert_eq!(fresh.adopted_netkey(), None);
+    // The real open: adopts + advances to KeyWait.
+    match joiner.on_nwk_joiner(tf) {
+        JoinerNwkOutcome::TransportAccepted { auxctr } => assert_eq!(auxctr, 0x0000_1000),
+        other => panic!("expected TransportAccepted, got {:?}", other),
+    }
+    assert_eq!(joiner.adopted_netkey(), Some((KEY, 0x00)));
+    // Duplicate delivery (coordinator retransmit): idempotent.
+    match joiner.on_nwk_joiner(tf) {
+        JoinerNwkOutcome::TransportAccepted { auxctr } => assert_eq!(auxctr, 0x0000_1000),
+        other => panic!("expected idempotent accept, got {:?}", other),
+    }
+    // Tampered tail: MIC failure, key untouched.
+    let mut bad = tf.to_vec();
+    let last = bad.len() - 1;
+    bad[last] ^= 0x01;
+    assert!(matches!(
+        joiner.on_nwk_joiner(&bad),
+        JoinerNwkOutcome::Ignored(NwkIgnore::MicFailed)
+    ));
+    // Annce: NWK-secured broadcast carrying our Device_annce.
+    // MAC 41 88 broadcast; NWK dst 0xFFFD src = assigned short.
+    let mut out = [0u8; 160];
+    let n = joiner.take_annce(&mut out).unwrap();
+    let f = &out[..n];
+    assert_eq!(&f[..3], &[0x41, 0x88, f[2]]);
+    assert_eq!(&f[3..9], &[0x01, 0xc6, 0xff, 0xff, 0x02, 0x00]);
+    assert_eq!(&f[9..11], &[0x08, 0x02]);
+    assert_eq!(&f[11..13], &[0xfd, 0xff]);
+    assert_eq!(&f[13..15], &[0x02, 0x00]);
+    assert_eq!(f[15], 0x1e);
+    assert_eq!(f[17], 0x28);
+    assert_eq!(&f[18..22], &0x0000_2000u32.to_le_bytes());
+    assert_eq!(&f[22..30], &JW);
+    assert_eq!(f[30], 0x00);
+    // Decrypt the tail: APS broadcast ep 0 + ZDO Device_annce.
+    let (actr, apt) = open_joiner_tail(
+        &KEY,
+        &f[31..n - 4],
+        &f[n - 4..n],
+        &f[9..17],
+        &JW,
+        0x0000_2000,
+    );
+    assert_eq!(
+        &apt[..8],
+        &[0x08, 0x00, 0x13, 0x00, 0x00, 0x00, 0x00, apt[7]]
+    );
+    assert_eq!(&apt[8..11], &[apt[7], 0x02, 0x00]);
+    assert_eq!(&apt[11..19], &JW);
+    assert_eq!(apt[19], 0x8c);
+    assert_eq!(actr, 0x0000_2000);
+    // Secured Node_desc_req to us (unicast, ep 0, cluster 0x0002).
+    let mut rq = [0u8; 8 + 3];
+    rq[..8].copy_from_slice(&[0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x07]);
+    rq[8..11].copy_from_slice(&[0x09, 0x02, 0x00]);
+    let rp = SecuredNwkParams {
+        dst_pan: 0xC601,
+        dst_short: 0x0002,
+        src_short: 0x0000,
+        broadcast: false,
+        src_eui: TCW,
+        mac_seq: 0x11,
+        nwk_seq: 0x22,
+        nwk_radius: 0x1e,
+        auxctr: 0x0000_2000,
+        netkey: KEY,
+    };
+    let mut rf = [0u8; 160];
+    let rn = build_secured_nwk_frame(&rq, &rp, &mut rf).unwrap();
+    // No adopted key yet: secured frame refused, no latch.
+    let mut joiner2 = app::JoinerApp::new(&DEF).unwrap();
+    joiner2.begin_scan(&mut log).unwrap();
+    let _ = joiner2.finish_scan(&mut log);
+    assert!(matches!(
+        joiner2.on_nwk_joiner(&rf[9..rn]),
+        JoinerNwkOutcome::Ignored(NwkIgnore::UnknownKey)
+    ));
+    match joiner.on_nwk_joiner(&rf[9..rn]) {
+        JoinerNwkOutcome::NodeDescReq {
+            src_short,
+            tsn,
+            subject,
+        } => {
+            assert_eq!((src_short, tsn, subject), (0x0000, 0x09, 0x0002));
+        }
+        other => panic!("expected NodeDescReq, got {:?}", other),
+    }
+    // The answer decrypts to a Node_desc_rsp echoing TSN + subject.
+    let mut ro = [0u8; 160];
+    let ro_n = joiner
+        .take_node_desc_rsp(&mut ro, 0x0000, 0x09, 0x0002)
+        .unwrap();
+    let rof = &ro[..ro_n];
+    assert_eq!(
+        &rof[..9],
+        &[0x61, 0x88, rof[2], 0x01, 0xc6, 0x00, 0x00, 0x02, 0x00]
+    );
+    assert_eq!(&rof[9..11], &[0x08, 0x02]);
+    assert_eq!(&rof[11..13], &[0x00, 0x00]);
+    assert_eq!(&rof[13..15], &[0x02, 0x00]);
+    assert_eq!(rof[15], 0x1e);
+    // auxctr advanced past the annce (0x2000 -> 0x2001), src is us.
+    assert_eq!(rof[17], 0x28);
+    assert_eq!(&rof[18..22], &0x0000_2001u32.to_le_bytes());
+    assert_eq!(&rof[22..30], &JW);
+    assert_eq!(rof[30], 0x00);
+    // Decrypt: APS unicast ep 0, cluster 0x8002, ZDO Node_desc_rsp.
+    let (ractr, rpt) = open_joiner_tail(
+        &KEY,
+        &rof[31..ro_n - 4],
+        &rof[ro_n - 4..ro_n],
+        &rof[9..17],
+        &JW,
+        0x0000_2001,
+    );
+    assert_eq!(ractr, 0x0000_2001);
+    assert_eq!(
+        &rpt[..8],
+        &[0x00, 0x00, 0x02, 0x80, 0x00, 0x00, 0x00, rpt[7]]
+    );
+    let rsp = rounddance_zdo::zdp::NodeDescRsp::decode(&rpt[8..]).expect("rsp decodes");
+    assert_eq!(rsp.tsn, 0x09);
+    assert!(rsp.status.is_success());
+    assert_eq!(rsp.nwk_of_interest, 0x0002);
+    assert!(rsp.descriptor.is_some());
 }

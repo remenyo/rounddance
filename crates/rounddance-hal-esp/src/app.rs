@@ -47,7 +47,7 @@ use rounddance_nwk::{
 use rounddance_roles::{AgingPolicy, CoordinatorMachine, CoordinatorState};
 use rounddance_security::{
     ccm_star_open_into, AuxHeader, FrameCounter, KeyIdMode, KeyIdentifier, KeySet, NwkNonce,
-    ReplayTable, SecurityControl, CCM_TAG_LEN,
+    ReplayTable, SecurityControl, CCM_NONCE_LEN, CCM_TAG_LEN,
 };
 use rounddance_zcl::{
     behavior::{Ctx, EventQueue},
@@ -71,6 +71,10 @@ pub const COORD_SHORT: u16 = 0x0000;
 pub const JOINER_SHORT: u16 = 0x0001;
 /// Short address placeholder before association.
 pub const UNASSOC_SHORT: u16 = 0xFFFF;
+/// Starting auxiliary counter for joiner-secured frames (lab
+/// value; disjoint from the coordinator's `TRANSPORT_AUX_BASE` range
+/// so captures attribute direction unambiguously).
+pub const JOINER_AUX_BASE: u32 = 0x0000_2000;
 /// Indirect-queue depth: at most this many shorts hold queued
 /// frames (Phase 1 leg 1b; leg 1c transmits them post-poll).
 pub const INDIRECT_DEPTH: usize = 4;
@@ -97,6 +101,15 @@ pub enum NwkIgnore {
     Replay,
     /// Command frame with an empty payload (no id octet).
     EmptyCommand,
+    /// Unsecured NWK data (the secured join legs never accept it;
+    /// tolerated vendor traffic is classified at the MAC layer).
+    Unsecured,
+    /// Secured with a key this unit does not hold (no adopted network
+    /// key yet, or sequence mismatch).
+    UnknownKey,
+    /// Frame arrived in a join state that cannot accept it (e.g. a
+    /// transport-key delivery outside the post-association wait).
+    WrongState,
     /// APS data undecodable and not the tolerated annce class.
     BadAps,
     /// ZDO payload undecodable.
@@ -144,6 +157,43 @@ pub enum NwkRxOutcome {
         status: Option<u8>,
         /// Request cluster the response correlates to.
         req_cluster: u16,
+    },
+}
+
+/// Outcome of one inbound NWK frame on the JOINER (Phase 3 leg 2:
+/// the mirror of [`NwkRxOutcome`] for the joining side).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JoinerNwkOutcome {
+    /// Frame refused without action (counted, never silent).
+    Ignored(NwkIgnore),
+    /// Trust-Center transport-key delivery opened and adopted (the
+    /// fw sends the Device_annce next).
+    TransportAccepted {
+        /// Auxiliary counter of the adopted delivery.
+        auxctr: u32,
+    },
+    /// ZDO Node_desc_req addressed to us (answer with
+    /// [`take_node_desc_rsp`](JoinerApp::take_node_desc_rsp)).
+    NodeDescReq {
+        /// NWK source short to answer.
+        src_short: u16,
+        /// ZDO transaction sequence to echo.
+        tsn: u8,
+        /// Network address the request names.
+        subject: u16,
+    },
+    /// APS data outside the handled classes (cluster/profile
+    /// reported; no silent drops).
+    Data {
+        /// APS cluster identifier.
+        cluster: u16,
+        /// APS profile identifier.
+        profile: u16,
+    },
+    /// NWK command frame: id reported for later legs.
+    NwkCommand {
+        /// Command identifier (first payload octet).
+        id: u8,
     },
 }
 
@@ -973,6 +1023,7 @@ impl CoordinatorApp {
             dst_pan: APP_PAN,
             dst_short,
             src_short: COORD_SHORT,
+            broadcast: false,
             src_eui: TC_EUI_WIRE,
             mac_seq: self.take_mac_seq(),
             nwk_seq: self.take_nwk_seq(),
@@ -1337,8 +1388,19 @@ pub struct JoinerApp<'a> {
     /// Short address assigned by the coordinator's assoc-rsp (set on
     /// the joiner-side handoff; `None` until associated).
     assoc_short: Option<u16>,
+    /// Adopted network key + sequence (set by the transport-key open;
+    /// secures all later joiner traffic).
+    netkey: Option<([u8; 16], u8)>,
+    /// Joiner-side NWK auxiliary counter space (strictly monotonic
+    /// per key; starts at the lab base, disjoint from the
+    /// coordinator's range so captures attribute cleanly).
+    join_auxctr: u32,
     /// Frames answered with a Default Response.
     pub defrsp_sent: u32,
+    /// NWK/ZDO frames classified (joiner side).
+    pub nwk_rx_classified: u32,
+    /// NWK frames refused without action (joiner side).
+    pub nwk_rx_ignored: u32,
     /// Unsecured vendor frames tolerated post-association (wave-23
     /// behavior, counted for the log).
     pub unsecured_tolerated: u32,
@@ -1372,7 +1434,11 @@ impl<'a> JoinerApp<'a> {
             aps_counter: 0,
             mac_seq: 0,
             assoc_short: None,
+            netkey: None,
+            join_auxctr: JOINER_AUX_BASE,
             defrsp_sent: 0,
+            nwk_rx_classified: 0,
+            nwk_rx_ignored: 0,
             unsecured_tolerated: 0,
         })
     }
@@ -1507,10 +1573,274 @@ impl<'a> JoinerApp<'a> {
         self.assoc_short
     }
 
+    /// Adopted network key + sequence (`None` until the transport-key
+    /// open adopts it).
+    #[must_use]
+    pub fn adopted_netkey(&self) -> Option<([u8; 16], u8)> {
+        self.netkey
+    }
+
     /// Selected candidate PAN (valid once the survey elects one).
     #[must_use]
     pub fn candidate_pan(&self) -> Option<u16> {
         self.steering.candidate().map(|c| c.pan_id)
+    }
+
+    /// Feed one inbound NWK frame (MAC header already stripped) to the
+    /// joiner responder: the Trust-Center transport-key delivery opens
+    /// with the HA-derived key and adopts the network key; later
+    /// network-key-secured frames dispatch (ZDO requests surface for
+    /// answers). Every refusal is counted; nothing drops silently.
+    pub fn on_nwk_joiner(&mut self, msdu: &[u8]) -> JoinerNwkOutcome {
+        use JoinerNwkOutcome as O;
+        let outcome = self.classify_joiner_nwk(msdu);
+        match outcome {
+            O::Ignored(_) => self.nwk_rx_ignored += 1,
+            _ => self.nwk_rx_classified += 1,
+        }
+        outcome
+    }
+
+    fn classify_joiner_nwk(&mut self, msdu: &[u8]) -> JoinerNwkOutcome {
+        use JoinerNwkOutcome as O;
+        use NwkIgnore as Ig;
+        let dec = match nwk_decode(msdu) {
+            Ok(d) => d,
+            Err(_) => return O::Ignored(Ig::BadHeader),
+        };
+        if dec.header.control.source_route {
+            return O::Ignored(Ig::SourceRoute);
+        }
+        let mut hdr_len = 8;
+        if dec.header.control.dst_ieee {
+            hdr_len += 8;
+        }
+        if dec.header.control.src_ieee {
+            hdr_len += 8;
+        }
+        // Transport-key delivery: NWK-open data + APS-sealed command
+        // (the proactive Trust-Center shape our coordinator emits;
+        // key-id mode 2 names the key-transport key). Anything else
+        // unsecured is counted, never opened.
+        if !dec.header.control.security {
+            return match dec.header.control.frame_type {
+                NwkFrameType::Command => match dec.payload.first() {
+                    Some(&id) => O::NwkCommand { id },
+                    None => O::Ignored(Ig::EmptyCommand),
+                },
+                NwkFrameType::Data => self.open_transport_key(msdu, hdr_len),
+                _ => O::Ignored(Ig::BadHeader),
+            };
+        }
+        let (aux, aux_len) = match AuxHeader::decode_with_level(dec.payload, NWK_SEC_LEVEL) {
+            Ok(v) => v,
+            Err(_) => return O::Ignored(Ig::BadAux),
+        };
+        match aux.key_id {
+            KeyIdentifier::Index(seq) => self.open_network_data(msdu, hdr_len, &aux, aux_len, seq),
+            _ => O::Ignored(Ig::BadKeyId),
+        }
+    }
+
+    /// Open one Trust-Center transport-key delivery (NWK-open header,
+    /// APS auxiliary with the key-transport key id): derive the
+    /// transport key from the preconfigured HA link key, verify the
+    /// MIC, check the command pair, and adopt the network key.
+    /// Duplicates (aux counter at/below the adopted one — e.g. a
+    /// coordinator retransmit after a lost ACK) are idempotent, never
+    /// fatal: the key is already adopted.
+    fn open_transport_key(&mut self, msdu: &[u8], hdr_len: usize) -> JoinerNwkOutcome {
+        use rounddance_commission::{
+            ha_transport_key, TRANSPORT_KEY_CMD, TRANSPORT_KEY_TYPE_NETWORK,
+        };
+        use JoinerNwkOutcome as O;
+        use NwkIgnore as Ig;
+        // NWK header (8, unsecured) + APS header (2: 0x21 + counter) +
+        // 13-octet APS auxiliary (no key-identifier octets on air for
+        // the key-transport shape) + MIC-32 tail.
+        if msdu.len() < hdr_len + 2 + 13 + CCM_TAG_LEN || hdr_len != 8 {
+            return O::Ignored(Ig::BadHeader);
+        }
+        let aps = &msdu[hdr_len..hdr_len + 2];
+        if aps[0] != 0x21 || msdu[hdr_len + 2] != 0x30 {
+            // Wrong APS command header or aux control: not our
+            // proactive transport-key shape.
+            return O::Ignored(Ig::BadAps);
+        }
+        // Fixed 13-octet aux layout: control, LE counter, 8-octet
+        // source EUI. (The generic aux decoder is not used here: it
+        // would name the key id Source4 and consume 5 key-id octets
+        // that do not exist on air for this shape.)
+        let auxctr = u32::from_le_bytes([
+            msdu[hdr_len + 3],
+            msdu[hdr_len + 4],
+            msdu[hdr_len + 5],
+            msdu[hdr_len + 6],
+        ]);
+        let mut ext = [0u8; 8];
+        ext.copy_from_slice(&msdu[hdr_len + 7..hdr_len + 15]);
+        let tkey = match ha_transport_key() {
+            Ok(k) => k,
+            Err(_) => return O::Ignored(Ig::UnknownKey),
+        };
+        let mut aad = [0u8; 15];
+        aad[..2].copy_from_slice(&msdu[hdr_len..hdr_len + 2]);
+        let mut restored = [0u8; 14];
+        restored[0] = 0x35;
+        restored[1..5].copy_from_slice(&auxctr.to_le_bytes());
+        restored[5..13].copy_from_slice(&ext);
+        // No key-identifier octet: TransportKey encodes to zero bytes
+        // (matches the committed transport builder + golden vector).
+        // APS-level AAD covers only the APS header + restored aux
+        // (w45 battery); the unsecured NWK header is not authenticated.
+        aad[2..15].copy_from_slice(&restored[..13]);
+        let mut nonce = [0u8; CCM_NONCE_LEN];
+        nonce[..8].copy_from_slice(&ext);
+        nonce[8..12].copy_from_slice(&auxctr.to_le_bytes());
+        nonce[12] = 0x35;
+        let tail_at = hdr_len + 2 + 13;
+        let ct_end = msdu.len() - CCM_TAG_LEN;
+        if ct_end <= tail_at {
+            return O::Ignored(Ig::BadAux);
+        }
+        let mut tag = [0u8; CCM_TAG_LEN];
+        tag.copy_from_slice(&msdu[ct_end..]);
+        let ct = &msdu[tail_at..ct_end];
+        let mut pt = [0u8; 64];
+        let n = match ccm_star_open_into(&tkey, &nonce, &aad, ct, &tag, &mut pt) {
+            Ok(n) => n,
+            Err(_) => return O::Ignored(Ig::MicFailed),
+        };
+        if n != 35 || pt[0] != TRANSPORT_KEY_CMD || pt[1] != TRANSPORT_KEY_TYPE_NETWORK {
+            return O::Ignored(Ig::BadAps);
+        }
+        // Destination must be us (wire order, orientation-tolerant).
+        let mut dst = [0u8; 8];
+        dst.copy_from_slice(&pt[19..27]);
+        if !eui_matches(&joiner_ieee().to_be_bytes(), &dst) {
+            return O::Ignored(Ig::BadAps);
+        }
+        let mut key = [0u8; 16];
+        key.copy_from_slice(&pt[2..18]);
+        let seq_no = pt[18];
+        // Duplicate delivery (coordinator retransmit): already adopted,
+        // counter not advancing — idempotent, never fatal.
+        if let Some(last) = self.joiner.last_aux_counter() {
+            if auxctr <= last {
+                return O::TransportAccepted { auxctr };
+            }
+        }
+        if self.joiner.state() != JoinerState::Authenticating {
+            return O::Ignored(Ig::WrongState);
+        }
+        self.joiner
+            .note_transport_frame(TRANSPORT_KEY_CMD, TRANSPORT_KEY_TYPE_NETWORK);
+        self.joiner.on_transport_open(true, auxctr);
+        if self.joiner.state() == JoinerState::Failed {
+            return O::Ignored(Ig::WrongState);
+        }
+        self.netkey = Some((key, seq_no));
+        // Replay window for the adopted network key starts here
+        // (same rule as the coordinator side: the counter is trusted
+        // only after its first MIC-verified sighting).
+        let src_u64 = u64::from_le_bytes(ext);
+        let _ = self.rx_replay.check(src_u64, auxctr);
+        O::TransportAccepted { auxctr }
+    }
+
+    /// Open one network-key-secured NWK data frame with the adopted
+    /// key: ZDO Node_desc_req surfaces for answers, other APS data
+    /// classifies, NWK commands report their id.
+    fn open_network_data(
+        &mut self,
+        msdu: &[u8],
+        hdr_len: usize,
+        aux: &AuxHeader,
+        aux_len: usize,
+        seq: u8,
+    ) -> JoinerNwkOutcome {
+        use JoinerNwkOutcome as O;
+        use NwkIgnore as Ig;
+        let dec = match nwk_decode(msdu) {
+            Ok(d) => d,
+            Err(_) => return O::Ignored(Ig::BadHeader),
+        };
+        let (key, key_seq) = match self.netkey {
+            Some((k, s)) if s == seq => (k, s),
+            _ => return O::Ignored(Ig::UnknownKey),
+        };
+        let _ = key_seq;
+        let Some(ext) = aux.ext_source else {
+            return O::Ignored(Ig::NoSource);
+        };
+        let mut restored = [0u8; 16];
+        restored[0] = 0x2d;
+        restored[1..5].copy_from_slice(&aux.frame_counter.to_le_bytes());
+        restored[5..13].copy_from_slice(&ext);
+        restored[13] = seq;
+        let rlen = 14;
+        let mut aad = [0u8; 64];
+        if hdr_len + rlen > aad.len() {
+            return O::Ignored(Ig::BadHeader);
+        }
+        aad[..hdr_len].copy_from_slice(&msdu[..hdr_len]);
+        aad[hdr_len..hdr_len + rlen].copy_from_slice(&restored[..rlen]);
+        let mut nonce = [0u8; CCM_NONCE_LEN];
+        nonce[..8].copy_from_slice(&ext);
+        nonce[8..12].copy_from_slice(&aux.frame_counter.to_le_bytes());
+        nonce[12] = 0x2d;
+        let tail_at = hdr_len + aux_len;
+        let ct_end = msdu.len() - CCM_TAG_LEN;
+        if ct_end <= tail_at {
+            return O::Ignored(Ig::BadAux);
+        }
+        let mut tag = [0u8; CCM_TAG_LEN];
+        tag.copy_from_slice(&msdu[ct_end..]);
+        let ct = &msdu[tail_at..ct_end];
+        let mut pt_buf = [0u8; 160];
+        let n =
+            match ccm_star_open_into(&key, &nonce, &aad[..hdr_len + rlen], ct, &tag, &mut pt_buf) {
+                Ok(n) => n,
+                Err(_) => return O::Ignored(Ig::MicFailed),
+            };
+        let src_u64 = u64::from_le_bytes(ext);
+        if self.rx_replay.check(src_u64, aux.frame_counter).is_err() {
+            return O::Ignored(Ig::Replay);
+        }
+        let pt = &pt_buf[..n];
+        match dec.header.control.frame_type {
+            NwkFrameType::Command => match pt.first() {
+                Some(&id) => O::NwkCommand { id },
+                None => O::Ignored(Ig::EmptyCommand),
+            },
+            NwkFrameType::Data => match decode_data(pt) {
+                Ok(d) if d.header.profile_id == 0x0000 && d.header.cluster_id == 0x0002 => {
+                    self.on_node_desc_req(dec.header.src_addr, d.payload)
+                }
+                Ok(d) => O::Data {
+                    cluster: d.header.cluster_id,
+                    profile: d.header.profile_id,
+                },
+                Err(_) => O::Ignored(Ig::BadAps),
+            },
+            _ => O::Ignored(Ig::BadHeader),
+        }
+    }
+
+    /// Handle one ZDO Node_desc_req payload (TSN + subject short):
+    /// report it for the answer path. Anything shorter than the
+    /// 3-octet request is counted, never acted on.
+    fn on_node_desc_req(&mut self, src_short: u16, zdp: &[u8]) -> JoinerNwkOutcome {
+        use JoinerNwkOutcome as O;
+        use NwkIgnore as Ig;
+        if zdp.len() < 3 {
+            return O::Ignored(Ig::BadZdo);
+        }
+        O::NodeDescReq {
+            src_short,
+            tsn: zdp[0],
+            subject: u16::from_le_bytes([zdp[1], zdp[2]]),
+        }
     }
 
     fn take_mac_seq(&mut self) -> u8 {
@@ -1539,6 +1869,147 @@ impl<'a> JoinerApp<'a> {
             MAC_CAPS,
             out,
         )
+    }
+
+    /// Build the joiner's Device_annce broadcast into `out` (MAC +
+    /// NWK-secured NWK broadcast + open APS broadcast + ZDO payload):
+    /// the announcement the Trust Center waits for after delivering
+    /// the network key. Consumes one NWK aux counter + one APS
+    /// counter (dual-used as the ZDO TSN, as in `take_node_desc_req`).
+    /// Returns `Ok(0)` when no short is assigned or no key adopted
+    /// yet (nothing to announce as).
+    ///
+    /// # Errors
+    ///
+    /// [`MacCmdError::BufferTooSmall`] when `out` is short.
+    pub fn take_annce(&mut self, out: &mut [u8]) -> Result<usize, MacCmdError> {
+        use rounddance_commission::{build_secured_nwk_frame, SecuredNwkParams};
+        use rounddance_zdo::zdp::DeviceAnnce;
+        let (short, (netkey, _seq)) = match (self.assoc_short, self.netkey) {
+            (Some(s), Some(k)) => (s, k),
+            _ => return Ok(0),
+        };
+        let c = self.take_aps_counter();
+        // APS broadcast to ZDO (live shape per w97 RX-1: FC 08, ep 0,
+        // cluster 0x0013, profile 0x0000, no ack/security/extension).
+        let mut abuf = [0u8; 8];
+        abuf[..8].copy_from_slice(&[0x08, 0x00, 0x13, 0x00, 0x00, 0x00, 0x00, c]);
+        let annce = DeviceAnnce {
+            tsn: c,
+            nwk_addr: short,
+            ieee: u64::from_le_bytes(joiner_ieee().to_be_bytes()),
+            capability: MAC_CAPS,
+        };
+        let mut zbuf = [0u8; DeviceAnnce::LEN];
+        annce
+            .encode_into(&mut zbuf)
+            .map_err(|_| MacCmdError::BufferTooSmall)?;
+        let mut pt = [0u8; 32];
+        pt[..8].copy_from_slice(&abuf);
+        pt[8..8 + DeviceAnnce::LEN].copy_from_slice(&zbuf);
+        let pt = &pt[..8 + DeviceAnnce::LEN];
+        let auxctr = self.join_auxctr;
+        let params = SecuredNwkParams {
+            dst_pan: APP_PAN,
+            dst_short: 0xFFFD,
+            src_short: short,
+            broadcast: true,
+            src_eui: joiner_ieee().to_be_bytes(),
+            mac_seq: self.take_mac_seq(),
+            nwk_seq: self.take_nwk_seq(),
+            nwk_radius: 0x1e,
+            auxctr,
+            netkey,
+        };
+        match build_secured_nwk_frame(pt, &params, out) {
+            Ok(n) => {
+                self.join_auxctr = auxctr.wrapping_add(1);
+                Ok(n)
+            }
+            Err(_) => Err(MacCmdError::BufferTooSmall),
+        }
+    }
+
+    /// Answer one ZDO Node_desc_req with a Node_desc_rsp (`status`
+    /// success + our lab descriptor) into `out`, NWK-secured with the
+    /// adopted key to `dst_short`. Returns `Ok(0)` when no key/short
+    /// is held yet.
+    ///
+    /// # Errors
+    ///
+    /// [`MacCmdError::BufferTooSmall`] when `out` is short.
+    pub fn take_node_desc_rsp(
+        &mut self,
+        out: &mut [u8],
+        dst_short: u16,
+        tsn: u8,
+        subject: u16,
+    ) -> Result<usize, MacCmdError> {
+        use rounddance_commission::{build_secured_nwk_frame, SecuredNwkParams};
+        use rounddance_zdo::desc::NodeDescriptor;
+        use rounddance_zdo::status::ZdpStatus;
+        use rounddance_zdo::zdp::NodeDescRsp;
+        let (short, (netkey, _)) = match (self.assoc_short, self.netkey) {
+            (Some(s), Some(k)) => (s, k),
+            _ => return Ok(0),
+        };
+        let desc = NodeDescriptor {
+            flags0: 0x02,
+            aps_flags: 0x00,
+            freq_band: 0x08,
+            mac_cap: MAC_CAPS,
+            mfr_code: 0x0000,
+            max_buf: 82,
+            max_in_transfer: 82,
+            server_mask: 0x0000,
+            max_out_transfer: 82,
+            desc_cap: 0x00,
+        };
+        let rsp = NodeDescRsp {
+            tsn,
+            status: ZdpStatus::Success,
+            nwk_of_interest: subject,
+            descriptor: Some(desc),
+            tlvs: &[],
+        };
+        let mut zbuf = [0u8; 64];
+        let zlen = rsp
+            .encode_into(&mut zbuf)
+            .map_err(|_| MacCmdError::BufferTooSmall)?;
+        let c = self.take_aps_counter();
+        let aps = DataHeader {
+            control: ApsFc::data(DeliveryMode::Unicast),
+            dest: DataDest::Unicast { dst_endpoint: 0 },
+            cluster_id: 0x8002,
+            profile_id: 0x0000,
+            src_endpoint: 0,
+            counter: c,
+            ext: None,
+        };
+        let mut abuf = [0u8; 64];
+        let alen = aps
+            .encode_into(&zbuf[..zlen], &mut abuf)
+            .map_err(|_| MacCmdError::BufferTooSmall)?;
+        let auxctr = self.join_auxctr;
+        let params = SecuredNwkParams {
+            dst_pan: APP_PAN,
+            dst_short,
+            src_short: short,
+            broadcast: false,
+            src_eui: joiner_ieee().to_be_bytes(),
+            mac_seq: self.take_mac_seq(),
+            nwk_seq: self.take_nwk_seq(),
+            nwk_radius: 0x1e,
+            auxctr,
+            netkey,
+        };
+        match build_secured_nwk_frame(&abuf[..alen], &params, out) {
+            Ok(n) => {
+                self.join_auxctr = auxctr.wrapping_add(1);
+                Ok(n)
+            }
+            Err(_) => Err(MacCmdError::BufferTooSmall),
+        }
     }
 
     /// Tolerate one post-association unsecured vendor frame.

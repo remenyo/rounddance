@@ -40,10 +40,15 @@ pub const SECURED_SEQ_NO: u8 = 0x00;
 pub struct SecuredNwkParams {
     /// Destination PAN.
     pub dst_pan: u16,
-    /// Destination short.
+    /// Destination short (NWK destination; for broadcasts e.g. `0xFFFD`).
     pub dst_short: u16,
     /// Coordinator source short (normally 0x0000).
     pub src_short: u16,
+    /// Broadcast delivery: MAC header becomes `41 88` to `0xFFFF`
+    /// (MG21's on-air annce shape). Unicast otherwise (`61 88`,
+    /// short/short intra-PAN with the MAC destination from
+    /// `dst_short`).
+    pub broadcast: bool,
     /// Source long address, as on air (LSB-first wire order).
     pub src_eui: [u8; 8],
     /// MAC sequence octet.
@@ -154,12 +159,17 @@ pub fn build_secured_nwk_frame(
     let tail_at = 9 + 8 + 14;
     let sealed_len = ccm_star_seal_into(&p.netkey, &nonce, &aad, aps_pt, &mut out[tail_at..])
         .map_err(SecuredError::Seal)?;
-    // MAC data header: `61 88`, intra-PAN short/short.
-    out[0] = 0x61;
+    // MAC data header: `61 88` unicast (intra-PAN short/short) or
+    // `41 88` broadcast (MG21's on-air annce shape).
+    out[0] = if p.broadcast { 0x41 } else { 0x61 };
     out[1] = 0x88;
     out[2] = p.mac_seq;
     out[3..5].copy_from_slice(&p.dst_pan.to_le_bytes());
-    out[5..7].copy_from_slice(&p.dst_short.to_le_bytes());
+    if p.broadcast {
+        out[5..7].copy_from_slice(&0xFFFFu16.to_le_bytes());
+    } else {
+        out[5..7].copy_from_slice(&p.dst_short.to_le_bytes());
+    }
     out[7..9].copy_from_slice(&p.src_short.to_le_bytes());
     out[9..17].copy_from_slice(&hdr_buf);
     out[17..31].copy_from_slice(&aux_buf);
@@ -181,6 +191,7 @@ mod tests {
             dst_pan: 0xC601,
             dst_short: 0x0002,
             src_short: 0x0000,
+            broadcast: false,
             src_eui: [0x68, 0x7f, 0x86, 0xfe, 0xff, 0x62, 0xf2, 0xa0],
             mac_seq: 0x5a,
             nwk_seq: 0x21,
