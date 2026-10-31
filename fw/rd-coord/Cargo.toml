@@ -13,6 +13,7 @@ esp-idf-sys = { version = "0.38", features = ["native"] }
 esp-idf-hal = "0.47"
 esp-idf-svc = "0.53"
 rounddance-hal-esp = { path = "../../crates/rounddance-hal-esp", features = ["esp"] }
+rounddance-commission = { path = "../../crates/rounddance-commission" }
 rounddance-mac-sap = { path = "../../crates/rounddance-mac-sap" }
 
 [build-dependencies]

@@ -39,6 +39,7 @@ use rounddance_commission::{
     BeaconSurveyEntry, ChannelMask, FormationConfig, FormationState, InstallCode, JoinError,
     JoinMethod, JoinPolicy, JoinerMachine, JoinerState, KeyAttributes, LinkEvidencePolicy,
     LogicalType, MmoJoinKdf, PanChoice, SteeringMachine, SteeringState, TrustCenter,
+    TRANSPORT_AUX_BASE,
 };
 use rounddance_nwk::{decode as nwk_decode, FrameControl as NwkFc, NwkHeader};
 use rounddance_roles::{AgingPolicy, CoordinatorMachine, CoordinatorState};
@@ -257,6 +258,12 @@ pub struct CoordinatorApp {
     mac_seq: u8,
     nwk_seq: u8,
     aps_counter: u8,
+    /// Trust-Center key-transport owed (set on every accepted
+    /// association; the NCP waits for the 0x05 frame after the RSP).
+    transport_pending: bool,
+    /// Auxiliary frame counter for transport delivery (strictly
+    /// monotonic per network key; starts at the lab base).
+    transport_auxctr: u32,
     tx_counter: FrameCounter,
     rx_replay: ReplayTable<8>,
     toggle_tsn: u8,
@@ -280,6 +287,8 @@ impl CoordinatorApp {
             mac_seq: 0,
             nwk_seq: 0,
             aps_counter: 0,
+            transport_pending: false,
+            transport_auxctr: TRANSPORT_AUX_BASE,
             tx_counter: FrameCounter::new(100, 4),
             rx_replay: ReplayTable::<8>::new(),
             toggle_tsn: ZCL_TSN,
@@ -505,7 +514,11 @@ impl CoordinatorApp {
         match inc {
             MacIncoming::BeaconReq { .. } => self.assoc.on_beacon_req(),
             MacIncoming::AssocReq(ref req) => {
-                let _ = self.assoc.on_assoc_req(req);
+                if self.assoc.on_assoc_req(req) {
+                    // Latched: the Trust-Center key delivery is owed too
+                    // (the NCP waits for the 0x05 frame after the RSP).
+                    self.transport_pending = true;
+                }
             }
             MacIncoming::DataPoll(ref poll) => {
                 let _ = self.assoc.on_data_poll(poll);
@@ -602,6 +615,87 @@ impl CoordinatorApp {
             &EXT_PAN_ID,
             out,
         )
+    }
+
+    /// Whether a Trust-Center key-transport frame is owed (set on
+    /// every accepted association; the NCP waits for the 0x05 frame
+    /// after the association response).
+    #[must_use]
+    pub fn transport_pending(&self) -> bool {
+        self.transport_pending
+    }
+
+    /// Re-pend the key-transport answer for the latched EUI
+    /// (TX-loss recovery, mirror of [`rearm_assoc`](Self::rearm_assoc)).
+    /// No-op when no EUI is latched.
+    pub fn rearm_transport(&mut self) {
+        if self.assoc.device_eui().is_some() {
+            self.transport_pending = true;
+        }
+    }
+
+    /// Build the pending Trust-Center→joiner transport-key frame
+    /// into `out` (71 octets; consumes the pending flag on success,
+    /// keeps it on build refusal so firmware can retry with a bigger
+    /// buffer). `netkey` is the coordinator's deployment-owned
+    /// network key; `transport_key` its HA-derived key-transport key.
+    /// Always success status with the assigned short for the latched
+    /// EUI, echoing the association short selection.
+    ///
+    /// # Errors
+    ///
+    /// [`MacCmdError::BufferTooSmall`] when `out` holds fewer than
+    /// [`TRANSPORT_FRAME_LEN`](rounddance_commission::TRANSPORT_FRAME_LEN)
+    /// octets.
+    pub fn take_transport_key(
+        &mut self,
+        out: &mut [u8],
+        netkey: &[u8; 16],
+        transport_key: &[u8; 16],
+    ) -> Result<usize, MacCmdError> {
+        use rounddance_commission::{build_transport_key_frame, TransportKeyParams};
+        if !self.transport_pending {
+            return Ok(0);
+        }
+        let Some(eui) = self.assoc.device_eui() else {
+            return Ok(0);
+        };
+        let short = self
+            .extra_shorts
+            .iter()
+            .flatten()
+            .find(|(a, _)| eui_matches(a, &eui))
+            .map(|(_, s)| *s)
+            .unwrap_or(JOINER_SHORT);
+        // Source EUI goes on air LSB-first (wire order), like every
+        // other EUI field the NCP parses (w93: MG21's aux source is
+        // the LE bytes of its EUI); the TC_EUI const is display
+        // order, so reverse it here.
+        let mut src_wire = TC_EUI;
+        src_wire.reverse();
+        let auxctr = self.transport_auxctr;
+        let params = TransportKeyParams {
+            dst_pan: APP_PAN,
+            dst_short: short,
+            dst_eui: eui,
+            src_eui: src_wire,
+            mac_seq: self.take_mac_seq(),
+            nwk_seq: self.take_nwk_seq(),
+            nwk_radius: 0x1e,
+            aps_ctr: self.take_aps_counter(),
+            auxctr,
+            seq_no: 0x00,
+            netkey: *netkey,
+            transport_key: *transport_key,
+        };
+        match build_transport_key_frame(&params, out) {
+            Ok(n) => {
+                self.transport_pending = false;
+                self.transport_auxctr = auxctr.wrapping_add(1);
+                Ok(n)
+            }
+            Err(_) => Err(MacCmdError::BufferTooSmall),
+        }
     }
 
     /// Run the install-code key exchange for the admitted joiner.

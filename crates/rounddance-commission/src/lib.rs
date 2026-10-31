@@ -32,6 +32,7 @@ pub mod finding;
 pub mod formation;
 pub mod steering;
 pub mod touchlink;
+pub mod transport;
 
 pub use classical::{
     EccJoinKdf, InstallCode, JoinError, JoinKdf, JoinMethod, JoinPolicy, JoinedDevice,
@@ -71,6 +72,10 @@ pub use touchlink::{
     MAX_TOUCHLINK_PAYLOAD, MIN_STARTUP_DELAY_MS, RX_WINDOW_MS, SCAN_BASE_MS, STATUS_FAILURE,
     STATUS_SUCCESS, TOUCHLINK_CHANNEL_MAX, TOUCHLINK_CHANNEL_MIN, TOUCHLINK_CLUSTER,
     TOUCHLINK_PROFILE, TOUCHLINK_UTILITY_PROFILE, TRANSACTION_LIFETIME_MS,
+};
+pub use transport::{
+    build_transport_key_frame, ha_transport_key, TransportError, TransportKeyParams, HA_LINK_KEY,
+    TRANSPORT_AUX_BASE, TRANSPORT_FRAME_LEN, TRANSPORT_TAIL_LEN,
 };
 
 /// Crate identifier.

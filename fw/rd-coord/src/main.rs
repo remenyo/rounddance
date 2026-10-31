@@ -23,6 +23,7 @@ use rounddance_hal_esp::app::{
 };
 use rounddance_hal_esp::mac_cmd::{gratuitous_due, GRATUITOUS_BEACON_INTERVAL_MS};
 use rounddance_hal_esp::{AppRole, CoordinatorApp, EspAdapter, EspIdfDriver, SerialLog};
+use rounddance_commission::ha_transport_key;
 use rounddance_mac_sap::{Channel, MacDataSap, MacMgmtSap};
 use std::time::Instant;
 
@@ -119,7 +120,14 @@ fn main() {
     let start = Instant::now();
     let mut last_grat_ms: u64 = 0;
     let mut last_tick_ms: u64 = 0;
-    let mut tx_buf = [0u8; 32];
+    let mut tx_buf = [0u8; 128];
+    // Lab network key (OUR C601 network; deployment-owned test key,
+    // documented: production must randomize + persist the aux counter
+    // in NVS instead of rebooting from the fixed base).
+    const C6_NETKEY: [u8; 16] = *b"C6JOIN01LABTEST!";
+    // Key-transport key from the public HA preconfigured link key;
+    // the NCP derives the same from its provisioned HA key.
+    let transport_key = ha_transport_key().expect("HA transport key");
     loop {
         adapter.pump();
         let now_ms = start.elapsed().as_millis() as u64;
@@ -179,6 +187,20 @@ fn main() {
                 }
                 Ok(_) => {}
                 Err(e) => println!("RDCOORD ASSOC-BUILD-FAILED {e:?}"),
+            }
+        } else if app.transport_pending() {
+            match app.take_transport_key(&mut tx_buf, &C6_NETKEY, &transport_key) {
+                Ok(n) if n > 0 => {
+                    log_air(&mut log, "RDCOORD TX-TRANSPORT-KEY", &tx_buf[..n]);
+                    if let Err(e) = adapter.transmit_mac(&tx_buf[..n]) {
+                        // Same single-flight hazard as the assoc answer:
+                        // re-pend, retry next loop (w93 f1 class).
+                        println!("RDCOORD TX-TRANSPORT-FAILED {e:?}; re-armed");
+                        app.rearm_transport();
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => println!("RDCOORD TRANSPORT-BUILD-FAILED {e:?}"),
             }
         } else if app.beacon_pending() > 0 {
             match app.take_beacon(&mut tx_buf) {

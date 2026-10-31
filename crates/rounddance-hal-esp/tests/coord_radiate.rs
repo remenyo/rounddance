@@ -364,3 +364,96 @@ fn rearm_assoc_repends_after_consumed_take() {
     assert_eq!(out[21], MAC_ASSOC_RSP);
     assert!(!app.assoc_pending());
 }
+
+/// Trust-Center key transport (B-006 gate): after an admitted assoc,
+/// the app owes the 0x05 transport-key frame; the built PSDU carries
+/// the ecosystem layout (MAC `61 88`, unsecured NWK header, APS
+/// `0x21`, aux `0x30` + monotonic counter + TC source) and its sealed
+/// tail opens with the HA-derived key to the exact 35-octet command
+/// (`05 01 <netkey> 00 <joiner> <tc>`).
+#[test]
+fn transport_key_builds_and_opens_with_ha_key() {
+    use rounddance_commission::TRANSPORT_FRAME_LEN;
+    use rounddance_nwk::decode as nwk_decode;
+    use rounddance_security::{ccm_star_open_into, derive_key_transport_key, CCM_TAG_LEN};
+
+    const TEST_NETKEY: [u8; 16] = [
+        0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e,
+        0x1f,
+    ];
+    let mut app = formed_app();
+    let mut log = app::NullLog;
+    assert!(!app.transport_pending());
+    app.open_permit(&mut log, 600_000).unwrap();
+    app.admit_extra(&mut log, app::MG24_EUI, app::MG24_SHORT)
+        .unwrap();
+    // MG24 air-order assoc-req latches + pends assoc AND transport.
+    let mut air = [0u8; 19];
+    air[..9].copy_from_slice(&[0x23, 0xc8, 0x49, 0x01, 0xc6, 0x00, 0x00, 0xff, 0xff]);
+    air[9..17].copy_from_slice(&[0x6d, 0x49, 0x11, 0xfe, 0xff, 0x13, 0x8d, 0x34]);
+    air[17..19].copy_from_slice(&[0x01, 0x8c]);
+    app.on_mac_psdu(&air);
+    assert!(app.assoc_pending());
+    assert!(app.transport_pending());
+    // Build the transport frame (bigger buffer than the 32 B MAC one).
+    let tkey = derive_key_transport_key(&rounddance_commission::HA_LINK_KEY).unwrap();
+    let mut out = [0u8; 128];
+    let n = app
+        .take_transport_key(&mut out, &TEST_NETKEY, &tkey)
+        .unwrap();
+    assert_eq!(n, TRANSPORT_FRAME_LEN);
+    assert!(!app.transport_pending());
+    let f = &out[..n];
+    // MAC data header to the assigned short.
+    assert_eq!(
+        &f[..9],
+        &[0x61, 0x88, f[2], 0x01, 0xc6, 0x02, 0x00, 0x00, 0x00]
+    );
+    // NWK unsecured data header decodes via the repo codec.
+    let dec = nwk_decode(&f[9..]).expect("nwk decodes");
+    assert_eq!((dec.header.dst_addr, dec.header.src_addr), (0x0002, 0x0000));
+    assert!(!dec.header.control.security);
+    // APS command header + on-air aux (level zeroed, key-transport,
+    // extended nonce) + TC source.
+    let aps = dec.payload;
+    assert_eq!(&aps[..2], &[0x21, aps[1]]);
+    assert_eq!(aps[2], 0x30);
+    assert_eq!(&aps[3..7], &0x00001000u32.to_le_bytes());
+    // Aux source rides LSB-first (wire order), like the MG21 reference.
+    let mut tc_wire = app::TC_EUI;
+    tc_wire.reverse();
+    assert_eq!(&aps[7..15], &tc_wire);
+    // Sealed tail opens with the HA-derived key to the exact command.
+    let ct = &aps[15..];
+    assert_eq!(ct.len(), 35 + CCM_TAG_LEN);
+    let (ct_body, tag) = ct.split_at(35);
+    let mut tag4 = [0u8; 4];
+    tag4.copy_from_slice(tag);
+    let mut aad = [0u8; 15];
+    aad[..2].copy_from_slice(&aps[..2]);
+    aad[2] = 0x35;
+    aad[3..7].copy_from_slice(&aps[3..7]);
+    aad[7..15].copy_from_slice(&aps[7..15]);
+    let mut nonce = [0u8; 13];
+    nonce[..8].copy_from_slice(&aps[7..15]); // wire-order source, as sealed
+    nonce[8..12].copy_from_slice(&aps[3..7]);
+    nonce[12] = 0x35;
+    let mut pt = [0u8; 35];
+    assert_eq!(
+        ccm_star_open_into(&tkey, &nonce, &aad, ct_body, &tag4, &mut pt),
+        Ok(35)
+    );
+    let mut expect = [0u8; 35];
+    expect[0] = 0x05;
+    expect[1] = 0x01;
+    expect[2..18].copy_from_slice(&TEST_NETKEY);
+    expect[18] = 0x00;
+    // EUIs ride LSB-first (wire order): dst as latched from the air,
+    // src as the LE bytes of the coordinator EUI (w93 MG21 reference).
+    expect[19..27].copy_from_slice(&[0x6du8, 0x49, 0x11, 0xfe, 0xff, 0x13, 0x8d, 0x34]);
+    expect[27..35].copy_from_slice(&[0x68u8, 0x7f, 0x86, 0xfe, 0xff, 0x62, 0xf2, 0xa0]);
+    assert_eq!(pt, expect);
+    // TX loss re-pends (mirror of the assoc re-arm).
+    app.rearm_transport();
+    assert!(app.transport_pending());
+}

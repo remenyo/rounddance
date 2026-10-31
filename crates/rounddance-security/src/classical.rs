@@ -491,6 +491,12 @@ pub enum KeyIdentifier {
     Index(u8),
     /// Four-octet source + index (`Source4` mode).
     Source4([u8; 4], u8),
+    /// Key-transport key (`Source4` mode bits, APS key-transport
+    /// shape): no trailing octets — the key is determined by the
+    /// mode itself, exactly as the Trust-Center transport-key leg
+    /// emits it on air (`05-3474-23-454-01`). Build-side only: the
+    /// NWK `Source4` decoder still expects the 4+1 wire shape.
+    TransportKey,
     /// Eight-octet source + index (`Source8` mode).
     Source8([u8; 8], u8),
 }
@@ -502,7 +508,7 @@ impl KeyIdentifier {
         match self {
             Self::DataKey => KeyIdMode::DataKey,
             Self::Index(_) => KeyIdMode::Index,
-            Self::Source4(_, _) => KeyIdMode::Source4,
+            Self::Source4(_, _) | Self::TransportKey => KeyIdMode::Source4,
             Self::Source8(_, _) => KeyIdMode::Source8,
         }
     }
@@ -514,6 +520,7 @@ impl KeyIdentifier {
             Self::DataKey => 0,
             Self::Index(_) => 1,
             Self::Source4(_, _) => 5,
+            Self::TransportKey => 0,
             Self::Source8(_, _) => 9,
         }
     }
@@ -655,7 +662,7 @@ impl AuxHeader {
             pos += 8;
         }
         match self.key_id {
-            KeyIdentifier::DataKey => {}
+            KeyIdentifier::DataKey | KeyIdentifier::TransportKey => {}
             KeyIdentifier::Index(s) => {
                 out[pos] = s;
                 pos += 1;
