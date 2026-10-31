@@ -15,6 +15,7 @@ esp-idf-svc = "0.53"
 rounddance-hal-esp = { path = "../../crates/rounddance-hal-esp", features = ["esp"] }
 rounddance-commission = { path = "../../crates/rounddance-commission" }
 rounddance-mac-sap = { path = "../../crates/rounddance-mac-sap" }
+rounddance-security = { path = "../../crates/rounddance-security" }
 
 [build-dependencies]
 embuild = "0.33.5"

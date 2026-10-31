@@ -675,3 +675,177 @@ fn indirect_queue_enqueue_take_table() {
     assert!(app.has_indirect(0x0002));
     assert_eq!(app.indirect_take(0x0002, &mut out), Ok(2));
 }
+
+/// Phase 1 RX leg: secured NWK RX open + Device_annce handling.
+/// Synthetic frames (synthetic key, repo codecs): the live annce
+/// class (APS broadcast + ep 0x00, refused by `decode_data`) must
+/// still classify as Annce; a secured unicast NWK command reports
+/// its id; tamper/replay/truncation are counted Ignored, never
+/// silent.
+#[test]
+fn nwk_rx_opens_secured_and_handles_annce() {
+    use rounddance_nwk::{FrameControl as NwkFc, FrameType as NwkType, NwkHeader};
+    use rounddance_security::{
+        ccm_star_seal_into, AuxHeader, KeyIdMode, KeyIdentifier, KeySet, NetworkKey,
+        SecurityControl,
+    };
+
+    const KEY: [u8; 16] = [
+        0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e,
+        0x1f,
+    ];
+    const EUI: [u8; 8] = [0x6d, 0x49, 0x11, 0xfe, 0xff, 0x13, 0x8d, 0x34];
+    const TC: [u8; 8] = [0x68, 0x7f, 0x86, 0xfe, 0xff, 0x62, 0xf2, 0xa0];
+
+    #[allow(clippy::too_many_arguments)]
+    fn sealed(
+        pt: &[u8],
+        ftype: NwkType,
+        dst: u16,
+        src: u16,
+        dst_ieee: Option<u64>,
+        src_ieee: Option<u64>,
+        seq: u8,
+        auxctr: u32,
+        key: &[u8; 16],
+    ) -> Vec<u8> {
+        let ctl = NwkFc {
+            frame_type: ftype,
+            protocol_version: 0x02,
+            discover_route: rounddance_nwk::DiscoverRoute::Suppress,
+            multicast: false,
+            security: true,
+            source_route: false,
+            dst_ieee: dst_ieee.is_some(),
+            src_ieee: src_ieee.is_some(),
+            end_device_initiator: false,
+        };
+        let hdr = NwkHeader {
+            control: ctl,
+            dst_addr: dst,
+            src_addr: src,
+            radius: 0x1e,
+            seq,
+            dst_ieee,
+            src_ieee,
+            source_route: None,
+        };
+        let mut hdr_buf = [0u8; 32];
+        let hlen = hdr.encode_into(&[], &mut hdr_buf).unwrap();
+        let aux = AuxHeader {
+            control: SecurityControl::new(0, KeyIdMode::Index, true).unwrap(),
+            frame_counter: auxctr,
+            ext_source: Some(EUI),
+            key_id: KeyIdentifier::Index(0),
+        };
+        let mut aux_buf = [0u8; 14];
+        let alen = aux.encode_into(&mut aux_buf).unwrap();
+        assert_eq!(alen, 14);
+        let restored = AuxHeader {
+            control: SecurityControl::new(5, KeyIdMode::Index, true).unwrap(),
+            frame_counter: auxctr,
+            ext_source: Some(EUI),
+            key_id: KeyIdentifier::Index(0),
+        };
+        let mut rbuf = [0u8; 14];
+        let rlen = restored.encode_into(&mut rbuf).unwrap();
+        let mut aad = [0u8; 48];
+        aad[..hlen].copy_from_slice(&hdr_buf[..hlen]);
+        aad[hlen..hlen + rlen].copy_from_slice(&rbuf[..rlen]);
+        let aad = &aad[..hlen + rlen];
+        let mut nonce = [0u8; 13];
+        nonce[..8].copy_from_slice(&EUI);
+        nonce[8..12].copy_from_slice(&auxctr.to_le_bytes());
+        nonce[12] = 0x2d;
+        let mut tail = [0u8; 128];
+        let tlen = ccm_star_seal_into(key, &nonce, aad, pt, &mut tail).unwrap();
+        let mut frame = Vec::with_capacity(hlen + alen + tlen);
+        frame.extend_from_slice(&hdr_buf[..hlen]);
+        frame.extend_from_slice(&aux_buf[..alen]);
+        frame.extend_from_slice(&tail[..tlen]);
+        frame
+    }
+
+    // Live annce class: APS broadcast + ep 0x00 + 0x0013/0x0000.
+    let mut aps = vec![
+        0x08, 0x00, 0x13, 0x00, 0x00, 0x00, 0x00, 0xec, 0x81, 0x02, 0x00,
+    ];
+    aps.extend_from_slice(&EUI);
+    aps.push(0x8c);
+    let frame = sealed(
+        &aps,
+        NwkType::Data,
+        0xfffd,
+        0x0002,
+        None,
+        Some(u64::from_le_bytes(EUI)),
+        0xf7,
+        0,
+        &KEY,
+    );
+    let keys = KeySet::new(NetworkKey::new(KEY, 0));
+    let mut app = formed_app();
+    // Admit first: the annce confirm path marks a known child.
+    let mut log = app::NullLog;
+    app.open_permit(&mut log, 600_000).unwrap();
+    app.admit_extra(&mut log, EUI, 0x0002).unwrap();
+    let before = app.nwk_rx_classified;
+    let out = app.on_nwk_data(&frame, &keys, 1_000);
+    match out {
+        app::NwkRxOutcome::Annce {
+            short,
+            eui,
+            capability,
+        } => {
+            assert_eq!(short, 0x0002);
+            assert_eq!(eui, EUI);
+            assert_eq!(capability, 0x8c);
+        }
+        other => panic!("expected Annce, got {:?}", other),
+    }
+    assert_eq!(app.nwk_rx_classified, before + 1);
+    // Secured unicast NWK command (live 0x0B class): id reported.
+    let cmd = sealed(
+        &[0x0b, 0x08, 0x00],
+        NwkType::Command,
+        0x0000,
+        0x0002,
+        Some(u64::from_le_bytes(TC)),
+        Some(u64::from_le_bytes(EUI)),
+        0xf8,
+        1,
+        &KEY,
+    );
+    match app.on_nwk_data(&cmd, &keys, 1_000) {
+        app::NwkRxOutcome::NwkCommand { id } => assert_eq!(id, 0x0b),
+        other => panic!("expected NwkCommand, got {:?}", other),
+    }
+    // Tampered tail: MIC failure, counted, never silent.
+    let mut bad = cmd.clone();
+    let last = bad.len() - 1;
+    bad[last] ^= 0x01;
+    let ignored_before = app.nwk_rx_ignored;
+    assert!(matches!(
+        app.on_nwk_data(&bad, &keys, 1_000),
+        app::NwkRxOutcome::Ignored(_)
+    ));
+    assert_eq!(app.nwk_rx_ignored, ignored_before + 1);
+    // Replay: the annce frame again is stale now.
+    assert!(matches!(
+        app.on_nwk_data(&frame, &keys, 2_000),
+        app::NwkRxOutcome::Ignored(_)
+    ));
+    // Truncated + unsecured command (no key needed for the id;
+    // FCF 0x0009: command, no security, no extended addresses).
+    assert!(matches!(
+        app.on_nwk_data(&[0x08, 0x12], &keys, 3_000),
+        app::NwkRxOutcome::Ignored(_)
+    ));
+    let open_cmd = vec![
+        0x09, 0x00, 0x00, 0x00, 0x02, 0x00, 0x01, 0xf8, 0x02, 0xaa, 0xbb,
+    ];
+    match app.on_nwk_data(&open_cmd, &keys, 3_000) {
+        app::NwkRxOutcome::NwkCommand { id } => assert_eq!(id, 0x02),
+        other => panic!("expected open NwkCommand, got {:?}", other),
+    }
+}

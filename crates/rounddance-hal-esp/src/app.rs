@@ -41,10 +41,13 @@ use rounddance_commission::{
     LogicalType, MmoJoinKdf, PanChoice, SteeringMachine, SteeringState, TrustCenter,
     TRANSPORT_AUX_BASE,
 };
-use rounddance_nwk::{decode as nwk_decode, FrameControl as NwkFc, NwkHeader};
+use rounddance_nwk::{
+    decode as nwk_decode, FrameControl as NwkFc, FrameType as NwkFrameType, NwkHeader,
+};
 use rounddance_roles::{AgingPolicy, CoordinatorMachine, CoordinatorState};
 use rounddance_security::{
-    AuxHeader, FrameCounter, KeyIdMode, KeyIdentifier, ReplayTable, SecurityControl,
+    ccm_star_open_into, AuxHeader, FrameCounter, KeyIdMode, KeyIdentifier, KeySet, NwkNonce,
+    ReplayTable, SecurityControl, CCM_TAG_LEN,
 };
 use rounddance_zcl::{
     behavior::{Ctx, EventQueue},
@@ -55,6 +58,7 @@ use rounddance_zcl::{
     status::ZclStatus,
     DispatchOutcome, Endpoint, ReportingEngine,
 };
+use rounddance_zdo::zdp::DeviceAnnce;
 
 /// Application channel (OTA-proven).
 pub const APP_CHANNEL: u8 = 15;
@@ -69,6 +73,72 @@ pub const UNASSOC_SHORT: u16 = 0xFFFF;
 /// Indirect-queue depth: at most this many shorts hold queued
 /// frames (Phase 1 leg 1b; leg 1c transmits them post-poll).
 pub const INDIRECT_DEPTH: usize = 4;
+/// Why an inbound NWK frame was refused without action (Phase 1
+/// leg RX-1: every refusal is counted, never silent).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NwkIgnore {
+    /// NWK header undecodable (truncated, reserved bits, broadcast
+    /// with destination IEEE).
+    BadHeader,
+    /// Source-route subframe present (leg deferred: our NCP never
+    /// sends it; counted, not parsed).
+    SourceRoute,
+    /// Secured frame with a non-Index key identifier (only the
+    /// network-key shape is implemented).
+    BadKeyId,
+    /// Auxiliary header truncated or key sequence unknown.
+    BadAux,
+    /// No extended source and no short to key the replay table on.
+    NoSource,
+    /// CCM* MIC failure (wrong key or tampered frame).
+    MicFailed,
+    /// Frame counter does not advance (replay or duplicate).
+    Replay,
+    /// Command frame with an empty payload (no id octet).
+    EmptyCommand,
+    /// APS data undecodable and not the tolerated annce class.
+    BadAps,
+    /// ZDO payload undecodable.
+    BadZdo,
+}
+
+/// Outcome of one inbound NWK frame (Phase 1 leg RX-1: the
+/// coordinator's post-join conversation entry point).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NwkRxOutcome {
+    /// Frame refused without action (counted in
+    /// [`nwk_rx_ignored`](CoordinatorApp::nwk_rx_ignored)).
+    Ignored(NwkIgnore),
+    /// ZDO Device_annce handled (child marked heard when known).
+    Annce {
+        /// Announced short address.
+        short: u16,
+        /// Announced long address (wire order, as on air).
+        eui: [u8; 8],
+        /// Announced capability byte.
+        capability: u8,
+    },
+    /// NWK command frame (secured or open): id reported for the
+    /// response legs; unknown ids are counted here, not dropped
+    /// silently.
+    NwkCommand {
+        /// Command identifier (first payload octet).
+        id: u8,
+    },
+    /// APS data frame outside the annce class (cluster/profile
+    /// reported; payload handling is a later leg).
+    Data {
+        /// APS cluster identifier.
+        cluster: u16,
+        /// APS profile identifier.
+        profile: u16,
+    },
+}
+
+/// Restored NWK security-control level (base level 5: the sender
+/// zeroes the on-air level bits after protecting, wave-33/wave-36
+/// pattern; the receiver restores before nonce/AAD work).
+const NWK_SEC_LEVEL: u8 = 5;
 /// Largest single indirect payload in octets (covers a NWK-secured
 /// ZDO frame with margin; full MAC PSDU assembly happens at TX).
 pub const INDIRECT_MAX: usize = 96;
@@ -305,6 +375,12 @@ pub struct CoordinatorApp {
     pub toggles_sent: u32,
     /// Successful Default Responses verified.
     pub defrsp_ok: u32,
+    /// NWK/ZDO frames classified (annce/command/data).
+    pub nwk_rx_classified: u32,
+    /// NWK frames refused without action (bad header, bad key,
+    /// MIC failure, replay, truncation). Never silent: every refusal
+    /// increments this counter (Phase 1 leg RX-1).
+    pub nwk_rx_ignored: u32,
 }
 
 impl CoordinatorApp {
@@ -330,6 +406,8 @@ impl CoordinatorApp {
             toggle_tsn: ZCL_TSN,
             toggles_sent: 0,
             defrsp_ok: 0,
+            nwk_rx_classified: 0,
+            nwk_rx_ignored: 0,
         }
     }
 
@@ -814,6 +892,178 @@ impl CoordinatorApp {
         let n = slot.len;
         self.indirect[pos] = None;
         Ok(n)
+    }
+
+    /// Feed one inbound NWK frame (MAC header already stripped by the
+    /// driver/adapter path) to the coordinator responder: secured
+    /// frames are opened with `keys`, replay-checked, then dispatched
+    /// by NWK frame type — ZDO Device_annce marks the child heard,
+    /// NWK commands report their id (response legs follow), other
+    /// APS data reports cluster/profile. Every refusal is counted in
+    /// [`nwk_rx_ignored`](Self::nwk_rx_ignored); nothing drops
+    /// silently.
+    #[must_use]
+    pub fn on_nwk_data(&mut self, msdu: &[u8], keys: &KeySet, now_ms: u64) -> NwkRxOutcome {
+        let outcome = self.classify_nwk(msdu, keys, now_ms);
+        match outcome {
+            NwkRxOutcome::Ignored(_) => self.nwk_rx_ignored += 1,
+            _ => self.nwk_rx_classified += 1,
+        }
+        outcome
+    }
+
+    fn classify_nwk(&mut self, msdu: &[u8], keys: &KeySet, now_ms: u64) -> NwkRxOutcome {
+        use NwkIgnore as Ig;
+        let dec = match nwk_decode(msdu) {
+            Ok(d) => d,
+            Err(_) => return NwkRxOutcome::Ignored(Ig::BadHeader),
+        };
+        if dec.header.control.source_route {
+            return NwkRxOutcome::Ignored(Ig::SourceRoute);
+        }
+        // Header length: fixed part + extended addresses present.
+        let mut hdr_len = 8;
+        if dec.header.control.dst_ieee {
+            hdr_len += 8;
+        }
+        if dec.header.control.src_ieee {
+            hdr_len += 8;
+        }
+        let mut pt_buf = [0u8; 160];
+        let pt: &[u8] = if dec.header.control.security {
+            // Decode with the base level restored (the sender zeroes
+            // the on-air level bits; wave-33/wave-36 pattern): the
+            // nonce builder and the re-encoded AAD both need the
+            // restored control octet.
+            let (aux, aux_len) = match AuxHeader::decode_with_level(dec.payload, NWK_SEC_LEVEL) {
+                Ok(v) => v,
+                Err(_) => return NwkRxOutcome::Ignored(Ig::BadAux),
+            };
+            let seq = match aux.key_id {
+                KeyIdentifier::Index(s) => s,
+                _ => return NwkRxOutcome::Ignored(Ig::BadKeyId),
+            };
+            let key = match keys.select(seq) {
+                Some(k) => k,
+                None => return NwkRxOutcome::Ignored(Ig::BadAux),
+            };
+            let nonce = match NwkNonce::from_header(&aux) {
+                Ok(n) => n,
+                Err(_) => return NwkRxOutcome::Ignored(Ig::BadAux),
+            };
+            let Some(restored_ctl) = aux.control.with_level(NWK_SEC_LEVEL) else {
+                return NwkRxOutcome::Ignored(Ig::BadAux);
+            };
+            let restored = AuxHeader {
+                control: restored_ctl,
+                frame_counter: aux.frame_counter,
+                ext_source: aux.ext_source,
+                key_id: aux.key_id,
+            };
+            let mut rbuf = [0u8; 16];
+            let rlen = match restored.encode_into(&mut rbuf) {
+                Ok(n) => n,
+                Err(_) => return NwkRxOutcome::Ignored(Ig::BadAux),
+            };
+            if dec.payload.len() < aux_len + CCM_TAG_LEN {
+                return NwkRxOutcome::Ignored(Ig::BadAux);
+            }
+            let mut aad = [0u8; 64];
+            if hdr_len + rlen > aad.len() {
+                return NwkRxOutcome::Ignored(Ig::BadHeader);
+            }
+            aad[..hdr_len].copy_from_slice(&msdu[..hdr_len]);
+            aad[hdr_len..hdr_len + rlen].copy_from_slice(&rbuf[..rlen]);
+            let ct_end = dec.payload.len() - CCM_TAG_LEN;
+            let mut tag = [0u8; CCM_TAG_LEN];
+            tag.copy_from_slice(&dec.payload[ct_end..]);
+            let n = match ccm_star_open_into(
+                &key.key,
+                &nonce.bytes,
+                &aad[..hdr_len + rlen],
+                &dec.payload[aux_len..ct_end],
+                &tag,
+                &mut pt_buf,
+            ) {
+                Ok(n) => n,
+                Err(_) => return NwkRxOutcome::Ignored(Ig::MicFailed),
+            };
+            // Replay check after authentication (counter untrusted
+            // before the MIC verifies).
+            let src_u64 = aux
+                .ext_source
+                .map(u64::from_le_bytes)
+                .unwrap_or(dec.header.src_addr as u64);
+            if self.rx_replay.check(src_u64, aux.frame_counter).is_err() {
+                return NwkRxOutcome::Ignored(Ig::Replay);
+            }
+            &pt_buf[..n]
+        } else {
+            dec.payload
+        };
+        match dec.header.control.frame_type {
+            NwkFrameType::Command => match pt.first() {
+                Some(&id) => NwkRxOutcome::NwkCommand { id },
+                None => NwkRxOutcome::Ignored(Ig::EmptyCommand),
+            },
+            NwkFrameType::Data => self.classify_aps(pt, now_ms),
+            _ => NwkRxOutcome::Ignored(Ig::BadHeader),
+        }
+    }
+
+    /// Dispatch one decrypted/open NWK-data payload as APS.
+    fn classify_aps(&mut self, pt: &[u8], now_ms: u64) -> NwkRxOutcome {
+        match decode_data(pt) {
+            Ok(d) => {
+                if d.header.profile_id == 0x0000 && d.header.cluster_id == 0x0013 {
+                    return self.on_annce(d.payload, now_ms);
+                }
+                NwkRxOutcome::Data {
+                    cluster: d.header.cluster_id,
+                    profile: d.header.profile_id,
+                }
+            }
+            // Receiver tolerance: live Ember NCPs announce with APS
+            // broadcast + destination endpoint 0x00 (MIC-verified on
+            // air, w96 joinS), which `decode_data` refuses per
+            // §2.2.5.1.2. Accept exactly that class here — strict on
+            // transmit (we never emit it), tolerant on receive.
+            Err(_) => self.classify_annce_broadcast(pt, now_ms),
+        }
+    }
+
+    /// Tolerated annce class: `FC 08` + ep `00` + cluster `0x0013` +
+    /// profile `0x0000`, then the standard ZDO payload.
+    fn classify_annce_broadcast(&mut self, pt: &[u8], now_ms: u64) -> NwkRxOutcome {
+        use NwkIgnore as Ig;
+        if pt.len() < 8 + DeviceAnnce::LEN
+            || pt[0] != 0x08
+            || pt[1] != 0x00
+            || u16::from_le_bytes([pt[2], pt[3]]) != 0x0013
+            || u16::from_le_bytes([pt[4], pt[5]]) != 0x0000
+        {
+            return NwkRxOutcome::Ignored(Ig::BadAps);
+        }
+        self.on_annce(&pt[8..], now_ms)
+    }
+
+    /// Handle one ZDO Device_annce payload (TSN first): mark the
+    /// announced child heard when it is admitted (best-effort: an
+    /// unknown short still reports the annce, it just marks nothing).
+    fn on_annce(&mut self, zdp: &[u8], now_ms: u64) -> NwkRxOutcome {
+        use NwkIgnore as Ig;
+        let ann = match DeviceAnnce::decode(zdp) {
+            Ok(a) => a,
+            Err(_) => return NwkRxOutcome::Ignored(Ig::BadZdo),
+        };
+        let mut eui = [0u8; 8];
+        eui.copy_from_slice(&ann.ieee.to_le_bytes());
+        let _ = self.machine.child_heard(ann.nwk_addr, now_ms);
+        NwkRxOutcome::Annce {
+            short: ann.nwk_addr,
+            eui,
+            capability: ann.capability,
+        }
     }
 
     /// Run the install-code key exchange for the admitted joiner.

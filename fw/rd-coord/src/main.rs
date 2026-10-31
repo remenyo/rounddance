@@ -24,6 +24,7 @@ use rounddance_hal_esp::app::{
 use rounddance_hal_esp::mac_cmd::{gratuitous_due, GRATUITOUS_BEACON_INTERVAL_MS};
 use rounddance_hal_esp::{AppRole, CoordinatorApp, EspAdapter, EspIdfDriver, SerialLog};
 use rounddance_commission::ha_transport_key;
+use rounddance_security::{KeySet, NetworkKey};
 use rounddance_mac_sap::{Channel, MacDataSap, MacMgmtSap, TxHandle, TxStatus};
 use std::time::Instant;
 
@@ -134,6 +135,9 @@ fn main() {
     // Key-transport key from the public HA preconfigured link key;
     // the NCP derives the same from its provisioned HA key.
     let transport_key = ha_transport_key().expect("HA transport key");
+    // Network key store for opening inbound secured NWK frames
+    // (Phase 1 leg RX-1: Device_annce + NWK-command classification).
+    let nwk_keys = KeySet::new(NetworkKey::new(C6_NETKEY, 0));
     loop {
         adapter.pump();
         let now_ms = start.elapsed().as_millis() as u64;
@@ -177,6 +181,9 @@ fn main() {
         // Data RX (NWK and above): log air bytes for the sniffer leg.
         while let Some(ind) = adapter.poll_indication() {
             log_air(&mut log, "RDCOORD RX", ind.msdu.as_slice());
+            // Phase 1 leg RX-1: open + classify inbound NWK frames.
+            let outcome = app.on_nwk_data(ind.msdu.as_slice(), &nwk_keys, now_ms);
+            println!("RDCOORD RX-NWK {:?}", outcome);
         }
         // Drain TX confirms (shared data + MAC queue). A NoAck /
         // ChannelBusy confirm for a join-critical frame re-pends it:
