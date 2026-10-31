@@ -69,6 +69,88 @@ impl SerialLog for ConsoleLog {
     }
 }
 
+/// NVS namespace + key for the joiner aux-counter chunk high-water
+/// (Phase 4: anti-replay across reboots — the joiner-side close of
+/// the parked follow-up from the coordinator NVS leg). Distinct
+/// namespace from the coordinator (`rdcoord`) per the one-namespace-
+/// per-module NVS discipline; short ASCII names per the 15-octet
+/// limit, NUL-terminated for the C API.
+const NVS_NS_AUX: &[u8] = b"rdjoin\0";
+const NVS_KEY_AUXCHUNK: &[u8] = b"aux_chunk\0";
+
+/// Read the persisted aux chunk (`None` = fresh part, missing key, or
+/// any NVS failure — all degrade to the deployment floor, never
+/// panic). Call only after the driver ran `nvs_flash_init`.
+fn nvs_aux_read() -> Option<u32> {
+    // SAFETY: synchronous scalar FFI; the out-param borrows a live
+    // stack slot for the call only; the handle is closed on every
+    // path. Pointer/size contract matches the IDF v6.1 `nvs.h`
+    // signatures (`nvs_open`, `nvs_get_u32`, `nvs_close`).
+    unsafe {
+        let mut handle: esp_idf_sys::nvs_handle_t = 0;
+        if esp_idf_sys::nvs_open(
+            NVS_NS_AUX.as_ptr().cast(),
+            esp_idf_sys::nvs_open_mode_t_NVS_READONLY,
+            &mut handle,
+        ) != esp_idf_sys::ESP_OK
+        {
+            return None;
+        }
+        let mut val: u32 = 0;
+        let rc = esp_idf_sys::nvs_get_u32(handle, NVS_KEY_AUXCHUNK.as_ptr().cast(), &mut val);
+        esp_idf_sys::nvs_close(handle);
+        if rc == esp_idf_sys::ESP_OK {
+            Some(val)
+        } else {
+            None
+        }
+    }
+}
+
+/// Persist the aux chunk best-effort (Phase 4: persist-before-use —
+/// the caller writes each new chunk BEFORE sealing any frame under
+/// it). A failed write only logs: the counter keeps advancing in RAM
+/// (availability over perfect durability; worst case is one chunk of
+/// reuse after a crash, never a rewind while running).
+fn nvs_aux_write(chunk: u32) {
+    // SAFETY: as for [`nvs_aux_read`], plus `nvs_set_u32` /
+    // `nvs_commit` with the same borrow discipline (commit flushes to
+    // flash so a power loss right after still holds the chunk).
+    unsafe {
+        let mut handle: esp_idf_sys::nvs_handle_t = 0;
+        if esp_idf_sys::nvs_open(
+            NVS_NS_AUX.as_ptr().cast(),
+            esp_idf_sys::nvs_open_mode_t_NVS_READWRITE,
+            &mut handle,
+        ) != esp_idf_sys::ESP_OK
+        {
+            println!("RDJOIN NVS-WRITE-FAILED open chunk={chunk}");
+            return;
+        }
+        let rc = esp_idf_sys::nvs_set_u32(handle, NVS_KEY_AUXCHUNK.as_ptr().cast(), chunk);
+        if rc == esp_idf_sys::ESP_OK {
+            let rc = esp_idf_sys::nvs_commit(handle);
+            if rc == esp_idf_sys::ESP_OK {
+                println!("RDJOIN NVS-WROTE aux_chunk={chunk}");
+            } else {
+                println!("RDJOIN NVS-WRITE-FAILED commit chunk={chunk} rc={rc}");
+            }
+        } else {
+            println!("RDJOIN NVS-WRITE-FAILED set chunk={chunk} rc={rc}");
+        }
+        esp_idf_sys::nvs_close(handle);
+    }
+}
+
+/// Poll the app's checkpoint and persist any new chunk (Phase 4:
+/// call after every secured-frame build, before the frame goes on
+/// air — the persist-before-use half of the protocol).
+fn persist_aux_chunk(app: &mut JoinerApp) {
+    if let Some(chunk) = app.aux_checkpoint() {
+        nvs_aux_write(chunk);
+    }
+}
+
 static LAMP_DEF: onoff::ServerDef = onoff::ServerDef;
 
 fn main() {
@@ -121,6 +203,16 @@ fn main() {
 
     let app: &'static mut JoinerApp<'static> =
         Box::leak(Box::new(JoinerApp::new(&LAMP_DEF).expect("joiner app")));
+    // NVM-backed aux counter (Phase 4, joiner side): resume from the
+    // persisted chunk so a reboot never rewinds into the TC's replay
+    // window. Reads after `init` (the driver NVS-first-inits there);
+    // every failure degrades to the deployment floor, never panics.
+    let aux_saved = nvs_aux_read();
+    app.resume_auxctr(aux_saved);
+    match aux_saved {
+        Some(c) => println!("RDJOIN AUX-RESUME chunk={c}"),
+        None => println!("RDJOIN AUX-RESUME fresh"),
+    }
     app.begin_scan(&mut log).expect("begin scan");
     // The startup window is open from here (expect() above guarantees
     // it); the loop closes it after the first collection interval.
@@ -334,6 +426,7 @@ fn main() {
                 match app.take_annce(&mut tx_buf) {
                     Ok(n) if n > 0 => {
                         log_air(&mut log, "RDJOIN TX-ANNCE", &tx_buf[..n]);
+                        persist_aux_chunk(app);
                         match adapter.transmit_mac(&tx_buf[..n]) {
                             Ok(h) => {
                                 annce_handle = Some(h);
@@ -362,6 +455,7 @@ fn main() {
                     match app.take_node_desc_rsp(&mut tx_buf, dst_short, tsn, subject) {
                         Ok(n) if n > 0 => {
                             log_air(&mut log, "RDJOIN TX-NODE-DESC-RSP", &tx_buf[..n]);
+                            persist_aux_chunk(app);
                             match adapter.transmit_mac(&tx_buf[..n]) {
                                 Ok(h) => {
                                     rsp_handle = Some(h);

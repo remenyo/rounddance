@@ -1518,3 +1518,90 @@ fn node_desc_rsp_rebuilds_advance_auxctr() {
         assert_eq!((rsp.tsn, rsp.nwk_of_interest), (0x09, 0x0002));
     }
 }
+
+/// Phase 4 joiner-NVS-aux contract: without a resume a rebooted
+/// joiner restarts at `JOINER_AUX_BASE` (reusing counters a live TC
+/// still holds in its replay window — the exact rewind the coord
+/// NVS leg closed on the other side); `resume_auxctr` with the
+/// persisted chunk restarts strictly above every radiated counter.
+/// The fw NVS wiring (this leg) calls `resume_auxctr` at boot and
+/// `aux_checkpoint` after every secured build; this test pins the
+/// app behavior that wiring depends on.
+#[test]
+fn joiner_aux_resume_skips_rewind() {
+    use rounddance_hal_esp::app::{AUX_CHUNK, JOINER_AUX_BASE};
+    const KEY: [u8; 16] = [
+        0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e,
+        0x1f,
+    ];
+    const JW: [u8; 8] = [0xa4, 0x97, 0x85, 0xfe, 0xff, 0x62, 0xf2, 0xa0];
+    static DEF: rounddance_zcl::onoff::ServerDef = rounddance_zcl::onoff::ServerDef;
+    fn keyed_joiner() -> app::JoinerApp<'static> {
+        let mut log = app::NullLog;
+        let mut joiner = app::JoinerApp::new(&DEF).unwrap();
+        joiner.begin_scan(&mut log).unwrap();
+        joiner
+            .ingest_beacon(rounddance_commission::BeaconSurveyEntry {
+                pan_id: 0xC601,
+                channel: 15,
+                lqi: 200,
+                rssi: -40,
+                permit_joining: true,
+                router_capacity: true,
+                end_device_capacity: true,
+                protocol_version: 2,
+            })
+            .unwrap();
+        assert_eq!(joiner.finish_scan(&mut log), Some(0xC601));
+        let mut rsp = [0u8; 25];
+        rsp[..5].copy_from_slice(&[0x63, 0xcc, 0x02, 0x01, 0xc6]);
+        rsp[5..13].copy_from_slice(&JW);
+        rsp[13..21].copy_from_slice(&rounddance_hal_esp::app::TC_EUI_WIRE);
+        rsp[21..25].copy_from_slice(&[0x02, 0x02, 0x00, 0x00]);
+        let _ = joiner.on_mac_psdu(&mut log, &rsp[..25], 15, -40, 200);
+        let tkey = rounddance_commission::ha_transport_key().unwrap();
+        let tp = rounddance_commission::TransportKeyParams {
+            dst_pan: 0xC601,
+            dst_short: 0x0002,
+            dst_eui: JW,
+            src_eui: [0x68, 0x7f, 0x86, 0xfe, 0xff, 0x62, 0xf2, 0xa0],
+            mac_seq: 0x5a,
+            nwk_seq: 0x21,
+            nwk_radius: 0x1e,
+            aps_ctr: 0x51,
+            auxctr: 0x0000_1000,
+            seq_no: 0x00,
+            netkey: KEY,
+            transport_key: tkey,
+        };
+        let mut tf = [0u8; 128];
+        let tn = rounddance_commission::build_transport_key_frame(&tp, &mut tf).unwrap();
+        let _ = joiner.on_nwk_joiner(&tf[9..tn]);
+        assert!(joiner.adopted_netkey().is_some());
+        joiner
+    }
+    fn annce_auxctr(joiner: &mut app::JoinerApp<'static>) -> u32 {
+        let mut out = [0u8; 160];
+        let n = joiner.take_annce(&mut out).unwrap();
+        assert!(n > 0, "annce needs adopted short+key");
+        u32::from_le_bytes(out[9 + 8 + 1..9 + 8 + 5].try_into().unwrap())
+    }
+    // First boot: base chunk, base counter.
+    let mut a = keyed_joiner();
+    assert_eq!(a.aux_checkpoint(), Some(JOINER_AUX_BASE / AUX_CHUNK));
+    let c1 = annce_auxctr(&mut a);
+    assert_eq!(c1, JOINER_AUX_BASE);
+    // Reboot WITHOUT resume: same counter reused (the rewind this
+    // leg's fw wiring closes on device).
+    let mut b = keyed_joiner();
+    assert_eq!(annce_auxctr(&mut b), c1);
+    // Reboot WITH resume of the radiated chunk: strictly above.
+    // (The checkpoint now reports the NEW chunk — persist-before-use:
+    // the fw persists it before sealing any frame under it.)
+    let mut c = keyed_joiner();
+    c.resume_auxctr(Some(c1 / AUX_CHUNK));
+    assert_eq!(c.aux_checkpoint(), Some(c1 / AUX_CHUNK + 1));
+    let c3 = annce_auxctr(&mut c);
+    assert!(c3 > c1, "resumed {c3:#x} must exceed radiated {c1:#x}");
+    assert_eq!(c3, (c1 / AUX_CHUNK + 1) * AUX_CHUNK);
+}
