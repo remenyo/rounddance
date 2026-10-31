@@ -19,7 +19,7 @@ use rounddance_hal_esp::app::{
 };
 use rounddance_hal_esp::mac_cmd::Incoming as MacIncoming;
 use rounddance_hal_esp::{AppRole, EspAdapter, EspIdfDriver, JoinerApp, SerialLog};
-use rounddance_mac_sap::{Channel, MacDataSap, MacMgmtSap};
+use rounddance_mac_sap::{Channel, MacDataSap, MacMgmtSap, TxHandle, TxStatus};
 use rounddance_zcl::onoff;
 use std::time::Instant;
 
@@ -32,7 +32,10 @@ const fn parse_channel(s: &str) -> u8 {
     let mut i = 0;
     let mut v: u8 = 0;
     while i < b.len() {
-        assert!(b[i] >= b'0' && b[i] <= b'9', "RD_JOINER_SCAN_CHANNEL not decimal");
+        assert!(
+            b[i] >= b'0' && b[i] <= b'9',
+            "RD_JOINER_SCAN_CHANNEL not decimal"
+        );
         v = v * 10 + (b[i] - b'0');
         i += 1;
     }
@@ -119,6 +122,9 @@ fn main() {
     let app: &'static mut JoinerApp<'static> =
         Box::leak(Box::new(JoinerApp::new(&LAMP_DEF).expect("joiner app")));
     app.begin_scan(&mut log).expect("begin scan");
+    // The startup window is open from here (expect() above guarantees
+    // it); the loop closes it after the first collection interval.
+    let mut scan_open = true;
 
     let mut tx_buf = [0u8; 160];
     // 160 B: the largest single frame this leg builds is a secured
@@ -129,6 +135,12 @@ fn main() {
     // elapses (w97: finishing per-beacon parks the table on the first
     // non-permit neighbour). A window with no candidate re-opens
     // immediately — the joiner scans until it elects.
+    // Window protocol (w103: open and close must BRACKET a collection
+    // interval — calling begin+finish back-to-back finishes an empty
+    // table every window and wedges unelected forever, as 51
+    // zero-election windows on air proved). `scan_open` tracks which
+    // half of the protocol we are in (starts true: the startup window
+    // above is already collecting).
     let mut last_scan_ms: u64 = 0;
     const SCAN_WINDOW_MS: u64 = 4_000;
     let mut last_req_ms: u64 = 0;
@@ -146,22 +158,38 @@ fn main() {
     let mut adopted_short: Option<u16> = None;
     // Announce once the Trust-Center key is adopted.
     let mut annce_pending = false;
+    // Announce retry state (w103: broadcasts report radiation via
+    // confirms too — two consecutive annces vanished on a congested
+    // channel with no FAILED line because the fw dropped confirms
+    // unread. Bounded re-TX on any non-Delivered outcome).
+    let mut annce_handle: Option<TxHandle> = None;
+    let mut annce_tries: u8 = 0;
+    const ANNCE_RETRIES_MAX: u8 = 4;
     let start = Instant::now();
     loop {
         adapter.pump();
         let now_ms = start.elapsed().as_millis() as u64;
-        // Windowed scan: collect beacons, then finish + elect once
-        // per window. Finishing per-beacon parks the table on the
-        // first heard network (usually a non-permit neighbour); a
-        // window with no candidate re-opens immediately.
-        if app.candidate_pan().is_none() && now_ms.wrapping_sub(last_scan_ms) >= SCAN_WINDOW_MS {
-            last_scan_ms = now_ms;
-            match app.begin_scan(&mut log) {
-                Ok(()) => {}
-                Err(_) => {} // already scanning; keep collecting
-            }
-            if let Some(pan) = app.finish_scan(&mut log) {
-                println!("RDJOIN CANDIDATE pan={pan:#06x}");
+        // Windowed scan: open the window, collect beacons across
+        // loop iterations, then finish + elect once the window
+        // elapses. Open and close are opposite halves of one window
+        // (see `scan_open`): finishing in the same iteration as
+        // opening would always rank an empty table.
+        if app.candidate_pan().is_none() {
+            if !scan_open && now_ms.wrapping_sub(last_scan_ms) >= SCAN_WINDOW_MS {
+                last_scan_ms = now_ms;
+                match app.begin_scan(&mut log) {
+                    Ok(()) => scan_open = true,
+                    // Already scanning (steering still holds the window
+                    // this flag desynced from): treat as open so the
+                    // close half still runs on schedule.
+                    Err(_) => scan_open = true,
+                }
+            } else if scan_open && now_ms.wrapping_sub(last_scan_ms) >= SCAN_WINDOW_MS {
+                last_scan_ms = now_ms;
+                scan_open = false;
+                if let Some(pan) = app.finish_scan(&mut log) {
+                    println!("RDJOIN CANDIDATE pan={pan:#06x}");
+                }
             }
         }
         // MAC-command RX: beacon survey + assoc-rsp handoff, logged.
@@ -249,6 +277,10 @@ fn main() {
                 JoinerNwkOutcome::TransportAccepted { auxctr } => {
                     println!("RDJOIN TRANSPORT-OPEN auxctr={auxctr:#010x}");
                     annce_pending = true;
+                    // Fresh delivery, fresh announce budget (a rejoin
+                    // later in this boot must not inherit exhaustion).
+                    annce_handle = None;
+                    annce_tries = 0;
                 }
                 JoinerNwkOutcome::NodeDescReq {
                     src_short,
@@ -278,31 +310,50 @@ fn main() {
                 }
             }
         }
-        // Announce once the key is adopted (single unsolicited
-        // broadcast); then verify + close out the join.
-        if annce_pending {
-            match app.take_annce(&mut tx_buf) {
-                Ok(n) if n > 0 => {
-                    log_air(&mut log, "RDJOIN TX-ANNCE", &tx_buf[..n]);
-                    match adapter.transmit_mac(&tx_buf[..n]) {
-                        Ok(_) => {
-                            annce_pending = false;
-                            app.verify_confirm(&mut log);
-                            app.close_out(&mut log);
+        // Announce while the key is adopted: build once per attempt,
+        // transmit, and retire only on a Delivered confirm (or the
+        // retry budget). Close-out is gated on radiated proof, not on
+        // submit success (w103: two submits Ok'd yet nothing reached
+        // air on a congested channel — confirms were dropped unread).
+        if annce_pending && annce_handle.is_none() {
+            if annce_tries >= ANNCE_RETRIES_MAX {
+                println!("RDJOIN ANNCE-GIVEUP tries={annce_tries} (proceeding joined-locally)");
+                annce_pending = false;
+                app.verify_confirm(&mut log);
+                app.close_out(&mut log);
+            } else {
+                match app.take_annce(&mut tx_buf) {
+                    Ok(n) if n > 0 => {
+                        log_air(&mut log, "RDJOIN TX-ANNCE", &tx_buf[..n]);
+                        match adapter.transmit_mac(&tx_buf[..n]) {
+                            Ok(h) => {
+                                annce_handle = Some(h);
+                                annce_tries += 1;
+                            }
+                            Err(e) => println!("RDJOIN TX-ANNCE-FAILED {e:?}"),
                         }
-                        Err(e) => println!("RDJOIN TX-ANNCE-FAILED {e:?}"),
                     }
+                    Ok(_) => {
+                        // Nothing to announce (key or short missing).
+                        annce_pending = false;
+                    }
+                    Err(e) => println!("RDJOIN ANNCE-BUILD-FAILED {e:?}"),
                 }
-                Ok(_) => {
-                    // Nothing to announce (key or short missing).
-                    annce_pending = false;
-                }
-                Err(e) => println!("RDJOIN ANNCE-BUILD-FAILED {e:?}"),
             }
         }
-        // TX confirms drain (shared queue); joiner ignores outcomes
-        // this leg, but the queue must not wedge.
-        while adapter.poll_confirm().is_some() {}
+        // TX confirms drain (shared queue): match our annce handle so
+        // a non-Delivered broadcast is retried above instead of lost.
+        while let Some(c) = adapter.poll_confirm() {
+            if Some(c.handle) == annce_handle {
+                println!("RDJOIN ANNCE-CONFIRM {:?} tries={annce_tries}", c.status);
+                annce_handle = None;
+                if c.status == TxStatus::Delivered {
+                    annce_pending = false;
+                    app.verify_confirm(&mut log);
+                    app.close_out(&mut log);
+                }
+            }
+        }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
 }

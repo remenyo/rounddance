@@ -380,3 +380,32 @@ fn joiner_on_mac_psdu_scans_and_hands_off_assoc() {
     assert_eq!(&out[9..17], &wire);
     assert_eq!(&out[17..19], &[0x01, 0x8c]);
 }
+
+/// w103 scan-window protocol regression (51 zero-election windows on
+/// air): `begin_scan` + `finish_scan` in the same tick MUST yield no
+/// candidate (the table cannot contain beacons that arrive later), so
+/// firmware must bracket a collection interval between the two calls.
+/// Recovery path pinned too: after an empty finish the next
+/// begin/ingest/finish cycle elects normally.
+#[test]
+fn scan_window_brackets_collection_interval() {
+    static DEF: rounddance_zcl::onoff::ServerDef = rounddance_zcl::onoff::ServerDef;
+    let mut log = VecLog::default();
+    let mut joiner = JoinerApp::new(&DEF).unwrap();
+    // Same-tick open+close: empty table, no candidate — the fw wedge.
+    joiner.begin_scan(&mut log).unwrap();
+    assert_eq!(joiner.finish_scan(&mut log), None);
+    assert_eq!(joiner.candidate_pan(), None);
+    // Recovery: re-open, ingest one permit-open C601 beacon over the
+    // (simulated) interval, then close and elect.
+    joiner.begin_scan(&mut log).unwrap();
+    let mut bc = [0u8; 26];
+    bc[..14].copy_from_slice(&[
+        0x00, 0x80, 0x5a, 0x01, 0xc6, 0x00, 0x00, 0xff, 0xcf, 0x00, 0x00, 0x00, 0x22, 0x8c,
+    ]);
+    bc[14..22].copy_from_slice(&EXT_PAN_ID);
+    bc[22..25].copy_from_slice(&[0xff, 0xff, 0xff]);
+    joiner.on_mac_psdu(&mut log, &bc, APP_CHANNEL, -60, 220);
+    assert_eq!(joiner.finish_scan(&mut log), Some(APP_PAN));
+    assert_eq!(joiner.candidate_pan(), Some(APP_PAN));
+}

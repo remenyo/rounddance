@@ -113,6 +113,14 @@ fn main() {
     let mut app = CoordinatorApp::new();
     app.begin_formation(&mut log).expect("formation");
     app.formation_done(&mut log, true);
+    // Key provenance tag (never key material): operators confirm from
+    // this line which key an image runs — `custom` iff RD_NETKEY_HEX
+    // was set at build time.
+    if option_env!("RD_NETKEY_HEX").is_some() {
+        println!("RDCOORD NETKEY custom");
+    } else {
+        println!("RDCOORD NETKEY lab-default (set RD_NETKEY_HEX for deployment)");
+    }
     // Bounded permit window (1 h lab bound: comfortably covers paced
     // manual join experiments; the 600 s bound kept expiring mid-run
     // and made in-window assoc-reqs look like app silence on air).
@@ -138,10 +146,15 @@ fn main() {
     let mut transport_handle: Option<TxHandle> = None;
     let mut assoc_retries: u8 = 4;
     let mut transport_retries: u8 = 4;
-    // Lab network key (OUR C601 network; deployment-owned test key,
-    // documented: production must randomize + persist the aux counter
-    // in NVS instead of rebooting from the fixed base).
-    const C6_NETKEY: [u8; 16] = *b"C6JOIN01LABTEST!";
+    // Network key: build-time provisioned. `RD_NETKEY_HEX` (32 hex
+    // digits) bakes a deployment key into this image; unset means the
+    // explicit lab default below (with a build warning — never silent).
+    // Phase 4: the fixed test key is no longer the only option, and any
+    // image that uses it says so at boot (`RDCOORD NETKEY` line).
+    const C6_NETKEY: [u8; 16] = match option_env!("RD_NETKEY_HEX") {
+        Some(s) => rounddance_commission::parse_hex_netkey(s),
+        None => *b"C6JOIN01LABTEST!",
+    };
     // Key-transport key from the public HA preconfigured link key;
     // the NCP derives the same from its provisioned HA key.
     let transport_key = ha_transport_key().expect("HA transport key");

@@ -34,5 +34,14 @@ fn main() {
             "CARGO_WORKSPACE_DIR={ws} has no sdkconfig.defaults; esp-idf-sys would silently drop our defaults"
         );
     }
+    // Build-time option envs read via `option_env!` are NOT tracked by
+    // cargo automatically: without this, changing RD_NETKEY_HEX would
+    // silently reuse a stale image. Track it explicitly.
+    println!("cargo:rerun-if-env-changed=RD_NETKEY_HEX");
+    if std::env::var("RD_NETKEY_HEX").is_err() {
+        println!(
+            "cargo:warning=RD_NETKEY_HEX unset: image runs the lab-default test key (set RD_NETKEY_HEX=<(32 hex)> for deployment)"
+        );
+    }
     embuild::espidf::sysenv::output();
 }

@@ -30,6 +30,7 @@
 pub mod classical;
 pub mod finding;
 pub mod formation;
+pub mod keyprov;
 pub mod secured;
 pub mod steering;
 pub mod touchlink;
@@ -51,6 +52,7 @@ pub use formation::{
     FormationRequest, FormationState, LogicalType, PanChoice, CHANNEL_MAX, CHANNEL_MIN,
     FORMATION_BEACON_ORDER, FORMATION_SUPERFRAME_ORDER, MAX_SCAN_CHANNELS,
 };
+pub use keyprov::{netkey_from_hex, parse_hex_netkey, NetkeyHexError};
 pub use secured::{
     build_secured_nwk_frame, SecuredError, SecuredNwkParams, SECURED_FRAME_MAX, SECURED_LEVEL,
     SECURED_PT_MAX, SECURED_SEQ_NO,
