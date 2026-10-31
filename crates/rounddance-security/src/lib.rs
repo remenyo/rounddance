@@ -39,6 +39,7 @@ pub mod aes;
 #[cfg(feature = "host")]
 pub mod backend_host;
 pub mod cbke;
+pub mod ccm;
 pub mod cert;
 pub mod classical;
 pub mod ecc;
@@ -52,6 +53,10 @@ pub mod store;
 pub use aes::{encrypt_block_aes128, BLOCK_LEN};
 pub use cbke::{
     CbkeError, CbkeSession, CbkeState, Role, CONFIRM_LABEL_U, CONFIRM_LABEL_V, SESSION_KEY_LABEL,
+};
+pub use ccm::{
+    open_into as ccm_star_open_into, seal_into as ccm_star_seal_into, CcmError,
+    NONCE_LEN as CCM_NONCE_LEN, TAG_LEN as CCM_TAG_LEN,
 };
 pub use cert::{ImplicitCert, PeerIdentity, IMPLICIT_CERT_LEN};
 pub use classical::{

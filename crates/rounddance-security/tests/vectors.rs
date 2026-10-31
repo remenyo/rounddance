@@ -1060,3 +1060,32 @@ fn vector_key_hierarchy_from_worked_link_05_3474_23_453_01() {
     );
     assert_eq!(data_key_is_link_key(&link), &link);
 }
+
+// Production CCM* equivalence: the `ccm` module must open the genuine
+// Ember frames and seal byte-identically to the test-local oracle
+// (retired lab-capture key, interop pin only).
+#[test]
+fn prod_ccm_matches_oracle_on_ember_vectors() {
+    for frame in [&EMBER_U1, &EMBER_B1] {
+        let (nwk, aux, ct) = ember_parts(frame);
+        let (header, _) = AuxHeader::decode_with_level(aux, 5).unwrap();
+        let nonce = NwkNonce::from_header(&header).unwrap();
+        let aad = [nwk, &restored_aux(aux, 5, &header)[..]].concat();
+        let expect_pt = ccm_star_open(&EMBER_LAB_KEY, &nonce.bytes, &aad, ct)
+            .expect("oracle opens genuine frame");
+        // Production open agrees, byte for byte.
+        let mut pt = [0u8; 64];
+        let (ct_body, tag) = ct.split_at(ct.len() - CCM_TAG_LEN);
+        let mut tag4 = [0u8; CCM_TAG_LEN];
+        tag4.copy_from_slice(tag);
+        let n = ccm_star_open_into(&EMBER_LAB_KEY, &nonce.bytes, &aad, ct_body, &tag4, &mut pt)
+            .expect("prod opens genuine frame");
+        assert_eq!(&pt[..n], &expect_pt[..]);
+        // Production seal reproduces the oracle wire bytes exactly.
+        let mut sealed = [0u8; 64];
+        let m = ccm_star_seal_into(&EMBER_LAB_KEY, &nonce.bytes, &aad, &expect_pt, &mut sealed)
+            .expect("prod seals");
+        let oracle_wire = ccm_star_seal(&EMBER_LAB_KEY, &nonce.bytes, &aad, &expect_pt);
+        assert_eq!(&sealed[..m], &oracle_wire[..]);
+    }
+}
