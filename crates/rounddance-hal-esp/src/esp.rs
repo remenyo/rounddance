@@ -59,9 +59,29 @@ static CURRENT_CH: AtomicU8 = AtomicU8::new(15);
 /// Driver event hook: TX-DONE. Signature matches the header's
 /// `transmit_done` extern (`esp_ieee802154.h` §"callbacks").
 ///
-/// SAFETY: atomic flag store only — no logging, no locks, no allocation.
+/// The header names the ACK buffer explicitly: `receive_handle_done`
+/// takes "the frame ... or ack frame from `esp_ieee802154_transmit_done`".
+/// The driver parks every received ACK in one of its RX-buffer slots
+/// (`IEEE802154_RX_BUFFER_STAT_IS_FREE(false)` in the driver's own
+/// `ieee802154_transmit_done`) and only frees the slot on
+/// `receive_handle_done`. Never releasing it leaks one slot per
+/// ACK-requesting transmission until the pool refuses further ACKs
+/// (reported as NO_ACK) and its buffer accounting degrades — the
+/// exact subsystem whose abort path asserts in b007. Release first,
+/// then report Done, so the slot is free before any next submit.
+///
+/// SAFETY: atomic flag store only — no logging, no locks, no allocation;
+/// the `handle_done` call follows the same ISR contract as the
+/// receive path (driver-owned pointer, exactly once).
 #[no_mangle]
-pub extern "C" fn esp_ieee802154_transmit_done(_frame: *const u8, _ack: *const u8, _info: *mut u8) {
+pub extern "C" fn esp_ieee802154_transmit_done(_frame: *const u8, ack: *const u8, _info: *mut u8) {
+    if !ack.is_null() {
+        // SAFETY: driver-owned ACK buffer from this callback; release
+        // exactly once per the header contract (see above).
+        unsafe {
+            ffi::esp_ieee802154_receive_handle_done(ack);
+        }
+    }
     TX_DONE.store(true, Ordering::Release);
 }
 
