@@ -123,6 +123,10 @@ fn main() {
     app.admit_joiner(&mut log, 0).expect("admit 97A4");
     app.admit_extra(&mut log, [0x34, 0x8d, 0x13, 0xff, 0xfe, 0x11, 0x49, 0x6d], 0x0002)
         .expect("admit MG24");
+    // Phase-5 MG21-as-joiner (B-007 isolation arm): healthy Ember NCP
+    // peer joins C601 to prove retention on non-suspect hardware.
+    app.admit_extra(&mut log, [0x04, 0xe3, 0xe5, 0xff, 0xfe, 0xf4, 0x75, 0x5f], 0x0003)
+        .expect("admit MG21");
 
     let start = Instant::now();
     let mut last_grat_ms: u64 = 0;

@@ -71,7 +71,7 @@ Status: CLOSED (join path proven 2026-10-31, w94 — see verdict).
 - NCP internal-scan flakiness stands (mitigated by pre-scan retry loop).
 
 ### B-007 (2026-10-31): joined NCP drops within minutes (retention)
-Status: QUARANTINED 2026-10-31 (stick-level verdict — join itself is proven; post-join loss is the unit under test).
+Status: REOPENED 2026-10-31 (our-side retention fault — healthy peer drops identically).
 - Symptom: all 6 joins this campaign drop to `NO_NETWORK/0xFFFE`
   (key retained: `network_key_set=true`) within minutes, then silence:
   exactly one NWK-secured uplink ~85 ms post-transport, then zero polls,
@@ -106,6 +106,27 @@ Status: QUARANTINED 2026-10-31 (stick-level verdict — join itself is proven; p
   (this MG24 stick; MG21 + C6 coordinators hold their networks
   indefinitely). Pivot interop to the next peer (MG21-as-joiner vs
   C601 per Phase 5). Evidence ~/hwscratch/b007/.
+
+- REOPENED w100 (MG21-as-joiner vs C601): healthy Ember NCP
+  (live EUI `04:e3:e5:ff:fe:f4:75:5f`, holds its own reference net
+  indefinitely as TC) joins OUR C601 3/4 with full handshake
+  (NETWORK_UP/0x0003, assoc-req ACKed, RSP 63cc short 0x0003 ACKed,
+  transport, Annce parsed, Node_desc_req sent, 0x0B logged — serial
+  + sniffer agree) then drops to EMPTY/FFFE within 10 min EVERY
+  time: 2x zero-touch watches (no host contact in-window) + 1x
+  1-min-dump watch, all EMPTY at first check; post-join air is
+  total NCP silence (no polls, no rejoin, no leave — same signature
+  as MG24). The 4th attempt JOIN_FAILED in 3.9 s (ChannelBusy-heavy
+  ch15; flake, 3/4 join fine). 2-firmware x 2-coordinator quarantine
+  logic is SUPERSEDED on the "our stack ruled out" half: MG24 drops
+  from the reference TC too (stick fault stands), but a HEALTHY peer
+  drops from C601 — the common factor is our coordinator. Mechanism
+  unknown: NCPs send nothing post-join (nothing to mis-answer), our
+  Node_desc_req predates nothing (MG24 dropped pre-RSP-1 too), no
+  leave ever sent. Next diagnostic leg (parked, explicit): NCP UART
+  tap across the drop window (NCP-side reset vs silent token clear)
+  + drop-window pinning with sub-minute single dumps from a fresh
+  join. Evidence ~/hwscratch/w100/.
 - Lab at w96 closeout: 7F68 restored byte-identical to preflash backup
   (0 diff bytes); MG24 factory-reset EMPTY; MG21 left FORMED
   (documented lab-TC state); leases none, quarantine none. Evidence:

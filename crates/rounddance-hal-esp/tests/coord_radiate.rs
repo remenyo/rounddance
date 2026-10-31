@@ -1335,3 +1335,34 @@ fn joiner_transport_open_adopts_key_and_answers() {
     assert_eq!(rsp.nwk_of_interest, 0x0002);
     assert!(rsp.descriptor.is_some());
 }
+
+/// Phase 5 MG21-as-joiner: the MG21 stick (EUI
+/// `04:e3:e5:ff:fe:f4:75:5f`, live-probed) radiates its EUI LSB-first
+/// like every Ember NCP, so admission must accept the air order and
+/// answer short 0x0003. Unadmitted until the fw allow-list names it.
+#[test]
+fn admit_extra_answers_mg21_as_joiner() {
+    let mut air = [0u8; 19];
+    air[..9].copy_from_slice(&[0x23, 0xc8, 0x4a, 0x01, 0xc6, 0x00, 0x00, 0xff, 0xff]);
+    // True LSB-first air order: the FULL byte-reverse of display
+    // order (middle `ff:fe` becomes `fe:ff` on air, as rung-3 proved
+    // for the MG24: `6d:49:11:fe:ff:13:8d:34`).
+    air[9..17].copy_from_slice(&[0x5f, 0x75, 0xf4, 0xfe, 0xff, 0xe5, 0xe3, 0x04]);
+    air[17..19].copy_from_slice(&[0x01, 0x8c]);
+    let mut app = formed_app();
+    let mut log = app::NullLog;
+    // Unadmitted: silent.
+    app.on_mac_psdu(&air);
+    let mut out = [0u8; 32];
+    assert_eq!(app.take_assoc_rsp(&mut out).unwrap(), 0);
+    // Admit by display order, answer the air order with 0x0003.
+    app.open_permit(&mut log, 600_000).unwrap();
+    app.admit_extra(&mut log, app::MG21_EUI, app::MG21_SHORT)
+        .unwrap();
+    app.on_mac_psdu(&air);
+    let n = app.take_assoc_rsp(&mut out).unwrap();
+    assert_eq!(n, 25);
+    assert_eq!(out[21], MAC_ASSOC_RSP);
+    assert_eq!(u16::from_le_bytes([out[22], out[23]]), app::MG21_SHORT);
+    assert_eq!(&out[13..21], &app::TC_EUI_WIRE);
+}

@@ -247,6 +247,13 @@ pub const JOINER_EUI: [u8; 8] = [0xa0, 0xf2, 0x62, 0xff, 0xfe, 0x85, 0x97, 0xa4]
 pub const MG24_EUI: [u8; 8] = [0x34, 0x8d, 0x13, 0xff, 0xfe, 0x11, 0x49, 0x6d];
 /// Short address assigned to the MG24 at association.
 pub const MG24_SHORT: u16 = 0x0002;
+/// Phase-5 MG21-as-joiner long address on the air
+/// (`04:e3:e5:ff:fe:f4:75:5f`, live-probed via bellows getEui64):
+/// healthy Ember NCP peer that joins C601 to prove retention on
+/// non-suspect hardware (B-007 isolation arm).
+pub const MG21_EUI: [u8; 8] = [0x04, 0xe3, 0xe5, 0xff, 0xfe, 0xf4, 0x75, 0x5f];
+/// Short address assigned to the MG21 at association.
+pub const MG21_SHORT: u16 = 0x0003;
 /// Joiner MAC capability octet: end device, mains powered, receiver
 /// stays on while idle, short address requested (OTA-proven).
 pub const MAC_CAPS: u8 = 0x8c;
