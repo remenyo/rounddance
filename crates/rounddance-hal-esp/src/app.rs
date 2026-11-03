@@ -42,13 +42,11 @@ use rounddance_commission::{
     LogicalType, MmoJoinKdf, PanChoice, SteeringMachine, SteeringState, TrustCenter,
     TRANSPORT_AUX_BASE,
 };
-use rounddance_nwk::{
-    decode as nwk_decode, FrameControl as NwkFc, FrameType as NwkFrameType, NwkHeader,
-};
+use rounddance_nwk::{decode as nwk_decode, FrameType as NwkFrameType};
 use rounddance_roles::{AgingPolicy, CoordinatorMachine, CoordinatorState};
 use rounddance_security::{
-    ccm_star_open_into, AuxHeader, FrameCounter, KeyIdMode, KeyIdentifier, KeySet, NwkNonce,
-    ReplayTable, SecurityControl, CCM_NONCE_LEN, CCM_TAG_LEN,
+    ccm_star_open_into, AuxHeader, KeyIdentifier, KeySet, NwkNonce, ReplayTable, CCM_NONCE_LEN,
+    CCM_TAG_LEN,
 };
 use rounddance_zcl::{
     behavior::{Ctx, EventQueue},
@@ -451,7 +449,6 @@ pub struct CoordinatorApp {
     /// (pending=0). Table programming itself lands with leg 1c's fw
     /// wiring + air proof.
     indirect: [Option<IndirectSlot>; INDIRECT_DEPTH],
-    tx_counter: FrameCounter,
     rx_replay: ReplayTable<8>,
     toggle_tsn: u8,
     /// Toggles served (requests built).
@@ -502,7 +499,6 @@ impl CoordinatorApp {
             transport_sent: false,
             nwk_auxctr: AuxCounter::fresh(TRANSPORT_AUX_BASE),
             indirect: [None; INDIRECT_DEPTH],
-            tx_counter: FrameCounter::new(100, 4),
             rx_replay: ReplayTable::<8>::new(),
             toggle_tsn: ZCL_TSN,
             toggles_sent: 0,
@@ -1428,39 +1424,74 @@ impl CoordinatorApp {
         c
     }
 
-    /// Build the secured ZCL Toggle request NPDU into `out`.
+    /// Start a new toggle intent: advance the ZCL transaction number
+    /// and hand it out. The fw calls this once per toggle it decides
+    /// to send (not per confirm-driven rebuild — retries of one
+    /// intent MUST share the TSN so the joiner's duplicate-answer
+    /// suppression can tell retries apart from new toggles).
+    /// Distinct intents always carry distinct TSNs (wrapping).
+    pub fn new_toggle(&mut self) -> u8 {
+        self.toggle_tsn = self.toggle_tsn.wrapping_add(1);
+        self.toggle_tsn
+    }
+
+    /// Build the secured ZCL Toggle request frame into `out`.
     ///
-    /// Layout mirrors the OTA first flight: NWK data (secured,
-    /// radius 1), then APS data (secured, HA profile, On/Off
-    /// cluster), then aux (level 5, data key), then the ZCL Toggle.
-    /// Returns the NPDU length.
+    /// Same wire shape as every other secured frame we radiate
+    /// (Node_desc_req, transport, annce): MAC + NWK-secured data
+    /// (aux with ext source + key-sequence octet, CCM* seal under
+    /// `netkey`) carrying a unicast APS header (ep1, On/Off cluster,
+    /// HA profile) + the ZCL Toggle. One aux counter per build from
+    /// the NVM-backed space (the fw persists it after every build,
+    /// like the node_desc path). Returns the frame length.
     ///
     /// Requirement `07-5123-08-241-01` (ZCL frame, reused).
     pub fn build_toggle_request<L: SerialLog>(
         &mut self,
         log: &mut L,
+        netkey: &[u8; 16],
         out: &mut [u8],
     ) -> Result<usize, AppError> {
         let mut zcl = [0u8; 8];
         let zlen = onoff::client::toggle(self.toggle_tsn, &mut zcl)
             .map_err(|_| AppError::BufferTooSmall)?;
-        let npdu = build_secured_npdu(
-            COORD_SHORT,
-            JOINER_SHORT,
-            0x01,
-            self.take_nwk_seq(),
-            ZCL_ENDPOINT,
-            ZCL_ENDPOINT,
-            onoff::CLUSTER_ID,
-            HA_PROFILE,
-            self.take_aps_counter(),
-            &mut self.tx_counter,
-            &zcl[..zlen],
-            out,
-        )?;
-        self.toggles_sent += 1;
-        log_air(log, "C6APP TX-TOGGLE", &out[..npdu]);
-        Ok(npdu)
+        let c = self.take_aps_counter();
+        let aps = rounddance_aps::DataHeader {
+            control: rounddance_aps::FrameControl::data(rounddance_aps::DeliveryMode::Unicast),
+            dest: rounddance_aps::DataDest::Unicast {
+                dst_endpoint: ZCL_ENDPOINT,
+            },
+            cluster_id: onoff::CLUSTER_ID,
+            profile_id: HA_PROFILE,
+            src_endpoint: ZCL_ENDPOINT,
+            counter: c,
+            ext: None,
+        };
+        let mut abuf = [0u8; 32];
+        let alen = aps
+            .encode_into(&zcl[..zlen], &mut abuf)
+            .map_err(|_| AppError::BufferTooSmall)?;
+        let auxctr = self.nwk_auxctr.take();
+        let params = rounddance_commission::SecuredNwkParams {
+            dst_pan: APP_PAN,
+            dst_short: JOINER_SHORT,
+            src_short: COORD_SHORT,
+            broadcast: false,
+            src_eui: TC_EUI_WIRE,
+            mac_seq: self.take_mac_seq(),
+            nwk_seq: self.take_nwk_seq(),
+            nwk_radius: 0x1e,
+            auxctr,
+            netkey: *netkey,
+        };
+        match rounddance_commission::build_secured_nwk_frame(&abuf[..alen], &params, out) {
+            Ok(n) => {
+                self.toggles_sent += 1;
+                log_air(log, "C6APP TX-TOGGLE", &out[..n]);
+                Ok(n)
+            }
+            Err(_) => Err(AppError::BufferTooSmall),
+        }
     }
 
     /// Verify a Default Response NPDU from the joiner.
@@ -1468,18 +1499,108 @@ impl CoordinatorApp {
     /// Decodes NWK → APS → aux (replay-checked) → ZCL and requires
     /// command `0x0b` with the toggle echoed plus success status.
     /// Returns `true` on success and counts it.
-    pub fn handle_defrsp<L: SerialLog>(
+    /// Verify a secured Default Response that was already classified
+    /// by [`on_nwk_data`](CoordinatorApp::on_nwk_data) (which consumed
+    /// the replay check for these bytes): decodes without
+    /// re-checking (re-checking would refuse a legitimate first
+    /// delivery as its own replay), then verifies. The fw confirmation
+    /// path calls this for `NwkRxOutcome::Data` with the On/Off
+    /// cluster; anything else must not reach here (it was counted,
+    /// never answered).
+    pub fn verify_defrsp<L: SerialLog>(
         &mut self,
         log: &mut L,
-        npdu: &[u8],
+        keys: &KeySet,
+        msdu: &[u8],
     ) -> Result<bool, AppError> {
-        let zcl_body = decode_secured_npdu(
-            npdu,
-            JOINER_SHORT,
-            COORD_SHORT,
-            &mut self.rx_replay,
-            joiner_ieee(),
-        )?;
+        // Same open as `classify_nwk` (NWK|AUX|CT, ext source,
+        // key-sequence octet, CCM* seal), minus the replay check:
+        // the caller classified these exact bytes first, which
+        // consumed it — re-checking would refuse a legitimate first
+        // delivery as its own replay.
+        let dec = nwk_decode(msdu).map_err(|_| AppError::BadFrame)?;
+        if dec.header.control.source_route {
+            return Err(AppError::BadFrame);
+        }
+        let mut hdr_len = 8;
+        if dec.header.control.dst_ieee {
+            hdr_len += 8;
+        }
+        if dec.header.control.src_ieee {
+            hdr_len += 8;
+        }
+        let (aux, aux_len) = match AuxHeader::decode_with_level(dec.payload, NWK_SEC_LEVEL) {
+            Ok(v) => v,
+            Err(_) => return Err(AppError::BadFrame),
+        };
+        let seq = match aux.key_id {
+            KeyIdentifier::Index(s) => s,
+            _ => return Err(AppError::BadFrame),
+        };
+        let key = match keys.select(seq) {
+            Some(k) => k,
+            None => return Err(AppError::BadFrame),
+        };
+        let nonce = match NwkNonce::from_header(&aux) {
+            Ok(n) => n,
+            Err(_) => return Err(AppError::BadFrame),
+        };
+        let Some(restored_ctl) = aux.control.with_level(NWK_SEC_LEVEL) else {
+            return Err(AppError::BadFrame);
+        };
+        let restored = AuxHeader {
+            control: restored_ctl,
+            frame_counter: aux.frame_counter,
+            ext_source: aux.ext_source,
+            key_id: aux.key_id,
+        };
+        let mut rbuf = [0u8; 16];
+        let rlen = match restored.encode_into(&mut rbuf) {
+            Ok(n) => n,
+            Err(_) => return Err(AppError::BadFrame),
+        };
+        if dec.payload.len() < aux_len + CCM_TAG_LEN {
+            return Err(AppError::BadFrame);
+        }
+        let mut aad = [0u8; 64];
+        if hdr_len + rlen > aad.len() {
+            return Err(AppError::BadFrame);
+        }
+        aad[..hdr_len].copy_from_slice(&msdu[..hdr_len]);
+        aad[hdr_len..hdr_len + rlen].copy_from_slice(&rbuf[..rlen]);
+        let ct_end = dec.payload.len() - CCM_TAG_LEN;
+        let mut tag = [0u8; CCM_TAG_LEN];
+        tag.copy_from_slice(&dec.payload[ct_end..]);
+        let mut pt_buf = [0u8; 160];
+        let n = match ccm_star_open_into(
+            &key.key,
+            &nonce.bytes,
+            &aad[..hdr_len + rlen],
+            &dec.payload[aux_len..ct_end],
+            &tag,
+            &mut pt_buf,
+        ) {
+            Ok(n) => n,
+            Err(_) => return Err(AppError::BadFrame),
+        };
+        let zcl_body = {
+            let pt = &pt_buf[..n];
+            let aps = decode_data(pt).map_err(|_| AppError::BadFrame)?;
+            if aps.header.cluster_id != onoff::CLUSTER_ID || aps.header.profile_id != HA_PROFILE {
+                return Err(AppError::WrongCluster);
+            }
+            aps.payload
+        };
+        self.note_defrsp(log, zcl_body)
+    }
+
+    /// Shared Default Response verification tail: ZCL decode, toggle
+    /// echo + success checks, count, log.
+    fn note_defrsp<L: SerialLog>(
+        &mut self,
+        log: &mut L,
+        zcl_body: &[u8],
+    ) -> Result<bool, AppError> {
         let (hdr, body) = ZclHeader::decode(zcl_body).map_err(|_| AppError::BadFrame)?;
         if hdr.command_id != DEFAULT_RSP {
             return Err(AppError::WrongCluster);
@@ -1521,7 +1642,6 @@ pub struct JoinerApp<'a> {
     reporting: ReportingEngine,
     events: EventQueue,
     behavior: onoff::ServerBehavior,
-    tx_counter: FrameCounter,
     rx_replay: ReplayTable<8>,
     nwk_seq: u8,
     aps_counter: u8,
@@ -1534,9 +1654,19 @@ pub struct JoinerApp<'a> {
     netkey: Option<([u8; 16], u8)>,
     /// Joiner-side NWK auxiliary counter space (strictly monotonic
     /// per key, disjoint from the coordinator's range so captures
-    /// attribute cleanly). Same NVM-backed type as the coordinator
-    /// side; joiner NVS wiring is a parked follow-up.
+    /// attribute cleanly). NVM-backed like the coordinator side
+    /// (fw resumes it at boot, persists per chunk before TX).
     join_auxctr: AuxCounter,
+    /// Last answered ZCL request TSN, if any (duplicate-answer
+    /// suppression: a confirm-lost coordinator retry re-seals the
+    /// cached answer instead of re-dispatching, so the lamp flips
+    /// exactly once per toggle intent).
+    tog_last_tsn: Option<u8>,
+    /// Cached DefRsp ZCL plaintext for the last answered TSN
+    /// (re-sealed verbatim on same-TSN redelivery, fresh auxctr).
+    tog_last_zcl: [u8; 32],
+    /// Valid length of [`tog_last_zcl`](JoinerApp::tog_last_zcl).
+    tog_last_len: usize,
     /// Frames answered with a Default Response.
     pub defrsp_sent: u32,
     /// NWK/ZDO frames classified (joiner side).
@@ -1570,7 +1700,6 @@ impl<'a> JoinerApp<'a> {
             reporting: ReportingEngine::new(),
             events: EventQueue::new(),
             behavior: onoff::ServerBehavior,
-            tx_counter: FrameCounter::new(200, 4),
             rx_replay: ReplayTable::<8>::new(),
             nwk_seq: 0,
             aps_counter: 0,
@@ -1578,6 +1707,9 @@ impl<'a> JoinerApp<'a> {
             assoc_short: None,
             netkey: None,
             join_auxctr: AuxCounter::fresh(JOINER_AUX_BASE),
+            tog_last_tsn: None,
+            tog_last_zcl: [0; 32],
+            tog_last_len: 0,
             defrsp_sent: 0,
             nwk_rx_classified: 0,
             nwk_rx_ignored: 0,
@@ -2233,24 +2365,125 @@ impl<'a> JoinerApp<'a> {
     ///
     /// Requirements `07-5123-08-383-01..04` (server behavior,
     /// reused) + `05-3474-23-4312-01` (replay, reused).
-    pub fn handle_toggle<L: SerialLog>(
+    /// Answer a Toggle request frame that was already classified by
+    /// [`on_nwk_joiner`](JoinerApp::on_nwk_joiner) (which consumed the
+    /// replay check for these bytes): decodes without re-checking
+    /// (re-checking would refuse a legitimate first delivery as its
+    /// own replay), then answers like a fresh Toggle. A same-TSN
+    /// redelivery (confirm-lost coordinator retry, fresh aux counter)
+    /// re-seals the cached answer WITHOUT re-dispatching, so the
+    /// lamp flips exactly once per toggle intent. The fw calls this
+    /// for `JoinerNwkOutcome::Data` with the On/Off cluster; anything
+    /// else must not reach here.
+    pub fn answer_toggle<L: SerialLog>(
         &mut self,
         log: &mut L,
-        npdu: &[u8],
+        msdu: &[u8],
         out: &mut [u8],
     ) -> Result<usize, AppError> {
-        let zcl_wire = decode_secured_npdu(
-            npdu,
-            COORD_SHORT,
-            JOINER_SHORT,
-            &mut self.rx_replay,
-            tc_ieee(),
-        )?;
+        // Same open as `open_network_data` (NWK|AUX|CT, ext source,
+        // key-sequence octet, CCM* seal), minus the replay check:
+        // the caller classified these exact bytes first, which
+        // consumed it — re-checking would refuse a legitimate first
+        // delivery as its own replay.
+        let dec = nwk_decode(msdu).map_err(|_| AppError::BadFrame)?;
+        if dec.header.control.frame_type != NwkFrameType::Data {
+            return Err(AppError::BadFrame);
+        }
+        let mut hdr_len = 8usize;
+        if dec.header.control.dst_ieee {
+            hdr_len += 8;
+        }
+        if dec.header.control.src_ieee {
+            hdr_len += 8;
+        }
+        let (aux, aux_len) =
+            match rounddance_security::AuxHeader::decode_with_level(dec.payload, NWK_SEC_LEVEL) {
+                Ok(v) => v,
+                Err(_) => return Err(AppError::BadFrame),
+            };
+        let seq = match aux.key_id {
+            rounddance_security::KeyIdentifier::Index(s) => s,
+            _ => return Err(AppError::BadFrame),
+        };
+        let (netkey, _) = match self.netkey {
+            Some((k, s)) if s == seq => (k, s),
+            _ => return Err(AppError::BadFrame),
+        };
+        let Some(ext) = aux.ext_source else {
+            return Err(AppError::BadFrame);
+        };
+        let mut restored = [0u8; 16];
+        restored[0] = 0x2d;
+        restored[1..5].copy_from_slice(&aux.frame_counter.to_le_bytes());
+        restored[5..13].copy_from_slice(&ext);
+        restored[13] = seq;
+        let mut aad = [0u8; 64];
+        if hdr_len + 14 > aad.len() {
+            return Err(AppError::BadFrame);
+        }
+        aad[..hdr_len].copy_from_slice(&msdu[..hdr_len]);
+        aad[hdr_len..hdr_len + 14].copy_from_slice(&restored[..14]);
+        let mut nonce = [0u8; CCM_NONCE_LEN];
+        nonce[..8].copy_from_slice(&ext);
+        nonce[8..12].copy_from_slice(&aux.frame_counter.to_le_bytes());
+        nonce[12] = 0x2d;
+        let tail_at = hdr_len + aux_len;
+        let ct_end = msdu.len() - CCM_TAG_LEN;
+        if ct_end <= tail_at {
+            return Err(AppError::BadFrame);
+        }
+        let mut tag = [0u8; CCM_TAG_LEN];
+        tag.copy_from_slice(&msdu[ct_end..]);
+        let mut pt_buf = [0u8; 160];
+        let n = match ccm_star_open_into(
+            &netkey,
+            &nonce,
+            &aad[..hdr_len + 14],
+            &msdu[tail_at..ct_end],
+            &tag,
+            &mut pt_buf,
+        ) {
+            Ok(n) => n,
+            Err(_) => return Err(AppError::BadFrame),
+        };
+        let pt = &pt_buf[..n];
+        let aps = decode_data(pt).map_err(|_| AppError::BadFrame)?;
+        if aps.header.cluster_id != onoff::CLUSTER_ID || aps.header.profile_id != HA_PROFILE {
+            return Err(AppError::WrongCluster);
+        }
+        let zcl_wire = aps.payload;
         let (hdr, body) = ZclHeader::decode(zcl_wire).map_err(|_| AppError::BadFrame)?;
         if hdr.command_id != onoff::CMD_TOGGLE {
             return Err(AppError::WrongCluster);
         }
         let mut zcl_out = [0u8; 64];
+        let reply_len = if self.tog_last_tsn == Some(hdr.tsn) && self.tog_last_len > 0 {
+            // Confirm-lost duplicate: re-seal the cached answer;
+            // the lamp already flipped for this TSN.
+            let n = self.tog_last_len.min(zcl_out.len());
+            zcl_out[..n].copy_from_slice(&self.tog_last_zcl[..n]);
+            n
+        } else {
+            let n = self.run_toggle_dispatch(&hdr, body, &mut zcl_out)?;
+            self.tog_last_tsn = Some(hdr.tsn);
+            self.tog_last_zcl[..n.min(32)].copy_from_slice(&zcl_out[..n.min(32)]);
+            self.tog_last_len = n.min(32);
+            n
+        };
+        self.seal_defrsp_answer(log, &zcl_out[..reply_len], out)
+    }
+
+    /// Run the ZCL Toggle through dispatch + Default Response triage
+    /// into `zcl_out`; returns the reply length. Dispatch flips the
+    /// lamp (server behavior); callers needing exactly-once semantics
+    /// must gate on the request TSN first (see `answer_toggle`).
+    fn run_toggle_dispatch(
+        &mut self,
+        hdr: &ZclHeader,
+        body: &[u8],
+        zcl_out: &mut [u8; 64],
+    ) -> Result<usize, AppError> {
         let mut ctx = Ctx {
             store: &mut self.store,
             reporting: &mut self.reporting,
@@ -2267,45 +2500,94 @@ impl<'a> JoinerApp<'a> {
             &self.endpoint,
             Some(&mut self.behavior),
             &mut ctx,
-            &hdr,
+            hdr,
             body,
             onoff::CLUSTER_ID,
             None,
             &[],
-            &mut zcl_out,
+            zcl_out,
         );
-        let reply_len = match outcome {
-            Ok(DispatchOutcome::Respond(n)) => n,
+        match outcome {
+            Ok(DispatchOutcome::Respond(n)) => Ok(n),
             Ok(DispatchOutcome::Silent) => {
-                if !should_default_respond(&hdr, true, false, false) {
+                if !should_default_respond(hdr, true, false, false) {
                     return Err(AppError::BadStatus(0xff));
                 }
-                encode_default_rsp(hdr.tsn, hdr.command_id, ZclStatus::Success, &mut zcl_out)?
+                encode_default_rsp(hdr.tsn, hdr.command_id, ZclStatus::Success, zcl_out)
             }
             Err(status) => {
-                if !should_default_respond(&hdr, true, false, true) {
+                if !should_default_respond(hdr, true, false, true) {
                     return Err(AppError::BadStatus(status.as_u8()));
                 }
-                encode_default_rsp(hdr.tsn, hdr.command_id, status, &mut zcl_out)?
+                encode_default_rsp(hdr.tsn, hdr.command_id, status, zcl_out)
             }
+        }
+    }
+
+    /// Seal a DefRsp ZCL payload as a secured NPDU (fresh aux
+    /// counter + frame counters every build: never re-radiate
+    /// identical secured bytes), count and log it.
+    /// Seal a DefRsp ZCL payload as a secured frame, same wire shape
+    /// as every other secured frame we radiate (MAC + NWK-secured
+    /// data with ext source + key-sequence octet, CCM* seal under the
+    /// adopted key): unicast APS (ep1, On/Off, HA) + payload. One aux
+    /// counter per build from the NVM-backed space (never re-radiate
+    /// identical secured bytes: a confirm-lost first copy would trip
+    /// the coordinator's replay check).
+    fn seal_defrsp_answer<L: SerialLog>(
+        &mut self,
+        log: &mut L,
+        zcl: &[u8],
+        out: &mut [u8],
+    ) -> Result<usize, AppError> {
+        use rounddance_aps::{DataHeader, DeliveryMode};
+        use rounddance_commission::{build_secured_nwk_frame, SecuredNwkParams};
+        // Unassociated joiners have nothing to answer with. The short
+        // falls back to JOINER_SHORT (same as take_assoc_rsp: the
+        // mock/sim path never latched one, but the fw path always
+        // has the adopted short by the time it answers).
+        let short = self.assoc_short.unwrap_or(JOINER_SHORT);
+        let (netkey, _) = match self.netkey {
+            Some(k) => k,
+            None => return Ok(0),
         };
-        let npdu_len = build_secured_npdu(
-            JOINER_SHORT,
-            COORD_SHORT,
-            0x01,
-            self.take_nwk_seq(),
-            ZCL_ENDPOINT,
-            ZCL_ENDPOINT,
-            onoff::CLUSTER_ID,
-            HA_PROFILE,
-            self.take_aps_counter(),
-            &mut self.tx_counter,
-            &zcl_out[..reply_len],
-            out,
-        )?;
-        self.defrsp_sent += 1;
-        log_air(log, "C6APP TX-DEFRSP", &out[..npdu_len]);
-        Ok(npdu_len)
+        let c = self.take_aps_counter();
+        let aps = DataHeader {
+            control: rounddance_aps::FrameControl::data(DeliveryMode::Unicast),
+            dest: rounddance_aps::DataDest::Unicast {
+                dst_endpoint: ZCL_ENDPOINT,
+            },
+            cluster_id: onoff::CLUSTER_ID,
+            profile_id: HA_PROFILE,
+            src_endpoint: ZCL_ENDPOINT,
+            counter: c,
+            ext: None,
+        };
+        let mut abuf = [0u8; 32];
+        let alen = aps
+            .encode_into(zcl, &mut abuf)
+            .map_err(|_| AppError::BufferTooSmall)?;
+        let auxctr = self.join_auxctr.take();
+        let params = SecuredNwkParams {
+            dst_pan: APP_PAN,
+            dst_short: COORD_SHORT,
+            src_short: short,
+            broadcast: false,
+            src_eui: joiner_ieee().to_be_bytes(),
+            mac_seq: self.take_mac_seq(),
+            nwk_seq: self.take_nwk_seq(),
+            nwk_radius: 0x1e,
+            auxctr,
+            netkey,
+        };
+        match build_secured_nwk_frame(&abuf[..alen], &params, out) {
+            Ok(n) => {
+                self.defrsp_sent += 1;
+                log_air(log, "C6APP TX-DEFRSP", &out[..n]);
+                Ok(n)
+            }
+            Err(_) => Err(AppError::BufferTooSmall),
+        }
     }
 }
 
@@ -2337,109 +2619,4 @@ fn encode_default_rsp(
         .encode_into(&mut out[hn..])
         .map_err(|_| AppError::BadFrame)?;
     Ok(hn + bn)
-}
-
-/// Build one structurally-secured data NPDU into `out`.
-///
-/// NWK data (security flag, radius, sequence) | APS data (security
-/// flag, endpoints, cluster, profile, counter) | aux (level 5, data
-/// key, sequence mode) | `zcl`. The payload transform itself is out
-/// of scope for this wave (keys are agreed for real via the
-/// install-code KDF; structural headers + counters + replay carry
-/// the determinism proof, as in the sim legs).
-#[allow(clippy::too_many_arguments)]
-fn build_secured_npdu(
-    src: u16,
-    dst: u16,
-    radius: u8,
-    nwk_seq: u8,
-    src_ep: u8,
-    dst_ep: u8,
-    cluster: u16,
-    profile: u16,
-    aps_counter: u8,
-    tx_counter: &mut FrameCounter,
-    zcl: &[u8],
-    out: &mut [u8],
-) -> Result<usize, AppError> {
-    let aux = AuxHeader {
-        control: SecurityControl::new(5, KeyIdMode::Index, false).ok_or(AppError::BadFrame)?,
-        frame_counter: tx_counter.take().map_err(|_| AppError::Replay)?,
-        ext_source: None,
-        key_id: KeyIdentifier::Index(0x01),
-    };
-    let alen = aux.header_len().ok_or(AppError::BadFrame)?;
-    let mut ctl = ApsFc::data(DeliveryMode::Unicast);
-    ctl.security = true;
-    let aps = DataHeader {
-        control: ctl,
-        dest: DataDest::Unicast {
-            dst_endpoint: dst_ep,
-        },
-        cluster_id: cluster,
-        profile_id: profile,
-        src_endpoint: src_ep,
-        counter: aps_counter,
-        ext: None,
-    };
-    let ahlen = aps.header_len();
-    let total = ahlen + alen + zcl.len();
-    if out.len() < total {
-        return Err(AppError::BufferTooSmall);
-    }
-    let mut tmp = [0u8; MAX_NPDU];
-    if ahlen + alen + zcl.len() > tmp.len() {
-        return Err(AppError::BufferTooSmall);
-    }
-    aps.encode_into(zcl, &mut tmp)
-        .map_err(|_| AppError::BufferTooSmall)?;
-    let mut frame = [0u8; MAX_NPDU];
-    frame[..ahlen].copy_from_slice(&tmp[..ahlen]);
-    let auxn = aux
-        .encode_into(&mut frame[ahlen..])
-        .map_err(|_| AppError::BadFrame)?;
-    debug_assert_eq!(auxn, alen);
-    frame[ahlen + alen..ahlen + alen + zcl.len()].copy_from_slice(zcl);
-    let mut nwk_ctl = NwkFc::data();
-    nwk_ctl.security = true;
-    let nwk = NwkHeader::minimal(nwk_ctl, dst, src, radius, nwk_seq);
-    nwk.encode_into(&frame[..total], out)
-        .map_err(|_| AppError::BufferTooSmall)
-}
-
-/// Decode one structurally-secured data NPDU, returning the ZCL tail.
-///
-/// Checks: NWK decodes with the security flag and the expected
-/// source/destination, APS decodes secured, aux decodes at level 5
-/// and passes the replay table under `sender_ieee`. Errors name the
-/// failing layer through [`AppError`] without leaking key material.
-fn decode_secured_npdu<'n>(
-    npdu: &'n [u8],
-    expect_src: u16,
-    expect_dst: u16,
-    replay: &mut ReplayTable<8>,
-    sender_ieee: u64,
-) -> Result<&'n [u8], AppError> {
-    let nwk = nwk_decode(npdu).map_err(|_| AppError::BadFrame)?;
-    if !nwk.header.control.security {
-        return Err(AppError::BadFrame);
-    }
-    if nwk.header.src_addr != expect_src || nwk.header.dst_addr != expect_dst {
-        return Err(AppError::BadFrame);
-    }
-    let aps = decode_data(nwk.payload).map_err(|_| AppError::BadFrame)?;
-    if !aps.header.control.security {
-        return Err(AppError::BadFrame);
-    }
-    let (aux, used) = AuxHeader::decode(aps.payload).map_err(|_| AppError::BadFrame)?;
-    if aux.control.level != 5 {
-        return Err(AppError::BadFrame);
-    }
-    replay
-        .check(sender_ieee, aux.frame_counter)
-        .map_err(|_| AppError::Replay)?;
-    if used > aps.payload.len() {
-        return Err(AppError::BadFrame);
-    }
-    Ok(&aps.payload[used..])
 }

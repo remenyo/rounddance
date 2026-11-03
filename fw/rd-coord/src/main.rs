@@ -250,6 +250,15 @@ fn main() {
     let mut node_desc_retries: u8 = 4;
     let mut node_desc_short: Option<u16> = None;
     let mut node_desc_pending: Option<u16> = None;
+    // Joiner-lamp toggle (goal Phase 1 post-join conversation): queued
+    // once per boot by the first successful ZDO exchange, then
+    // confirm-driven with the same bounded-retry shape as the node
+    // descriptor leg.
+    let mut tog_pending = false;
+    let mut tog_handle: Option<TxHandle> = None;
+    let mut tog_tries: u8 = 0;
+    const TOG_RETRIES: u8 = 4;
+    let mut tog_done = false;
     // Join-rate policy log state (change-triggered only).
     let mut last_policy_th: u32 = 0;
     let mut last_policy_dn: u32 = 0;
@@ -322,6 +331,15 @@ fn main() {
             // Phase 1 leg RX-1/RSP-1: open + classify inbound NWK frames.
             let outcome = app.on_nwk_data(ind.msdu.as_slice(), &nwk_keys, now_ms);
             println!("RDCOORD RX-NWK {:?}", outcome);
+            if let NwkRxOutcome::Data { cluster, profile } = outcome {
+                if cluster == 0x0006 && profile == 0x0104 {
+                    match app.verify_defrsp(&mut log, &nwk_keys, ind.msdu.as_slice()) {
+                        Ok(true) => println!("RDCOORD DEFRSP-OK toggle applied"),
+                        Ok(false) => {}
+                        Err(e) => println!("RDCOORD DEFRSP-FAILED {e:?}"),
+                    }
+                }
+            }
             // Reference-TC follow-through (w97 joinCTL): queue a
             // Node_desc_req to the announcer; the send block below
             // transmits it (and retries it on non-Delivered confirms).
@@ -330,6 +348,20 @@ fn main() {
                 node_desc_pending = Some(short);
                 node_desc_handle = None;
                 node_desc_retries = 4;
+            }
+            // Toggle the joiner's lamp once the join converses: the
+            // first successful ZDO exchange proves two-way traffic, so
+            // queue one secured toggle (fresh TSN per intent; retries
+            // share it, so a confirm-lost retry can't double-toggle).
+            if let NwkRxOutcome::ZdoResponse { status: Some(0), .. } = outcome {
+                if !tog_done {
+                    tog_done = true;
+                    tog_pending = true;
+                    tog_handle = None;
+                    tog_tries = 0;
+                    app.new_toggle();
+                    println!("RDCOORD TX-TOGGLE-QUEUED");
+                }
             }
         }
         // Drain TX confirms (shared data + MAC queue). A NoAck /
@@ -367,6 +399,22 @@ fn main() {
                     }
                 }
             }
+            if Some(c.handle) == tog_handle {
+                tog_handle = None;
+                if c.status == TxStatus::Delivered {
+                    // Radiated: retire (wait for the DefRsp; do not
+                    // re-send on the next loop — the pre-fix bug kept
+                    // tog_pending set and spammed one toggle per
+                    // Delivered confirm until the budget gave up).
+                    tog_pending = false;
+                } else if tog_tries >= TOG_RETRIES {
+                    println!("RDCOORD TX-TOGGLE-GIVEUP (budget exhausted)");
+                    tog_pending = false;
+                } else {
+                    println!("RDCOORD TX-TOGGLE-NOACK; re-armed");
+                    tog_pending = true;
+                }
+            }
         }
         // Node_desc transmit: queued by the Annce arm, re-queued on
         // non-Delivered confirms. Each take consumes a fresh aux
@@ -392,6 +440,36 @@ fn main() {
                 }
                 Ok(_) => {}
                 Err(e) => println!("RDCOORD NODE-DESC-BUILD-FAILED {e:?}"),
+            }
+        }
+        // Toggle transmit: queued once per boot by the first
+        // successful ZDO exchange; confirm-driven bounded retry like
+        // the node-desc leg above. Fresh aux counter per build (never
+        // re-radiate identical secured bytes).
+        if tog_pending && tog_handle.is_none() {
+            if tog_tries >= TOG_RETRIES {
+                println!("RDCOORD TX-TOGGLE-GIVEUP (budget exhausted)");
+                tog_pending = false;
+            } else {
+                match app.build_toggle_request(&mut log, &C6_NETKEY, &mut tx_buf) {
+                    Ok(n) if n > 0 => {
+                        persist_aux_chunk(&mut app);
+                        match adapter.transmit_mac(&tx_buf[..n]) {
+                            Ok(h) => {
+                                tog_handle = Some(h);
+                                tog_tries += 1;
+                            }
+                            Err(e) => {
+                                println!("RDCOORD TX-TOGGLE-FAILED {e:?}; re-armed");
+                                tog_pending = true;
+                            }
+                        }
+                    }
+                    Ok(_) => {
+                        tog_pending = false;
+                    }
+                    Err(e) => println!("RDCOORD TOGGLE-BUILD-FAILED {e:?}"),
+                }
             }
         }
         // Radiate: assoc-response first, then solicited beacons, then

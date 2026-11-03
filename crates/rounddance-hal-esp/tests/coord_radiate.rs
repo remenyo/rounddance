@@ -1795,3 +1795,223 @@ fn denied_assoc_counted_not_throttled() {
     assert_eq!(app.assoc_denied(), 2);
     assert_eq!(app.assoc_throttled(), 0);
 }
+
+/// Phase 4 ZCL-toggle leg, fw-path contract: the joiner's RX-NWK
+/// classification consumes the replay check, so answering the same
+/// bytes with the checking path would refuse the first legitimate
+/// Toggle as a replay. `answer_toggle` skips the re-check
+/// (documented pre-classification contract) and flips the lamp
+/// exactly once per toggle intent: a confirm-lost duplicate
+/// (same ZCL TSN, fresh aux counter) re-seals WITHOUT re-flipping.
+#[test]
+fn toggle_answer_skips_recheck_and_flips_once() {
+    use rounddance_hal_esp::app::JoinerNwkOutcome;
+    const KEY: [u8; 16] = [
+        0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e,
+        0x1f,
+    ];
+    const JW: [u8; 8] = [0xa4, 0x97, 0x85, 0xfe, 0xff, 0x62, 0xf2, 0xa0];
+    static DEF: rounddance_zcl::onoff::ServerDef = rounddance_zcl::onoff::ServerDef;
+    let mut log = app::NullLog;
+    // Keyed joiner: scan (two sightings: N-sighting gate) ->
+    // assoc-rsp -> transport open.
+    let mut joiner = app::JoinerApp::new(&DEF).unwrap();
+    joiner.begin_scan(&mut log).unwrap();
+    for _ in 0..2 {
+        joiner
+            .ingest_beacon(rounddance_commission::BeaconSurveyEntry {
+                pan_id: 0xC601,
+                channel: 15,
+                lqi: 200,
+                rssi: -40,
+                permit_joining: true,
+                router_capacity: true,
+                end_device_capacity: true,
+                protocol_version: 2,
+            })
+            .unwrap();
+    }
+    assert_eq!(joiner.finish_scan(&mut log), Some(0xC601));
+    let mut rsp = [0u8; 25];
+    rsp[..5].copy_from_slice(&[0x63, 0xcc, 0x02, 0x01, 0xc6]);
+    rsp[5..13].copy_from_slice(&JW);
+    rsp[13..21].copy_from_slice(&rounddance_hal_esp::app::TC_EUI_WIRE);
+    rsp[21..25].copy_from_slice(&[0x02, 0x02, 0x00, 0x00]);
+    let _ = joiner.on_mac_psdu(&mut log, &rsp[..25], 15, -40, 200);
+    let tkey = rounddance_commission::ha_transport_key().unwrap();
+    let tp = rounddance_commission::TransportKeyParams {
+        dst_pan: 0xC601,
+        dst_short: 0x0002,
+        dst_eui: JW,
+        src_eui: [0x68, 0x7f, 0x86, 0xfe, 0xff, 0x62, 0xf2, 0xa0],
+        mac_seq: 0x5a,
+        nwk_seq: 0x21,
+        nwk_radius: 0x1e,
+        aps_ctr: 0x51,
+        auxctr: 0x0000_1000,
+        seq_no: 0x00,
+        netkey: KEY,
+        transport_key: tkey,
+    };
+    let mut tf = [0u8; 128];
+    let tn = rounddance_commission::build_transport_key_frame(&tp, &mut tf).unwrap();
+    let _ = joiner.on_nwk_joiner(&tf[9..tn]);
+    assert!(joiner.adopted_netkey().is_some());
+    assert!(!joiner.lamp());
+    // Coordinator builds the toggle; joiner classifies it (this
+    // consumes the replay check for these bytes).
+    let mut coord = formed_app();
+    // Advance the coordinator counter past the synthetic transport
+    // auxctr, exactly as the air order does (transport, then a
+    // node_desc_req, then the toggle): otherwise the first toggle
+    // would tie the recorded counter and classify as a replay.
+    let mut scratch_req = [0u8; 160];
+    let _ = coord.take_node_desc_req(&mut scratch_req, 0x0002, &KEY);
+    let mut tf2 = [0u8; 160];
+    coord.new_toggle();
+    let tn2 = coord
+        .build_toggle_request(&mut log, &KEY, &mut tf2)
+        .unwrap();
+    match joiner.on_nwk_joiner(&tf2[9..tn2]) {
+        JoinerNwkOutcome::Data { cluster, profile } => {
+            assert_eq!((cluster, profile), (0x0006, 0x0104))
+        }
+        other => panic!("expected toggle Data, got {other:?}"),
+    }
+    // A fresh delivery flips the lamp exactly once (checked below).
+    // The answer path skips the re-check: flips exactly once...
+    let mut out = [0u8; 160];
+    let n1 = joiner
+        .answer_toggle(&mut log, &tf2[9..tn2], &mut out)
+        .unwrap();
+    assert!(n1 > 0);
+    assert!(joiner.lamp());
+    let f1 = out[..n1].to_vec();
+    // ...and a confirm-lost duplicate re-seals (fresh counter, never
+    // identical bytes) WITHOUT flipping again.
+    let n2 = joiner
+        .answer_toggle(&mut log, &tf2[9..tn2], &mut out)
+        .unwrap();
+    assert!(joiner.lamp());
+    let f2 = out[..n2].to_vec();
+    assert_ne!(f1, f2);
+    // Both answers open under the run key with strictly advancing
+    // aux counters from the NVM-backed space (first secured joiner
+    // frames of this boot: 0x2000, 0x2001), APS unicast ep1 +
+    // On/Off + HA, DefRsp echoing the toggle TSN with success.
+    for (f, n, c) in [(&f1, n1, 0x0000_2000u32), (&f2, n2, 0x0000_2001u32)] {
+        assert_eq!(&f[0..2], &[0x61, 0x88]);
+        let (actr, apt) = open_joiner_tail(&KEY, &f[31..n - 4], &f[n - 4..], &f[9..17], &JW, c);
+        assert_eq!(actr, c);
+        let aps = rounddance_aps::decode_data(&apt).unwrap();
+        assert_eq!(
+            (aps.header.cluster_id, aps.header.profile_id),
+            (0x0006, 0x0104)
+        );
+        let (zhdr, zbody) = rounddance_zcl::frame::Header::decode(aps.payload).unwrap();
+        assert_eq!(zhdr.command_id, 0x0b);
+        let rsp = rounddance_zcl::general::DefaultRsp::decode(zbody).unwrap();
+        assert_eq!(rsp.cmd, rounddance_zcl::onoff::CMD_TOGGLE);
+        assert!(matches!(
+            rsp.status,
+            rounddance_zcl::status::ZclStatus::Success
+        ));
+    }
+}
+
+/// Phase 4 ZCL-toggle leg, coordinator side: a DefRsp verified after
+/// classification must not trip the replay re-check either, and a
+/// tunneled-then-answered exchange verifies end to end.
+#[test]
+fn defrsp_verify_skips_recheck_and_counts() {
+    use rounddance_hal_esp::app::{JoinerNwkOutcome, NwkIgnore, NwkRxOutcome};
+    use rounddance_security::{KeySet, NetworkKey};
+    const KEY: [u8; 16] = [
+        0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e,
+        0x1f,
+    ];
+    const JW: [u8; 8] = [0xa4, 0x97, 0x85, 0xfe, 0xff, 0x62, 0xf2, 0xa0];
+    static DEF: rounddance_zcl::onoff::ServerDef = rounddance_zcl::onoff::ServerDef;
+    let mut log = app::NullLog;
+    // Same keyed joiner as the toggle test above.
+    let mut joiner = app::JoinerApp::new(&DEF).unwrap();
+    joiner.begin_scan(&mut log).unwrap();
+    for _ in 0..2 {
+        joiner
+            .ingest_beacon(rounddance_commission::BeaconSurveyEntry {
+                pan_id: 0xC601,
+                channel: 15,
+                lqi: 200,
+                rssi: -40,
+                permit_joining: true,
+                router_capacity: true,
+                end_device_capacity: true,
+                protocol_version: 2,
+            })
+            .unwrap();
+    }
+    assert_eq!(joiner.finish_scan(&mut log), Some(0xC601));
+    let mut rsp = [0u8; 25];
+    rsp[..5].copy_from_slice(&[0x63, 0xcc, 0x02, 0x01, 0xc6]);
+    rsp[5..13].copy_from_slice(&JW);
+    rsp[13..21].copy_from_slice(&rounddance_hal_esp::app::TC_EUI_WIRE);
+    rsp[21..25].copy_from_slice(&[0x02, 0x02, 0x00, 0x00]);
+    let _ = joiner.on_mac_psdu(&mut log, &rsp[..25], 15, -40, 200);
+    let tkey = rounddance_commission::ha_transport_key().unwrap();
+    let tp = rounddance_commission::TransportKeyParams {
+        dst_pan: 0xC601,
+        dst_short: 0x0002,
+        dst_eui: JW,
+        src_eui: [0x68, 0x7f, 0x86, 0xfe, 0xff, 0x62, 0xf2, 0xa0],
+        mac_seq: 0x5a,
+        nwk_seq: 0x21,
+        nwk_radius: 0x1e,
+        aps_ctr: 0x51,
+        auxctr: 0x0000_1000,
+        seq_no: 0x00,
+        netkey: KEY,
+        transport_key: tkey,
+    };
+    let mut tf = [0u8; 128];
+    let tn = rounddance_commission::build_transport_key_frame(&tp, &mut tf).unwrap();
+    let _ = joiner.on_nwk_joiner(&tf[9..tn]);
+    let mut coord = formed_app();
+    let keys = KeySet::new(NetworkKey::new(KEY, 0));
+    // Advance the coordinator counter past the synthetic transport
+    // auxctr, exactly as the air order does (transport, then a
+    // node_desc_req, then the toggle): otherwise the first toggle
+    // would tie the recorded counter and classify as a replay.
+    let mut scratch_req = [0u8; 160];
+    let _ = coord.take_node_desc_req(&mut scratch_req, 0x0002, &KEY);
+    let mut tf2 = [0u8; 160];
+    coord.new_toggle();
+    let tn2 = coord
+        .build_toggle_request(&mut log, &KEY, &mut tf2)
+        .unwrap();
+    match joiner.on_nwk_joiner(&tf2[9..tn2]) {
+        JoinerNwkOutcome::Data { cluster, profile } => {
+            assert_eq!((cluster, profile), (0x0006, 0x0104))
+        }
+        other => panic!("expected toggle Data, got {other:?}"),
+    }
+    let mut ans = [0u8; 160];
+    let an = joiner
+        .answer_toggle(&mut log, &tf2[9..tn2], &mut ans)
+        .unwrap();
+    // Coordinator classifies the answer (consumes its replay check),
+    // then verifies without re-checking.
+    match coord.on_nwk_data(&ans[9..an], &keys, 9_000) {
+        NwkRxOutcome::Data { cluster, profile } => {
+            assert_eq!((cluster, profile), (0x0006, 0x0104))
+        }
+        other => panic!("expected DefRsp Data, got {other:?}"),
+    }
+    assert!(coord.verify_defrsp(&mut log, &keys, &ans[9..an]).unwrap());
+    assert_eq!(coord.defrsp_ok, 1);
+    // Duplicate delivery is refused at classification (never
+    // re-answered): the replay firewall holds on both ends.
+    match joiner.on_nwk_joiner(&tf2[9..tn2]) {
+        JoinerNwkOutcome::Ignored(NwkIgnore::Replay) => {}
+        other => panic!("expected Replay ignore, got {other:?}"),
+    }
+}

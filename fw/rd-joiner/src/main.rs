@@ -15,7 +15,7 @@
 use esp_idf_hal::gpio::PinDriver;
 use esp_idf_hal::peripherals::Peripherals;
 use rounddance_hal_esp::app::{
-    eui_from_mac, log_air, role_from_mac, JoinerNwkOutcome, UNASSOC_SHORT,
+    eui_from_mac, log_air, role_from_mac, JoinerNwkOutcome, HA_PROFILE, UNASSOC_SHORT,
 };
 use rounddance_hal_esp::mac_cmd::Incoming as MacIncoming;
 use rounddance_hal_esp::{AppRole, EspAdapter, EspIdfDriver, JoinerApp, SerialLog};
@@ -261,6 +261,16 @@ fn main() {
     let mut rsp_handle: Option<TxHandle> = None;
     let mut rsp_tries: u8 = 0;
     const RSP_RETRIES_MAX: u8 = 4;
+    // Toggle-answer state (goal Phase 1 post-join conversation): the
+    // coordinator's secured ZCL Toggle arrives as Data; answering it
+    // exercises the encrypted APS path end to end and flips the lamp.
+    // Same confirm-driven, bounded-retry shape as the RSP path.
+    let mut tog_buf = [0u8; 160];
+    let mut tog_len: usize = 0;
+    let mut tog_pending = false;
+    let mut tog_handle: Option<TxHandle> = None;
+    let mut tog_tries: u8 = 0;
+    const TOG_RETRIES_MAX: u8 = 4;
     // Announce retry state (w103: broadcasts report radiation via
     // confirms too — two consecutive annces vanished on a congested
     // channel with no FAILED line because the fw dropped confirms
@@ -400,6 +410,26 @@ fn main() {
                     rsp_handle = None;
                     rsp_tries = 0;
                 }
+                JoinerNwkOutcome::Data { cluster, profile }
+                    if cluster == onoff::CLUSTER_ID && profile == HA_PROFILE =>
+                {
+                    println!("RDJOIN RX-TOGGLE");
+                    // Queue (do not build inline): the send block
+                    // below transmits, and the confirm arm re-queues
+                    // on non-Delivered so a ChannelBusy loss on this
+                    // congested channel is retried, not silent. The
+                    // 160 B buffer holds one worst-case secured frame.
+                    let m = ind.msdu.as_slice();
+                    if m.len() <= tog_buf.len() {
+                        tog_buf[..m.len()].copy_from_slice(m);
+                        tog_len = m.len();
+                        tog_pending = true;
+                        tog_handle = None;
+                        tog_tries = 0;
+                    } else {
+                        println!("RDJOIN TOG-BUILD-FAILED oversize");
+                    }
+                }
                 JoinerNwkOutcome::Data { cluster, profile } => {
                     println!("RDJOIN RX-NWK-DATA cluster={cluster:#06x} profile={profile:#06x}");
                 }
@@ -480,9 +510,42 @@ fn main() {
                 }
             }
         }
+        // Toggle answer transmit: build once per attempt from the
+        // queued request bytes, retire only on a Delivered confirm
+        // (or the retry budget). Same pattern as the annce/RSP blocks
+        // above; the lamp flips once per intent inside the build.
+        if tog_pending && tog_handle.is_none() {
+            if tog_tries >= TOG_RETRIES_MAX {
+                println!("RDJOIN TX-TOG-GIVEUP (budget exhausted)");
+                tog_pending = false;
+            } else {
+                match app.answer_toggle(&mut log, &tog_buf[..tog_len], &mut tx_buf) {
+                    Ok(n) if n > 0 => {
+                        log_air(&mut log, "RDJOIN TX-TOG", &tx_buf[..n]);
+                        persist_aux_chunk(app);
+                        match adapter.transmit_mac(&tx_buf[..n]) {
+                            Ok(h) => {
+                                tog_handle = Some(h);
+                                tog_tries += 1;
+                            }
+                            Err(e) => {
+                                println!("RDJOIN TX-TOG-FAILED {e:?}; re-armed");
+                                tog_pending = true;
+                            }
+                        }
+                    }
+                    Ok(_) => {
+                        // Nothing to answer with; do not spin.
+                        tog_pending = false;
+                    }
+                    Err(e) => println!("RDJOIN TOG-BUILD-FAILED {e:?}"),
+                }
+            }
+        }
         // TX confirms drain (shared queue): match our annce handle so
         // a non-Delivered broadcast is retried above instead of lost,
-        // and our RSP handle so a lost ZDO answer is rebuilt.
+        // our RSP handle so a lost ZDO answer is rebuilt, and our
+        // toggle-answer handle so a lost DefRsp is rebuilt.
         while let Some(c) = adapter.poll_confirm() {
             if Some(c.handle) == annce_handle {
                 println!("RDJOIN ANNCE-CONFIRM {:?} tries={annce_tries}", c.status);
@@ -501,13 +564,29 @@ fn main() {
                     // answer would only triple-count on air).
                     rsp_pending = None;
                     rsp_req = None;
-                } else if rsp_tries > 0 {
-                    rsp_tries -= 1;
-                    println!("RDJOIN TX-RSP-NOACK; re-armed ({rsp_tries} left)");
-                    rsp_pending = rsp_req;
-                } else {
+                } else if rsp_tries >= RSP_RETRIES_MAX {
                     println!("RDJOIN TX-RSP-GIVEUP (budget exhausted)");
                     rsp_req = None;
+                    rsp_pending = None;
+                } else {
+                    println!("RDJOIN TX-RSP-NOACK; re-armed");
+                    rsp_pending = rsp_req;
+                }
+            }
+            if Some(c.handle) == tog_handle {
+                println!("RDJOIN TOG-CONFIRM {:?} tries={tog_tries}", c.status);
+                tog_handle = None;
+                if c.status == TxStatus::Delivered {
+                    // Answered and radiated: the lamp already flipped
+                    // when the answer was built; retire quietly.
+                    tog_pending = false;
+                    println!("RDJOIN LAMP on={}", app.lamp());
+                } else if tog_tries >= TOG_RETRIES_MAX {
+                    println!("RDJOIN TX-TOG-GIVEUP (budget exhausted)");
+                    tog_pending = false;
+                } else {
+                    println!("RDJOIN TX-TOG-NOACK; re-armed");
+                    tog_pending = true;
                 }
             }
         }

@@ -171,7 +171,46 @@ impl FullStack {
         self.joiner_adapter.set_short_addr(JOINER_SHORT);
         self.joiner.tolerate_unsecured(UNSECURED_VENDOR_CMD);
         assert_eq!(self.joiner.unsecured_tolerated, 1);
-        self.joiner.key_transport(&mut self.joiner_log, true);
+        // Adopt a REAL network key through a synthetic transport frame
+        // (same shape the NCP delivers on air): the mock
+        // `key_transport` below only flips the machine, it installs no
+        // key bytes, and the ZCL leg needs a real sealed channel. The
+        // genuine open requires the Authenticating state, so it runs
+        // INSTEAD of the mock here (same "C6APP KEY ok" log line kept).
+        {
+            use rounddance_commission::{
+                build_transport_key_frame, ha_transport_key, TransportKeyParams,
+            };
+            use rounddance_hal_esp::app::JoinerNwkOutcome;
+            const JW: [u8; 8] = [0xa4, 0x97, 0x85, 0xfe, 0xff, 0x62, 0xf2, 0xa0];
+            const TCW: [u8; 8] = [0x68, 0x7f, 0x86, 0xfe, 0xff, 0x62, 0xf2, 0xa0];
+            const KEY: [u8; 16] = [
+                0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d,
+                0x1e, 0x1f,
+            ];
+            let tkey = ha_transport_key().unwrap();
+            let tp = TransportKeyParams {
+                dst_pan: APP_PAN,
+                dst_short: JOINER_SHORT,
+                dst_eui: JW,
+                src_eui: TCW,
+                mac_seq: 0x5a,
+                nwk_seq: 0x21,
+                nwk_radius: 0x1e,
+                aps_ctr: 0x51,
+                auxctr: 0x0000_1000,
+                seq_no: 0x00,
+                netkey: KEY,
+                transport_key: tkey,
+            };
+            let mut tf = [0u8; 128];
+            let tn = build_transport_key_frame(&tp, &mut tf).unwrap();
+            match self.joiner.on_nwk_joiner(&tf[9..tn]) {
+                JoinerNwkOutcome::TransportAccepted { .. } => {}
+                other => panic!("transport not accepted: {other:?}"),
+            }
+            self.joiner_log.log("C6APP KEY ok");
+        }
         self.joiner.verify_confirm(&mut self.joiner_log);
         assert_eq!(
             self.joiner.state(),
@@ -195,27 +234,62 @@ impl FullStack {
         assert!(!self.joiner.lamp(), "lamp starts off");
 
         // ZCL leg: coordinator serves Toggle, joiner applies it on
-        // the live server behavior and answers Default Response.
-        let mut toggle_buf = [0u8; 128];
+        // the live server behavior and answers Default Response —
+        // through the same classify+answer path the firmware uses
+        // (replay consumed at classification, answers never re-check).
+        // (The network key was adopted earlier via a synthetic
+        // transport right after the mock key_transport, while the
+        // joiner machine sat in KeyWait.)
+        use rounddance_hal_esp::app::{JoinerNwkOutcome, NwkRxOutcome};
+        use rounddance_security::{KeySet, NetworkKey};
+        const KEY: [u8; 16] = [
+            0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d,
+            0x1e, 0x1f,
+        ];
+        let keys = KeySet::new(NetworkKey::new(KEY, 0));
+        // Burn one coordinator aux counter first (mirrors the air
+        // order: transport, node-desc, toggle): the toggle must sit
+        // strictly above the adopted transport auxctr or the joiner
+        // would (correctly) refuse it as a replay.
+        let mut scratch = [0u8; 160];
+        let _ = self
+            .coord
+            .take_node_desc_req(&mut scratch, JOINER_SHORT, &KEY);
+        self.coord.new_toggle();
+        let mut toggle_buf = [0u8; 160];
         let tlen = self
             .coord
-            .build_toggle_request(&mut self.coord_log, &mut toggle_buf)
+            .build_toggle_request(&mut self.coord_log, &KEY, &mut toggle_buf)
             .unwrap();
         let toggle_npdu = toggle_buf[..tlen].to_vec();
-        let got = self.shuttle(false, JOINER_SHORT, &toggle_npdu);
-        assert_eq!(got, toggle_npdu);
-        let mut resp_buf = [0u8; 128];
+        // The builder output carries its MAC; the shuttle wraps its
+        // own, so strip the builder MAC first (fw path hands the
+        // adapter a MAC-included frame directly).
+        let got = self.shuttle(false, JOINER_SHORT, &toggle_npdu[9..]);
+        match self.joiner.on_nwk_joiner(&got) {
+            JoinerNwkOutcome::Data { cluster, profile } => {
+                assert_eq!((cluster, profile), (0x0006, 0x0104));
+            }
+            other => panic!("toggle not classified as Data: {other:?}"),
+        }
+        let mut resp_buf = [0u8; 160];
         let rlen = self
             .joiner
-            .handle_toggle(&mut self.joiner_log, &got, &mut resp_buf)
+            .answer_toggle(&mut self.joiner_log, &got, &mut resp_buf)
             .unwrap();
         assert!(self.joiner.lamp(), "toggle flips the lamp off→on");
         let defrsp_npdu = resp_buf[..rlen].to_vec();
-        let got_back = self.shuttle(true, COORD_SHORT, &defrsp_npdu);
-        assert_eq!(got_back, defrsp_npdu);
+        // Same single-MAC rule as the toggle above.
+        let got_back = self.shuttle(true, COORD_SHORT, &defrsp_npdu[9..]);
+        match self.coord.on_nwk_data(&got_back, &keys, 9_000) {
+            NwkRxOutcome::Data { cluster, profile } => {
+                assert_eq!((cluster, profile), (0x0006, 0x0104));
+            }
+            other => panic!("defrsp not classified as Data: {other:?}"),
+        }
         assert!(self
             .coord
-            .handle_defrsp(&mut self.coord_log, &got_back)
+            .verify_defrsp(&mut self.coord_log, &keys, &got_back)
             .unwrap());
         assert_eq!(self.coord.defrsp_ok, 1);
 
@@ -257,28 +331,47 @@ fn c6_standalone_form_join_toggle() {
     assert_eq!(MAC_CAPS, 0x8c);
 }
 
-/// Replayed toggle bytes are refused (replay table), on both legs.
+/// Replayed toggle bytes are refused at classification (replay
+/// table), on both legs — the answer path never re-runs, and the
+/// lamp stays where the single real toggle left it. A confirm-lost
+/// duplicate answered through `answer_toggle` re-seals without
+/// re-flipping (same TSN).
 #[test]
 fn c6_standalone_replay_is_refused() {
+    use rounddance_hal_esp::app::{JoinerNwkOutcome, NwkRxOutcome};
+    use rounddance_security::{KeySet, NetworkKey};
     let mut stack = FullStack::new();
     let (toggle, defrsp) = stack.run();
-    let mut out = [0u8; 128];
-    assert_eq!(
-        stack
-            .joiner
-            .handle_toggle(&mut stack.joiner_log, &toggle, &mut out)
-            .unwrap_err(),
-        rounddance_hal_esp::app::AppError::Replay
-    );
-    assert_eq!(
-        stack
-            .coord
-            .handle_defrsp(&mut stack.coord_log, &defrsp)
-            .unwrap_err(),
-        rounddance_hal_esp::app::AppError::Replay
-    );
+    // Duplicate delivery: the classifier refuses on both legs
+    // (firewall holds; the answer path is never re-entered). The
+    // stored frames include the 9-byte MAC header; classification
+    // takes the MSDU, like the fw's poll_indication path.
+    match stack.joiner.on_nwk_joiner(&toggle[9..]) {
+        JoinerNwkOutcome::Ignored(rounddance_hal_esp::app::NwkIgnore::Replay) => {}
+        other => panic!("joiner replay not refused: {other:?}"),
+    }
+    let keys = KeySet::new(NetworkKey::new(
+        [
+            0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d,
+            0x1e, 0x1f,
+        ],
+        0,
+    ));
+    match stack.coord.on_nwk_data(&defrsp[9..], &keys, 9_001) {
+        NwkRxOutcome::Ignored(rounddance_hal_esp::app::NwkIgnore::Replay) => {}
+        other => panic!("coord replay not refused: {other:?}"),
+    }
     // The lamp stays where the single real toggle left it.
     assert!(stack.joiner.lamp());
+    // A confirm-lost duplicate answered through the answer path
+    // re-seals without re-flipping (idempotent retry).
+    let mut out = [0u8; 160];
+    let n2 = stack
+        .joiner
+        .answer_toggle(&mut stack.joiner_log, &toggle[9..], &mut out)
+        .unwrap();
+    assert!(stack.joiner.lamp());
+    assert_ne!(&out[..n2], &defrsp[..]);
 }
 
 /// Decision determinism: two fresh runs radiate identical bytes and
