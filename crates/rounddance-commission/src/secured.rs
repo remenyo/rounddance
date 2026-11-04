@@ -90,6 +90,29 @@ pub fn build_secured_nwk_frame(
     p: &SecuredNwkParams,
     out: &mut [u8],
 ) -> Result<usize, SecuredError> {
+    let mac_dst = if p.broadcast { 0xFFFF } else { p.dst_short };
+    build_secured_nwk_frame_via(aps_pt, p, mac_dst, out)
+}
+
+/// Build one NWK-secured data frame with an explicit MAC destination
+/// for the relay leg (same MSDU, fresh MAC).
+///
+/// Relay contract (paraphrase, doc 05-3474-23 R23.2 §3.3/§3.6): the
+/// NWK header destination stays the final short (`p.dst_short`); the
+/// MAC destination is the next hop (`mac_dst`). The NWK MSDU
+/// (header + restored aux AAD + sealed tail) is byte identical to the
+/// direct frame, so the receiver's nonce/AAD open accepts either leg.
+/// The NWK header is preserved verbatim in transit (no
+/// radius decrement inside the authenticated region on this relay).
+///
+/// Requirement `05-3474-23-3661-02` (repo-minted,
+/// MINTED-pending-confirm).
+pub fn build_secured_nwk_frame_via(
+    aps_pt: &[u8],
+    p: &SecuredNwkParams,
+    mac_dst: u16,
+    out: &mut [u8],
+) -> Result<usize, SecuredError> {
     if aps_pt.len() > SECURED_PT_MAX {
         return Err(SecuredError::TooSmall);
     }
@@ -160,7 +183,8 @@ pub fn build_secured_nwk_frame(
     let sealed_len = ccm_star_seal_into(&p.netkey, &nonce, &aad, aps_pt, &mut out[tail_at..])
         .map_err(SecuredError::Seal)?;
     // MAC data header: `61 88` unicast (intra-PAN short/short) or
-    // `41 88` broadcast (MG21's on-air annce shape).
+    // `41 88` broadcast (MG21's on-air annce shape). Unicast MAC dst
+    // is the next hop on the relay leg; NWK dst above stays final.
     out[0] = if p.broadcast { 0x41 } else { 0x61 };
     out[1] = 0x88;
     out[2] = p.mac_seq;
@@ -168,7 +192,7 @@ pub fn build_secured_nwk_frame(
     if p.broadcast {
         out[5..7].copy_from_slice(&0xFFFFu16.to_le_bytes());
     } else {
-        out[5..7].copy_from_slice(&p.dst_short.to_le_bytes());
+        out[5..7].copy_from_slice(&mac_dst.to_le_bytes());
     }
     out[7..9].copy_from_slice(&p.src_short.to_le_bytes());
     out[9..17].copy_from_slice(&hdr_buf);

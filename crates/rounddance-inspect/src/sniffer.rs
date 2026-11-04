@@ -1,6 +1,6 @@
 //! Host-side sniffer ingest (`std` only): the lab nRF 802.15.4
 //! sniffer's shell feed parsed into the inspector's
-//! [`Listener`](crate::capture::Listener) seam.
+//! [`crate::capture::Listener`] seam.
 //!
 //! The sniffer speaks a line protocol over 115200 8N1 serial: after
 //! `channel N` + `receive` it prints one line per received frame,

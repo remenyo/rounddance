@@ -6,8 +6,15 @@
 harness/browser/rounddance_browser.wasm
 __pycache__/
 *.a
+*.bin
+*.elf
 build/
 **/build/
+**/.embuild/
+**/managed/
 **/sdkconfig
 **/sdkconfig.old
 **/dependencies.lock
+.cargo-ok
+.cargo_vcs_info.json
+fw/vendor/*/.github/

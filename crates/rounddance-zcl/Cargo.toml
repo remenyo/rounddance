@@ -4,13 +4,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Zigbee ZCL engine: frames, attributes, dispatch, reporting (no_std)"
 
 [dependencies]
-rounddance-security = { path = "../rounddance-security" }
+rounddance-security = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-security" }
 
 [dev-dependencies]
-rounddance-aps = { path = "../rounddance-aps" }
-rounddance-nwk = { path = "../rounddance-nwk" }
-rounddance-mac-sap = { path = "../rounddance-mac-sap" }
-rounddance-security = { path = "../rounddance-security", features = ["host"] }
-rounddance-sim = { path = "../rounddance-sim" }
+rounddance-aps = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-aps" }
+rounddance-nwk = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-nwk" }
+rounddance-mac-sap = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-mac-sap" }
+rounddance-security = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-security", features = ["host"] }

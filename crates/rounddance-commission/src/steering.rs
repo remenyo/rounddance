@@ -287,7 +287,7 @@ pub enum SteeringState {
     CandidateSelected,
     /// Scan done; nothing acceptable was heard.
     NoSuitableNetwork,
-    /// Terminal failure (bad scan; see [`SteeringMachine::error`]).
+    /// Terminal failure (bad scan; see [`SteeringMachine::scan_failed`]).
     Failed,
 }
 

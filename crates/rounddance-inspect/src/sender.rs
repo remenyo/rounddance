@@ -1,4 +1,4 @@
-//! Loopback sender: the offline [`Sender`](crate::capture::Sender)
+//! Loopback sender: the offline [`crate::capture::Sender`]
 //! implementation.
 //!
 //! The dissector chain and session engine never touch hardware types;
@@ -6,7 +6,7 @@
 //! offline bring-up. [`LoopbackSender`] records every transmitted
 //! frame in bounded fixed buffers (no allocator, `no_std`-clean) and
 //! replays them back through the
-//! [`Listener`](crate::capture::Listener) seam in FIFO order, so an
+//! [`crate::capture::Listener`] seam in FIFO order, so an
 //! encode → transmit → receive → decode round trip exercises the
 //! identical decision path as a capture. A drained loopback feeds the
 //! [`pcap`](crate::pcap) writer, so crafted frames stay

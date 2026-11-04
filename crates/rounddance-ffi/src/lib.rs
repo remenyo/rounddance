@@ -22,7 +22,7 @@
 //! ## Panic policy
 //!
 //! Every boundary function wraps its body in
-//! [`std::panic::catch_unwind`](std::panic::catch_unwind) and maps a
+//! [`std::panic::catch_unwind`] and maps a
 //! caught panic to [`RD_ERR_PANIC`]. Under `panic = "abort"` builds
 //! the process terminates at the boundary instead of returning —
 //! still FFI-safe (no unwind crosses into C), just fatal. Either

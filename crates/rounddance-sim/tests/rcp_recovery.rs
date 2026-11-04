@@ -262,20 +262,39 @@ fn rcp_dead_peer_fails_clean_then_heals_j8() {
 // Timeout-Rsp). While a ladder runs, the drain is parked and the
 // join frame survives for the ladder; with no ladder running the
 // drain consumes ambient frames as before (j6: timeout_rsp=1).
+//
+// v1 note: frames are MAC-shaped now — the legs below queue real
+// data PSDUs (MHR + payload) so they land on the PAN queue the
+// ladder/drain own; unshaped bytes route to the MAC queue instead.
 #[test]
 fn rcp_idle_drain_parks_during_ladder() {
+    use rounddance_rcp::mac::MAX_MAC_PSDU;
     let mut s = RcpSession::new();
     s.peer.set_eui(EUI);
     s.form();
     s.ladder_running = true;
-    assert!(s.peer.queue_rx(&[0xC1, 0xC2], -50, 200, false));
+    let mut psdu = [0u8; MAX_MAC_PSDU];
+    let n = rounddance_rcp::mac::build_data_psdu(
+        1,
+        PAN,
+        SHORT,
+        PEER_SHORT,
+        &[0xC1, 0xC2],
+        true,
+        &mut psdu,
+    )
+    .unwrap();
+    assert!(s.peer.queue_rx(&psdu[..n], -50, 200, false));
     s.pump();
     assert_eq!(s.idle_drain(), 0, "drain parked: join RX not stolen");
     let frame = s.ladder_take().expect("ladder owns its RX");
     assert_eq!(frame, [0xC1, 0xC2], "join frame survives for the ladder");
     // No ladder running: ambient RX drains as before.
     s.ladder_running = false;
-    assert!(s.peer.queue_rx(&[0xD1], -60, 180, false));
+    let m =
+        rounddance_rcp::mac::build_data_psdu(2, PAN, SHORT, PEER_SHORT, &[0xD1], true, &mut psdu)
+            .unwrap();
+    assert!(s.peer.queue_rx(&psdu[..m], -60, 180, false));
     s.pump();
     assert_eq!(s.idle_drain(), 1, "idle path still consumes ambient");
     assert!(s.driver.poll_indication().is_none());

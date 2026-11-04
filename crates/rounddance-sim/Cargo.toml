@@ -4,19 +4,21 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Deterministic simulation harness for the Rounddance Zigbee stack"
 
 [dependencies]
-rounddance-mac-sap = { path = "../rounddance-mac-sap" }
+rounddance-mac-sap = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-mac-sap" }
 
 [dev-dependencies]
-rounddance-aps = { path = "../rounddance-aps" }
-rounddance-commission = { path = "../rounddance-commission" }
-rounddance-compat = { path = "../rounddance-compat" }
-rounddance-direct = { path = "../rounddance-direct" }
-rounddance-gp = { path = "../rounddance-gp" }
-rounddance-nwk = { path = "../rounddance-nwk" }
-rounddance-rcp = { path = "../rounddance-rcp" }
-rounddance-roles = { path = "../rounddance-roles" }
-rounddance-security = { path = "../rounddance-security" }
-rounddance-zcl = { path = "../rounddance-zcl" }
-rounddance-zdo = { path = "../rounddance-zdo" }
+rounddance-aps = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-aps" }
+rounddance-commission = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-commission" }
+rounddance-compat = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-compat" }
+rounddance-direct = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-direct" }
+rounddance-gp = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-gp" }
+rounddance-mac-sap = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-mac-sap" }
+rounddance-nwk = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-nwk" }
+rounddance-rcp = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-rcp" }
+rounddance-roles = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-roles" }
+rounddance-security = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-security", features = ["host"] }
+rounddance-zcl = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-zcl" }
+rounddance-zdo = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-zdo" }

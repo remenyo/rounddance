@@ -81,7 +81,49 @@ pub const DISCOVERY_TIMEOUT_MS: u64 = 5_000;
 /// Requirement `05-3474-23-341-01`.
 #[must_use]
 pub const fn add_path_cost(base: u8, link: u8) -> u8 {
-    base.saturating_add(link)
+    accumulate_path_cost(PathCostMetric::SaturatingSum, base, link)
+}
+
+/// How one hop folds into an accumulated path cost. The 1..7 link
+/// scale and its aging are fixed; the fold itself is implementation
+/// space (the estimator below feeds it measured delivery instead of
+/// meter readings on flat-metering radios).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PathCostMetric {
+    /// Sum link costs, pinning at the `u8` ceiling (current default;
+    /// byte-identical to [`add_path_cost`]).
+    SaturatingSum,
+    /// Count hops, ignoring per-link quality (robust when the LQI
+    /// meter is uncalibrated: every heard link costs the same).
+    HopCount,
+    /// Track the worst hop (bottleneck avoidance: one bad relay
+    /// disqualifies an otherwise cheap path).
+    Bottleneck,
+}
+
+/// Fold one hop `link` cost into the running `base` under `metric`.
+/// Inputs outside the 1..7 link scale are clamped into it so a
+/// misbehaving meter can never poison a route.
+#[must_use]
+pub const fn accumulate_path_cost(metric: PathCostMetric, base: u8, link: u8) -> u8 {
+    let link = if link < 1 {
+        1
+    } else if link > 7 {
+        7
+    } else {
+        link
+    };
+    match metric {
+        PathCostMetric::SaturatingSum => base.saturating_add(link),
+        PathCostMetric::HopCount => base.saturating_add(1),
+        PathCostMetric::Bottleneck => {
+            if base > link {
+                base
+            } else {
+                link
+            }
+        }
+    }
 }
 
 /// Failures from the routing tables. Every variant is a caller-visible
@@ -236,6 +278,23 @@ impl RouteTable {
             }
         }
         n
+    }
+
+    /// Drop the entry covering `dst`, if any. The failure-driven
+    /// half of adaptive routing: after enough confirm-lost frames
+    /// the caller evicts the dead route so re-discovery can install
+    /// a better one instead of waiting out the full lifetime.
+    /// Returns `true` when an entry was dropped.
+    pub fn remove(&mut self, dst: u16) -> bool {
+        for slot in self.slots.iter_mut() {
+            if let Some(e) = *slot {
+                if e.dst == dst {
+                    *slot = None;
+                    return true;
+                }
+            }
+        }
+        false
     }
 }
 
@@ -615,5 +674,74 @@ impl NeighborCosts {
             }
         }
         // Full of fresh rows: refuse, keep live state.
+    }
+}
+
+/// Delivery-ratio link estimator: watches per-neighbor TX confirms
+/// and derives a 1..7 cost, so a link that ACKs nothing grades badly
+/// however flattering its meter readings are. The 1..7 output scale
+/// and the refusal-on-full discipline match [`NeighborCosts`];
+/// estimation itself is implementation space (the scale is fixed,
+/// the estimator is not).
+///
+/// Fixed-point EWMA in Q8 (`alpha = 1/8` with a minimum step of one
+/// sixty-fourth: estimates always make progress, so a recovered
+/// link returns to exactly 256 and a dead one to exactly 0).
+/// ~2 consecutive losses raise a perfect link one cost step; a dead
+/// link grades 7 within ~20 frames. Unmeasured neighbors report
+/// `None` (the caller falls back to the advertised cost); the first
+/// observation seeds the EWMA.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LinkEstimator {
+    slots: [Option<(u16, u16)>; MAX_NEIGHBOR_LINKS],
+}
+
+impl Default for LinkEstimator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl LinkEstimator {
+    /// Empty estimator: no measurements yet.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            slots: [None; MAX_NEIGHBOR_LINKS],
+        }
+    }
+
+    /// Fold one TX confirm for `neighbor`: `true` = HW-acked.
+    pub fn note_result(&mut self, neighbor: u16, delivered: bool) {
+        for (n, q) in self.slots.iter_mut().flatten() {
+            if *n == neighbor {
+                *q = if delivered {
+                    (*q + ((256 - *q) >> 3).max(1)).min(256)
+                } else {
+                    *q - (*q >> 3).max(1).min(*q)
+                };
+                return;
+            }
+        }
+        for slot in self.slots.iter_mut() {
+            if slot.is_none() {
+                *slot = Some((neighbor, if delivered { 256 } else { 224 }));
+                return;
+            }
+        }
+        // Full: refuse, keep measured state.
+    }
+
+    /// Current 1..7 cost estimate for `neighbor`, or `None` when
+    /// never measured (caller falls back to the advertised cost).
+    #[must_use]
+    pub fn cost(&self, neighbor: u16) -> Option<u8> {
+        self.slots.iter().flatten().find_map(|(n, q)| {
+            if *n == neighbor {
+                Some(1 + (((256 - *q) * 6).div_ceil(256)) as u8)
+            } else {
+                None
+            }
+        })
     }
 }

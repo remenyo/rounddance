@@ -12,7 +12,7 @@
 //! windows (32-deep each, with replay/gap/late accounting), and
 //! secured-vs-plain frame counts. Per network: PAN id, distinct
 //! device count, and the same secured/plain split. Key slots
-//! ([`keys::KeySlots`]) record operator-loaded lab keys so secured
+//! [`crate::keys::KeySlots`] record operator-loaded lab keys so secured
 //! frames can be reported as decryptable-offline or not. Per session
 //! ([`SessionTimeline`]) the engine links join → transport → announce
 //! → data legs into stage timelines with anomaly flags; the timeline

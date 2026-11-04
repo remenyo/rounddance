@@ -3,10 +3,13 @@
 //! Host (S3) → RCP (H2) commands (`0x01`–`0x0A`): reset, channel,
 //! TX power, PAN/short/extended addressing, 15.4 TX, energy scan,
 //! version query (`0x09`), promiscuous/filtered receive mode
-//! (`0x0A`). RCP → host events (`0x80`–`0x85`): ready, TX confirm,
-//! received frame, energy result, error, version (`0x85`). Every
-//! class has a fixed minimal payload shape; oversize or unknown
-//! input is an error, never a truncation.
+//! (`0x0A`). MAC commands ride the `0x07` proxy (the driver builds
+//! the MHR per [`crate::mac`], the firmware radiates the PSDU
+//! verbatim). RCP → host events (`0x80`–`0x86`): ready, TX confirm,
+//! received frame, energy result, error, version (`0x85`),
+//! channel-tagged frame (`0x86`). Every class has a fixed minimal
+//! payload shape; oversize or unknown input is an error, never a
+//! truncation.
 //!
 //! Wire IDs are rounddance constructions (no spec corpus covers the
 //! S3+H2 UART), documented in `docs/otbr/protocol.md`.
@@ -14,13 +17,21 @@
 //! Requirement traceability (repo-minted, MINTED-pending-confirm):
 //! `RD-RCP-03` (command classes), `RD-RCP-04` (event classes),
 //! `RD-RCP-12` (filtered/auto-ACK mode class), `RD-RCP-13`
-//! (version handshake classes).
+//! (version handshake classes), `RD-RCP-18` (channel-tagged RX +
+//! target caps bits).
 
 use crate::frame::{self, Frame, FrameError, MAX_RCP_PAYLOAD};
 use core::fmt;
 
 /// Largest 15.4 PSDU a TX/RX event carries.
 pub const MAX_PSDU: usize = 127;
+/// Largest PSDU a legacy `RxFrame` event carries: the 128-octet RCP
+/// envelope holds `flags + rssi + lqi` plus this many PSDU octets.
+pub const MAX_RXFRAME_PSDU: usize = crate::frame::MAX_RCP_PAYLOAD - 3;
+/// Largest PSDU a channel-tagged `MacFrame` event carries: the
+/// 128-octet envelope holds `flags + rssi + lqi + channel` plus
+/// this many PSDU octets.
+pub const MAX_MACFRAME_PSDU: usize = crate::frame::MAX_RCP_PAYLOAD - 4;
 
 // Host → RCP command classes.
 pub const K_RESET: u8 = 0x01;
@@ -31,7 +42,7 @@ pub const K_SET_SHORT_ADDR: u8 = 0x05;
 pub const K_SET_EXT_ADDR: u8 = 0x06;
 pub const K_TX_FRAME: u8 = 0x07;
 pub const K_ENERGY_SCAN: u8 = 0x08;
-/// Version query (empty payload; answered by [`K_VERSION`)].
+/// Version query (empty payload; answered by [`K_VERSION`]).
 pub const K_GET_VERSION: u8 = 0x09;
 /// Receive mode: `0x00` = filtered + HW auto-ACK, `0x01` =
 /// promiscuous (all frames, no HW ACK).
@@ -40,11 +51,38 @@ pub const K_SET_PROMISCUOUS: u8 = 0x0A;
 // RCP → host event classes.
 pub const K_READY: u8 = 0x80;
 pub const K_TX_CONFIRM: u8 = 0x81;
+/// Legacy received frame: `[flags, rssi, lqi, psdu…]` (no arrival
+/// channel — the driver falls back to its provisioned channel;
+/// proto-1 firmware emits this, proto-2 emits [`K_MAC_FRAME`]).
 pub const K_RX_FRAME: u8 = 0x82;
 pub const K_ENERGY_RESULT: u8 = 0x83;
 pub const K_ERROR: u8 = 0x84;
 /// Version report: `[fw, proto, caps-LE, eui64]`.
 pub const K_VERSION: u8 = 0x85;
+/// Channel-tagged received frame: `[flags, rssi, lqi, channel,
+/// psdu…]` (proto-2; the per-request inter-PAN retune leg needs the
+/// arrival channel on every frame).
+pub const K_MAC_FRAME: u8 = 0x86;
+
+/// Capability bit: the RCP firmware runs on an H2 radio.
+pub const CAPS_TARGET_H2: u16 = 1 << 8;
+/// Capability bit: the RCP firmware runs on a C6 radio.
+pub const CAPS_TARGET_C6: u16 = 1 << 9;
+/// Capability bit: the RCP firmware runs on an S31 radio.
+pub const CAPS_TARGET_S31: u16 = 1 << 10;
+
+/// Name the radio target advertised by `caps`, if exactly one
+/// target bit is set (`None` for emulated/generic or conflicting
+/// firmware — the universal runner works with any of them).
+#[must_use]
+pub fn caps_target_name(caps: u16) -> Option<&'static str> {
+    match caps & (CAPS_TARGET_H2 | CAPS_TARGET_C6 | CAPS_TARGET_S31) {
+        CAPS_TARGET_H2 => Some("H2"),
+        CAPS_TARGET_C6 => Some("C6"),
+        CAPS_TARGET_S31 => Some("S31"),
+        _ => None,
+    }
+}
 
 /// `K_SET_PROMISCUOUS` payload selecting promiscuous receive.
 pub const PROMISCUOUS_ON: u8 = 0x01;
@@ -373,7 +411,8 @@ pub enum Event {
         /// Outcome.
         status: TxOutcome,
     },
-    /// One frame arrived off air.
+    /// One frame arrived off air (proto-1 shape, no arrival
+    /// channel — the driver falls back to its provisioned channel).
     RxFrame {
         /// True = inter-PAN path.
         inter_pan: bool,
@@ -381,6 +420,24 @@ pub enum Event {
         rssi: i8,
         /// Link quality 0–255.
         lqi: u8,
+        /// Live PSDU length.
+        len: u8,
+        /// PSDU bytes (first `len` live).
+        psdu: [u8; MAX_PSDU],
+    },
+    /// One frame arrived off air with its arrival channel
+    /// (proto-2 shape; per-request inter-PAN retune needs this on
+    /// every frame).
+    MacFrame {
+        /// True = inter-PAN path.
+        inter_pan: bool,
+        /// RSSI in dBm.
+        rssi: i8,
+        /// Link quality 0–255.
+        lqi: u8,
+        /// Arrival channel number (11–26; the driver falls back to
+        /// its provisioned channel when this is out of range).
+        channel: u8,
         /// Live PSDU length.
         len: u8,
         /// PSDU bytes (first `len` live).
@@ -419,6 +476,7 @@ impl Event {
             Self::Ready { .. } => K_READY,
             Self::TxConfirm { .. } => K_TX_CONFIRM,
             Self::RxFrame { .. } => K_RX_FRAME,
+            Self::MacFrame { .. } => K_MAC_FRAME,
             Self::EnergyResult { .. } => K_ENERGY_RESULT,
             Self::Error { .. } => K_ERROR,
             Self::Version { .. } => K_VERSION,
@@ -445,7 +503,7 @@ impl Event {
                 len,
                 psdu,
             } => {
-                if *len as usize > MAX_PSDU {
+                if *len as usize > MAX_RXFRAME_PSDU {
                     return Err(CmdError::TooLong);
                 }
                 payload[0] = if *inter_pan { FLAG_INTER_PAN } else { 0 };
@@ -453,6 +511,24 @@ impl Event {
                 payload[2] = *lqi;
                 payload[3..3 + *len as usize].copy_from_slice(&psdu[..*len as usize]);
                 3 + *len as usize
+            }
+            Self::MacFrame {
+                inter_pan,
+                rssi,
+                lqi,
+                channel,
+                len,
+                psdu,
+            } => {
+                if *len as usize > MAX_MACFRAME_PSDU {
+                    return Err(CmdError::TooLong);
+                }
+                payload[0] = if *inter_pan { FLAG_INTER_PAN } else { 0 };
+                payload[1] = *rssi as u8;
+                payload[2] = *lqi;
+                payload[3] = *channel;
+                payload[4..4 + *len as usize].copy_from_slice(&psdu[..*len as usize]);
+                4 + *len as usize
             }
             Self::EnergyResult { channel, energy } => {
                 payload[0] = *channel;
@@ -512,6 +588,24 @@ impl Event {
                     rssi: p[1] as i8,
                     lqi: p[2],
                     len: (p.len() - 3) as u8,
+                    psdu,
+                })
+            }
+            K_MAC_FRAME => {
+                if p.len() < 4 {
+                    return Err(CmdError::Truncated);
+                }
+                if p.len() - 4 > MAX_PSDU {
+                    return Err(CmdError::TooLong);
+                }
+                let mut psdu = [0u8; MAX_PSDU];
+                psdu[..p.len() - 4].copy_from_slice(&p[4..]);
+                Ok(Self::MacFrame {
+                    inter_pan: p[0] & FLAG_INTER_PAN != 0,
+                    rssi: p[1] as i8,
+                    lqi: p[2],
+                    channel: p[3],
+                    len: (p.len() - 4) as u8,
                     psdu,
                 })
             }
@@ -639,6 +733,16 @@ mod tests {
             len: 3,
             psdu,
         });
+        let mut mpsdu = [0u8; MAX_PSDU];
+        mpsdu[..3].copy_from_slice(&[4, 5, 6]);
+        roundtrip_event(&Event::MacFrame {
+            inter_pan: true,
+            rssi: -61,
+            lqi: 180,
+            channel: 20,
+            len: 3,
+            psdu: mpsdu,
+        });
         roundtrip_event(&Event::EnergyResult {
             channel: 15,
             energy: 116,
@@ -661,6 +765,44 @@ mod tests {
             caps: 0x00FF,
             eui: [0x74, 0x4D, 0xBD, 0xFF, 0xFE, 0x61, 0x7A, 0xFA],
         });
+    }
+
+    #[test]
+    fn mac_frame_and_target_caps() {
+        // Proto-2 channel-tagged RX + target caps bits: the
+        // universal runner probes these to name the radio (H2/C6/S31)
+        // while speaking identical classes to all of them.
+        let mut psdu = [0u8; MAX_PSDU];
+        psdu[..2].copy_from_slice(&[0xAA, 0xBB]);
+        roundtrip_event(&Event::MacFrame {
+            inter_pan: false,
+            rssi: -40,
+            lqi: 255,
+            channel: 15,
+            len: 2,
+            psdu,
+        });
+        assert_eq!(caps_target_name(0x00FF), None);
+        assert_eq!(caps_target_name(0x00FF | CAPS_TARGET_H2), Some("H2"));
+        assert_eq!(caps_target_name(0x00FF | CAPS_TARGET_C6), Some("C6"));
+        assert_eq!(caps_target_name(0x00FF | CAPS_TARGET_S31), Some("S31"));
+        assert_eq!(
+            caps_target_name(CAPS_TARGET_H2 | CAPS_TARGET_C6),
+            None,
+            "conflicting target bits name nothing"
+        );
+        // A short MacFrame (fewer than flags/rssi/lqi/channel) is
+        // truncated, never parsed.
+        let mut wire = [0u8; 256];
+        let n = crate::frame::encode(K_MAC_FRAME, 0, &[0x00, 0xD8, 0xC8], &mut wire).unwrap();
+        let mut dec = crate::frame::Decoder::new();
+        let mut frame = None;
+        for b in &wire[..n] {
+            if let Some(crate::frame::Outcome::Frame(f)) = dec.push_byte(*b) {
+                frame = Some(f);
+            }
+        }
+        assert_eq!(Event::decode(&frame.unwrap()), Err(CmdError::Truncated));
     }
 
     #[test]

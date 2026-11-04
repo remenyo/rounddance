@@ -110,6 +110,26 @@ pub fn build_transport_key_frame(
     p: &TransportKeyParams,
     out: &mut [u8],
 ) -> Result<usize, TransportError> {
+    build_transport_key_frame_via(p, p.dst_short, out)
+}
+
+/// Build one Trust-Center→grandchild transport-key frame with an
+/// explicit MAC destination for the relay leg.
+///
+/// Relay contract (paraphrase, doc 05-3474-23 R23.2 §3.3/§3.6):
+/// the NWK destination stays the final joiner short (`p.dst_short`),
+/// the MAC destination is the next hop (`mac_dst`, e.g. the router).
+/// The NWK MSDU (NWK header + APS envelope + sealed tail) is byte
+/// identical to the direct frame, so the joiner's
+/// auxiliary/nonce/counter open accepts either leg.
+///
+/// Requirement `05-3474-23-3661-01` (repo-minted,
+/// MINTED-pending-confirm).
+pub fn build_transport_key_frame_via(
+    p: &TransportKeyParams,
+    mac_dst: u16,
+    out: &mut [u8],
+) -> Result<usize, TransportError> {
     if out.len() < TRANSPORT_FRAME_LEN {
         return Err(TransportError::TooSmall);
     }
@@ -173,12 +193,13 @@ pub fn build_transport_key_frame(
         .map_err(|_| TransportError::Nwk)?;
     debug_assert_eq!(nwk_total, 8 + aps.len());
     // MAC data header: FC 61 88 (no ack/security, intra-PAN
-    // short/short), seq, PAN, dst short, src short 0x0000.
+    // short/short), seq, PAN, MAC dst (next hop on the relay leg),
+    // src short 0x0000. NWK dst above stays the final short.
     out[0] = 0x61;
     out[1] = 0x88;
     out[2] = p.mac_seq;
     out[3..5].copy_from_slice(&p.dst_pan.to_le_bytes());
-    out[5..7].copy_from_slice(&p.dst_short.to_le_bytes());
+    out[5..7].copy_from_slice(&mac_dst.to_le_bytes());
     out[7..9].copy_from_slice(&0x0000u16.to_le_bytes());
     Ok(9 + nwk_total)
 }

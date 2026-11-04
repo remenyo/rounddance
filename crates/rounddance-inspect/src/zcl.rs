@@ -1,7 +1,7 @@
-//! ZCL dissector: reused `rounddance-zcl` codec → [`ZclNode`](crate::tree::ZclNode).
+//! ZCL dissector: reused `rounddance-zcl` codec → [`crate::tree::ZclNode`].
 //!
 //! The header always decodes via the codec; the payload additionally
-//! gets a bounded [`ZclDetail`](crate::tree::ZclDetail) summary for the
+//! gets a bounded [`crate::tree::ZclDetail`] summary for the
 //! foundation commands, the top clusters observed in lab captures
 //! (On/Off `0x0006`, Level Control `0x0008`, IAS Zone `0x0500`), the
 //! Smart-Energy Metering (`0x0702`) and Price (`0x0700`) headline

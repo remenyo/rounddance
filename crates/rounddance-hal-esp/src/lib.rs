@@ -4,8 +4,9 @@
 //! [`rounddance_mac_sap`] traits. This crate is the ESP-side adapter:
 //! [`EspAdapter`] implements [`MacDataSap`], [`MacMgmtSap`], and
 //! [`MacInterPanSap`] over the [`Driver`] seam, with the production
-//! driver ([`EspIdfDriver`], `esp` feature) on one side and the
-//! scriptable [`MockDriver`] (host tests, WASM) on the other.
+//! driver ([`MockDriver`], host tests and WASM)
+//! on one side and the production driver (`EspIdfDriver`,
+//! `esp` feature) on the other.
 //!
 //! # Target scope
 //!
@@ -21,7 +22,7 @@
 //! * **TX-power standing cap**: [`MAX_TX_POWER_DBM`] (+10 dBm) is
 //!   rejected in-code by [`EspAdapter::set_tx_power`]. Lab policy until
 //!   human clears it; the driver never sees a hotter request.
-//! * **NVS-init-first**: [`EspIdfDriver::init`] runs `nvs_flash_init`
+//! * **NVS-init-first**: `EspIdfDriver::init` runs `nvs_flash_init`
 //!   (with erase-on-version-mismatch, as the spike proved) before
 //!   `esp_ieee802154_enable`. Calibration data lives in NVS.
 //! * **Len+2**: every air frame's first octet is the on-air length
@@ -72,6 +73,7 @@ extern crate std;
 pub mod adapter;
 pub mod app;
 pub mod auxctr;
+pub mod board;
 pub mod driver;
 #[cfg(feature = "esp")]
 pub mod esp;
@@ -79,11 +81,14 @@ pub mod esp;
 pub mod ffi;
 pub mod mac_cmd;
 pub mod mock;
+pub mod router_esp;
 
 pub use adapter::{EspAdapter, EspError, MacIndication, MAX_TX_POWER_DBM};
 pub use app::{AppError, AppRole, CoordinatorApp, JoinerApp, SerialLog};
+pub use board::{BoardConfig, BoardIdentity, EspTarget};
 pub use driver::{Driver, DriverError, PendingMode, RxFrame, TxEvent, TxFail};
 pub use mock::MockDriver;
+pub use router_esp::{nwk_dst_of, RouterDevice};
 
 #[cfg(feature = "esp")]
 pub use esp::EspIdfDriver;

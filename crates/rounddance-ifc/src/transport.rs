@@ -1,7 +1,7 @@
 //! Reference in-memory transport: message queues, no I/O.
 //!
-//! [`MemPair::new`] yields two linked [`MemEnd`]s: whatever end A
-//! sends, end B receives, and vice versa. Queues are bounded
+//! [`MemLink::new`] yields one link with two [`Side`]s (A/B): whatever
+//! side A sends, side B receives, and vice versa. Queues are bounded
 //! ([`MEM_QUEUE`] deep per direction); a full queue surfaces
 //! [`IfcError::QueueFull`] — the same backpressure verbs as a real
 //! binding, minus the byte stream. Byte-level framing is covered by

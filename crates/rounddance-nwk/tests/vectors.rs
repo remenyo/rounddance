@@ -6,15 +6,15 @@
 //! §3.2.1.1.3 — never copied from spec text (D1, `SCOPE.md` §2).
 
 use rounddance_nwk::{
-    add_path_cost, build_data_header, decode, decode_leave, decode_link_status, decode_route_reply,
-    decode_route_request, indication_for_local, is_broadcast_addr, radius_for_request,
-    CommandError, Decoded, DecodedLeave, DecodedLinkStatus, DiscoverRoute, DiscoveryTable,
-    FrameControl, FrameType, Leave, LeaveOptions, LinkStatus, LinkStatusEntry, LinkStatusOptions,
-    ManyToOne, NeighborCosts, NldeDataRequest, NldeError, NwkError, NwkHeader, RouteReply,
-    RouteReplyOptions, RouteRequest, RouteRequestOptions, RouteTable, RoutingError, SeenRequests,
-    SourceRoute, TxPipeline, BROADCAST_ALL_DEVICES, BROADCAST_RESERVED_HIGH,
-    BROADCAST_RESERVED_LOW, BROADCAST_ROUTERS, CMD_LEAVE, CMD_LINK_STATUS, CMD_ROUTE_REPLY,
-    CMD_ROUTE_REQUEST, ROUTE_LIFETIME_MS,
+    accumulate_path_cost, add_path_cost, build_data_header, decode, decode_leave,
+    decode_link_status, decode_route_reply, decode_route_request, indication_for_local,
+    is_broadcast_addr, radius_for_request, CommandError, Decoded, DecodedLeave, DecodedLinkStatus,
+    DiscoverRoute, DiscoveryTable, FrameControl, FrameType, Leave, LeaveOptions, LinkEstimator,
+    LinkStatus, LinkStatusEntry, LinkStatusOptions, ManyToOne, NeighborCosts, NldeDataRequest,
+    NldeError, NwkError, NwkHeader, PathCostMetric, RouteReply, RouteReplyOptions, RouteRequest,
+    RouteRequestOptions, RouteTable, RoutingError, SeenRequests, SourceRoute, TxPipeline,
+    BROADCAST_ALL_DEVICES, BROADCAST_RESERVED_HIGH, BROADCAST_RESERVED_LOW, BROADCAST_ROUTERS,
+    CMD_LEAVE, CMD_LINK_STATUS, CMD_ROUTE_REPLY, CMD_ROUTE_REQUEST, ROUTE_LIFETIME_MS,
 };
 
 // 05-3474-23-331-01: minimal data frame on the wire.
@@ -712,4 +712,59 @@ fn vector_leave_options_and_edges_05_3474_23_344_01() {
         plain.encode_into(&mut out[..1]),
         Err(CommandError::BufferTooSmall)
     );
+}
+
+// RD-ROUTE-01: path-cost metric folds (repo-minted, MINTED-pending-confirm).
+// SaturatingSum is byte-identical to the legacy add_path_cost contract.
+#[test]
+fn vector_path_cost_metrics_rd_route_01() {
+    use PathCostMetric::*;
+    assert_eq!(accumulate_path_cost(SaturatingSum, 250, 7), 255);
+    assert_eq!(accumulate_path_cost(SaturatingSum, 3, 2), 5);
+    assert_eq!(accumulate_path_cost(HopCount, 3, 2), 4);
+    assert_eq!(accumulate_path_cost(HopCount, 250, 7), 251);
+    assert_eq!(accumulate_path_cost(Bottleneck, 3, 5), 5);
+    assert_eq!(accumulate_path_cost(Bottleneck, 5, 3), 5);
+    // Out-of-scale meter readings clamp instead of poisoning the sum.
+    assert_eq!(accumulate_path_cost(SaturatingSum, 250, 0), 251);
+    assert_eq!(accumulate_path_cost(HopCount, 3, 0), 4);
+    assert_eq!(accumulate_path_cost(HopCount, 3, 9), 4);
+}
+
+// RD-ROUTE-02: EWMA delivery-ratio estimator bands (repo-minted, MINTED-pending-confirm).
+#[test]
+fn vector_link_estimator_bands_rd_route_02() {
+    let mut e = LinkEstimator::new();
+    assert_eq!(e.cost(0x0002), None);
+    e.note_result(0x0002, true);
+    assert_eq!(e.cost(0x0002), Some(1));
+    e.note_result(0x0002, false);
+    assert_eq!(e.cost(0x0002), Some(2));
+    for _ in 0..11 {
+        e.note_result(0x0002, false);
+    }
+    assert_eq!(e.cost(0x0002), Some(6));
+    for _ in 0..8 {
+        e.note_result(0x0002, false);
+    }
+    assert_eq!(e.cost(0x0002), Some(7));
+    // Recovery: acks walk the grade back down.
+    for _ in 0..40 {
+        e.note_result(0x0002, true);
+    }
+    assert_eq!(e.cost(0x0002), Some(1));
+    // Unknown neighbors stay unknown (caller falls back).
+    assert_eq!(e.cost(0x0003), None);
+}
+
+// RD-ROUTE-03: failure-driven route eviction (repo-minted, MINTED-pending-confirm).
+#[test]
+fn vector_route_remove_rd_route_03() {
+    let mut t = RouteTable::new();
+    t.install(0x1234, 0x0002, 1, 1_000, ROUTE_LIFETIME_MS)
+        .unwrap();
+    assert_eq!(t.next_hop(0x1234, 2_000), Some(0x0002));
+    assert!(t.remove(0x1234));
+    assert_eq!(t.next_hop(0x1234, 2_000), None);
+    assert!(!t.remove(0x1234));
 }

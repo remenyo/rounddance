@@ -3,7 +3,7 @@ description: Rounddance Zigbee stack as a stable C ABI (join/toggle/poll over th
 url: "https://github.com/remenyo/rounddance"
 repository: "https://github.com/remenyo/rounddance.git"
 documentation: "https://github.com/remenyo/rounddance/blob/master/idf/components/rounddance/README.md"
-license: "MIT OR Apache-2.0"
+license: "Apache-2.0"
 targets:
   - esp32c6
 dependencies: {}

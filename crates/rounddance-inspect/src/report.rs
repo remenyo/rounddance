@@ -1,4 +1,4 @@
-//! Text and JSON reports over [`DecodeTree`](crate::tree::DecodeTree) (`std` only).
+//! Text and JSON reports over [`crate::tree::DecodeTree`] (`std` only).
 //!
 //! Reports render owned scalars only — no hexdumps of key material, no
 //! payload bytes. A secured frame is reported as `secured` with its

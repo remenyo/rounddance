@@ -1,4 +1,4 @@
-//! APS dissector: reused `rounddance-aps` codec → [`ApsNode`](crate::tree::ApsNode).
+//! APS dissector: reused `rounddance-aps` codec → [`crate::tree::ApsNode`].
 
 use crate::tree::ApsNode;
 

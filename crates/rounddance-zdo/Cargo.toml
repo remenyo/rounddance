@@ -4,12 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Zigbee ZDO clusters, descriptors, ZDP and bind/mgmt codecs (no_std)"
 
 [dependencies]
-rounddance-aps = { path = "../rounddance-aps" }
+rounddance-aps = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-aps" }
 
 [dev-dependencies]
-rounddance-aps = { path = "../rounddance-aps" }
-rounddance-mac-sap = { path = "../rounddance-mac-sap" }
-rounddance-nwk = { path = "../rounddance-nwk" }
-rounddance-sim = { path = "../rounddance-sim" }
+rounddance-aps = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-aps" }
+rounddance-mac-sap = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-mac-sap" }
+rounddance-nwk = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-nwk" }

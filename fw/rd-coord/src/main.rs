@@ -259,6 +259,10 @@ fn main() {
     let mut tog_tries: u8 = 0;
     const TOG_RETRIES: u8 = 4;
     let mut tog_done = false;
+    // Toggle destination: the announcer that conversed (grandchild
+    // via its router relays through the installed next hop; direct
+    // joiners resolve to themselves). Defaults to the lab joiner.
+    let mut tog_short: u16 = 0x0001;
     // Join-rate policy log state (change-triggered only).
     let mut last_policy_th: u32 = 0;
     let mut last_policy_dn: u32 = 0;
@@ -286,6 +290,8 @@ fn main() {
             app.tick(now_ms, elapsed);
             last_tick_ms = now_ms;
         }
+        // Age installed grandchild routes + retire dead discoveries.
+        let _ = app.tick_routing(now_ms);
         // MAC-command RX: classify + responder update, logged.
         while let Some(ind) = adapter.poll_mac_indication() {
             let psdu = ind.psdu();
@@ -348,12 +354,18 @@ fn main() {
                 node_desc_pending = Some(short);
                 node_desc_handle = None;
                 node_desc_retries = 4;
+                // Remember the conversing announcer for the routed
+                // toggle leg (grandchild short when relayed).
+                tog_short = short;
             }
             // Toggle the joiner's lamp once the join converses: the
             // first successful ZDO exchange proves two-way traffic, so
             // queue one secured toggle (fresh TSN per intent; retries
             // share it, so a confirm-lost retry can't double-toggle).
-            if let NwkRxOutcome::ZdoResponse { status: Some(0), .. } = outcome {
+            if let NwkRxOutcome::ZdoResponse {
+                status: Some(0), ..
+            } = outcome
+            {
                 if !tog_done {
                     tog_done = true;
                     tog_pending = true;
@@ -445,13 +457,15 @@ fn main() {
         // Toggle transmit: queued once per boot by the first
         // successful ZDO exchange; confirm-driven bounded retry like
         // the node-desc leg above. Fresh aux counter per build (never
-        // re-radiate identical secured bytes).
+        // re-radiate identical secured bytes). Routable destination:
+        // the MAC goes to the installed next hop when one covers the
+        // announcer (grandchild via router), else direct.
         if tog_pending && tog_handle.is_none() {
             if tog_tries >= TOG_RETRIES {
                 println!("RDCOORD TX-TOGGLE-GIVEUP (budget exhausted)");
                 tog_pending = false;
             } else {
-                match app.build_toggle_request(&mut log, &C6_NETKEY, &mut tx_buf) {
+                match app.build_toggle_request_to(&mut log, &C6_NETKEY, tog_short, &mut tx_buf) {
                     Ok(n) if n > 0 => {
                         persist_aux_chunk(&mut app);
                         match adapter.transmit_mac(&tx_buf[..n]) {

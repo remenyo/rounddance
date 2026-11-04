@@ -21,10 +21,14 @@
 //! * Roles: the S3 owns PAN formation, addressing, retries, and all
 //!   Zigbee layers; the H2 owns the 15.4 PHY (CSMA, auto-ACK,
 //!   energy detect, frame radiate/receive) and nothing above it.
-//! * The v0 mapping is deliberately thin: SAP MSDUs ride as RCP
-//!   payloads verbatim. MAC header build/parse (cf.
-//!   `rounddance-hal-esp`'s adapter) and multi-channel retune are
-//!   deferred follow-ups, recorded in `docs/otbr/protocol.md`.
+//! * Host-side MAC header layer ([`mac`]): short-short data and
+//!   broadcast inter-PAN headers are built around every MSDU before
+//!   the RCP proxy radiates it, and parsed back into sources on
+//!   receive; MAC commands (beacons, association traffic, polls)
+//!   surface on the MAC-command queue.
+//! * Half-host NCP role ([`ncp`]): beside the RCP radio role, a
+//!   minimal NCP frame family lets the PC commission and drive an
+//!   application on a chip that runs the full Zigbee stack.
 //!
 //! # Crate choice (not an `otbr` submodule)
 //!
@@ -46,8 +50,8 @@
 //!   (`SCOPE.md` §8).
 //!
 //! Requirement traceability (repo-minted, MINTED-pending-confirm):
-//! `RD-RCP-01`…`RD-RCP-16` (`REQUIREMENTS.md` wave-18 + wave-54
-//! sections).
+//! `RD-RCP-01`…`RD-RCP-18` (`REQUIREMENTS.md` wave-18 + wave-54 +
+//! wave-55 sections).
 #![no_std]
 #![forbid(unsafe_code)]
 
@@ -59,15 +63,19 @@ use core::fmt;
 pub mod cmd;
 pub mod driver;
 pub mod frame;
+pub mod mac;
+pub mod ncp;
 pub mod peer;
 pub mod uart;
 
-pub use cmd::{CmdError, Command, Event, TxOutcome};
+pub use cmd::{caps_target_name, CmdError, Command, Event, TxOutcome};
 pub use driver::{
-    RcpDriver, RcpStats, RecoveryState, TraceEvent, VersionInfo, CMD_TIMEOUT_US, MAX_RETRIES,
-    RECOVERY_ATTEMPTS, TX_SLOTS,
+    MacIndication, RcpDriver, RcpStats, RecoveryState, TraceEvent, VersionInfo, CMD_TIMEOUT_US,
+    MAC_QUEUE_DEPTH, MAX_RETRIES, RECOVERY_ATTEMPTS, TX_SLOTS,
 };
 pub use frame::{Decoder, DropReason, Frame, FrameError, Outcome};
+pub use mac::{legal_channel, snoop_assoc_short, MAX_MAC_PSDU, MHR_DATA, MHR_INTERPAN};
+pub use ncp::{NcpDevice, NcpError, NcpEvent, NcpHost};
 pub use peer::EmulatedRcp;
 pub use uart::{HostSide, LoopPipe, Uart};
 
@@ -80,8 +88,12 @@ pub const MAX_TX_POWER_DBM: i8 = 10;
 /// H2 RCP firmware version the emulated peer reports.
 pub const RCP_FW_VERSION: u8 = 0x01;
 
-/// RCP wire-protocol version the emulated peer reports.
-pub const RCP_PROTO_VERSION: u8 = 0x01;
+/// RCP wire-protocol version the emulated peer reports: `0x02` =
+/// channel-tagged RX (`0x86`) + host-built MAC headers. Proto-1
+/// firmware (no `0x86`, verbatim MSDUs) still interoperates: the
+/// driver falls back to its provisioned channel and parses whatever
+/// shape arrives.
+pub const RCP_PROTO_VERSION: u8 = 0x02;
 
 /// Capability bitmask the emulated peer reports: TX, promiscuous
 /// RX, energy scan, +10 dBm cap, 4-deep TX queue, extended

@@ -4,12 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Zigbee device roles: child tables, indirect queues, router/end-device machines (no_std)"
 
 [dependencies]
-rounddance-commission = { path = "../rounddance-commission" }
-rounddance-nwk = { path = "../rounddance-nwk" }
-rounddance-zdo = { path = "../rounddance-zdo" }
-
-[dev-dependencies]
-rounddance-sim = { path = "../rounddance-sim" }
-rounddance-mac-sap = { path = "../rounddance-mac-sap" }
+rounddance-commission = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-commission" }
+rounddance-nwk = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-nwk" }
+rounddance-zdo = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-zdo" }

@@ -2,8 +2,7 @@
 //!
 //! The adapter ([`EspAdapter`](crate::adapter::EspAdapter)) never touches
 //! hardware or IDF symbols directly — every radio effect goes through
-//! this trait. Production provides
-//! [`EspIdfDriver`](crate::esp::EspIdfDriver) (`esp` feature); host
+//! this trait. Production provides `EspIdfDriver` (`esp` feature); host
 //! tests and WASM provide [`MockDriver`](crate::mock::MockDriver).
 //!
 //! The trait mirrors the proven spike surface: init/deinit, channel +

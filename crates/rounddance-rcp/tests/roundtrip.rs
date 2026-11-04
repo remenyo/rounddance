@@ -217,3 +217,42 @@ fn command_event_round_trip_all_classes() {
         other => panic!("version event must decode, got {other:?}"),
     }
 }
+
+#[test]
+fn mac_frame_events_round_trip_and_survive_mutation() {
+    use rounddance_rcp::cmd::{K_MAC_FRAME, MAX_MACFRAME_PSDU};
+    let mut rng = Fuzz(0x9AC0);
+    let mut wire = [0u8; 256];
+    for _ in 0..CASES {
+        let mut psdu = [0u8; MAX_PSDU];
+        let len = rng.below(MAX_MACFRAME_PSDU as u64 + 1) as usize;
+        for b in psdu.iter_mut().take(len) {
+            *b = rng.below(256) as u8;
+        }
+        let ev = Event::MacFrame {
+            inter_pan: rng.below(2) == 0,
+            rssi: rng.below(256) as u8 as i8,
+            lqi: rng.below(256) as u8,
+            channel: 11 + rng.below(16) as u8,
+            len: len as u8,
+            psdu,
+        };
+        let seq = rng.below(256) as u8;
+        let n = ev.encode(seq, &mut wire).unwrap();
+        let mut dec = Decoder::new();
+        let mut got = None;
+        for b in &wire[..n] {
+            if let Some(o) = dec.push_byte(*b) {
+                got = Some(o);
+            }
+        }
+        match got {
+            Some(Outcome::Frame(f)) => {
+                assert_eq!(f.kind, K_MAC_FRAME);
+                assert_eq!(f.seq, seq);
+                assert_eq!(&Event::decode(&f).unwrap(), &ev);
+            }
+            other => panic!("mac-frame encode must decode, got {other:?}"),
+        }
+    }
+}

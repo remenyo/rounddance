@@ -786,6 +786,321 @@ impl SimpleDescRsp {
     }
 }
 
+/// Bound on fields in a [`ComplexDescRsp`] (declared budget; longer
+/// over-air lists are rejected with [`Error::TooManyEntries`]).
+///
+/// Requirement `05-3474-23-24317-02` (MINTED-pending-confirm).
+pub const MAX_COMPLEX_FIELDS: usize = 4;
+
+/// Bound on octets per complex-descriptor field (declared budget).
+///
+/// Requirement `05-3474-23-24317-02` (MINTED-pending-confirm).
+pub const MAX_COMPLEX_FIELD_LEN: usize = 16;
+
+/// `Complex_Desc_req`: ask for the complex descriptor of one network
+/// address (§2.4.3.1.8, same subject-address shape as
+/// [`NodeDescReq`]; no line anchor claimed).
+///
+/// Requirement `05-3474-23-24317-01` (MINTED-pending-confirm).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ComplexDescReq {
+    /// Transaction sequence, echoed in the response.
+    pub tsn: u8,
+    /// Network address of interest.
+    pub nwk_of_interest: u16,
+}
+
+impl ComplexDescReq {
+    /// Wire length.
+    pub const LEN: usize = 3;
+
+    /// Decode a complex-descriptor request frame.
+    pub fn decode(buf: &[u8]) -> Result<Self, Error> {
+        if buf.len() < Self::LEN {
+            return Err(Error::Truncated);
+        }
+        Ok(Self {
+            tsn: buf[0],
+            nwk_of_interest: u16::from_le_bytes([buf[1], buf[2]]),
+        })
+    }
+
+    /// Encode into `out`.
+    pub fn encode_into(&self, out: &mut [u8]) -> Result<usize, Error> {
+        if out.len() < Self::LEN {
+            return Err(Error::BufferTooSmall);
+        }
+        out[0] = self.tsn;
+        out[1..3].copy_from_slice(&self.nwk_of_interest.to_le_bytes());
+        Ok(Self::LEN)
+    }
+}
+
+/// One complex-descriptor field: tag plus bounded bytes (paraphrase
+/// of the field record: tag octet names the field kind, the length
+/// octet bounds its body).
+///
+/// Requirement `05-3474-23-24317-02` (MINTED-pending-confirm).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ComplexField {
+    /// Field-kind tag.
+    pub tag: u8,
+    /// Field body, first `len` octets valid.
+    pub body: [u8; MAX_COMPLEX_FIELD_LEN],
+    /// Valid body octets.
+    pub len: u8,
+}
+
+impl ComplexField {
+    /// Decode one field from the head of `buf`, returning the field
+    /// plus the octets consumed.
+    pub fn decode(buf: &[u8]) -> Result<(Self, usize), Error> {
+        if buf.len() < 2 {
+            return Err(Error::Truncated);
+        }
+        let len = buf[1] as usize;
+        if len > MAX_COMPLEX_FIELD_LEN || buf.len() < 2 + len {
+            return Err(Error::Truncated);
+        }
+        let mut field = Self {
+            tag: buf[0],
+            body: [0; MAX_COMPLEX_FIELD_LEN],
+            len: len as u8,
+        };
+        field.body[..len].copy_from_slice(&buf[2..2 + len]);
+        Ok((field, 2 + len))
+    }
+
+    /// Encode one field into `out`.
+    pub fn encode_into(&self, out: &mut [u8]) -> Result<usize, Error> {
+        let len = self.len as usize;
+        if len > MAX_COMPLEX_FIELD_LEN {
+            return Err(Error::TooManyEntries);
+        }
+        if out.len() < 2 + len {
+            return Err(Error::BufferTooSmall);
+        }
+        out[0] = self.tag;
+        out[1] = self.len;
+        out[2..2 + len].copy_from_slice(&self.body[..len]);
+        Ok(2 + len)
+    }
+}
+
+/// `Complex_Desc_rsp`: answer to [`ComplexDescReq`]: the subject
+/// address plus the field page on success.
+///
+/// Requirement `05-3474-23-24317-02` (MINTED-pending-confirm).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ComplexDescRsp {
+    /// Echoed transaction sequence.
+    pub tsn: u8,
+    /// Outcome of the inquiry.
+    pub status: ZdpStatus,
+    /// Network address from the request.
+    pub nwk_of_interest: u16,
+    /// Fields, first `field_len` entries valid (present only on
+    /// success).
+    pub fields: [ComplexField; MAX_COMPLEX_FIELDS],
+    /// How many fields are present.
+    pub field_len: u8,
+}
+
+/// Empty complex-descriptor field for array initialization.
+const EMPTY_COMPLEX_FIELD: ComplexField = ComplexField {
+    tag: 0,
+    body: [0; MAX_COMPLEX_FIELD_LEN],
+    len: 0,
+};
+
+impl ComplexDescRsp {
+    /// Wire length without fields.
+    pub const MIN_LEN: usize = 5;
+
+    /// Decode a complex-descriptor response frame.
+    pub fn decode(buf: &[u8]) -> Result<Self, Error> {
+        if buf.len() < Self::MIN_LEN {
+            return Err(Error::Truncated);
+        }
+        let status = ZdpStatus::from_code(buf[1]);
+        let mut rsp = Self {
+            tsn: buf[0],
+            status,
+            nwk_of_interest: u16::from_le_bytes([buf[2], buf[3]]),
+            fields: [EMPTY_COMPLEX_FIELD; MAX_COMPLEX_FIELDS],
+            field_len: 0,
+        };
+        if !status.is_success() {
+            return Ok(rsp);
+        }
+        let count = buf[4] as usize;
+        if count > MAX_COMPLEX_FIELDS {
+            return Err(Error::TooManyEntries);
+        }
+        let mut at = Self::MIN_LEN;
+        let mut i = 0;
+        while i < count {
+            let (field, n) = ComplexField::decode(&buf[at..])?;
+            rsp.fields[i] = field;
+            at += n;
+            i += 1;
+        }
+        rsp.field_len = count as u8;
+        Ok(rsp)
+    }
+
+    /// Encode into `out`.
+    pub fn encode_into(&self, out: &mut [u8]) -> Result<usize, Error> {
+        let count = self.field_len as usize;
+        if count > MAX_COMPLEX_FIELDS {
+            return Err(Error::TooManyEntries);
+        }
+        if out.len() < Self::MIN_LEN {
+            return Err(Error::BufferTooSmall);
+        }
+        out[0] = self.tsn;
+        out[1] = self.status.code();
+        out[2..4].copy_from_slice(&self.nwk_of_interest.to_le_bytes());
+        out[4] = self.field_len;
+        if !self.status.is_success() {
+            return Ok(Self::MIN_LEN);
+        }
+        let mut at = Self::MIN_LEN;
+        let mut i = 0;
+        while i < count {
+            at += self.fields[i].encode_into(&mut out[at..])?;
+            i += 1;
+        }
+        Ok(at)
+    }
+
+    /// Fields as a slice.
+    #[must_use]
+    pub fn field_list(&self) -> &[ComplexField] {
+        &self.fields[..self.field_len as usize]
+    }
+}
+
+/// Bound on octets in a [`UserDescRsp`] user label (declared budget).
+///
+/// Requirement `05-3474-23-24318-02` (MINTED-pending-confirm).
+pub const MAX_USER_DESC_LEN: usize = 16;
+
+/// `User_Desc_req`: ask for the user label of one network address
+/// (§2.4.3.1.9, same subject-address shape as [`NodeDescReq`]; no
+/// line anchor claimed).
+///
+/// Requirement `05-3474-23-24318-01` (MINTED-pending-confirm).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UserDescReq {
+    /// Transaction sequence, echoed in the response.
+    pub tsn: u8,
+    /// Network address of interest.
+    pub nwk_of_interest: u16,
+}
+
+impl UserDescReq {
+    /// Wire length.
+    pub const LEN: usize = 3;
+
+    /// Decode a user-descriptor request frame.
+    pub fn decode(buf: &[u8]) -> Result<Self, Error> {
+        if buf.len() < Self::LEN {
+            return Err(Error::Truncated);
+        }
+        Ok(Self {
+            tsn: buf[0],
+            nwk_of_interest: u16::from_le_bytes([buf[1], buf[2]]),
+        })
+    }
+
+    /// Encode into `out`.
+    pub fn encode_into(&self, out: &mut [u8]) -> Result<usize, Error> {
+        if out.len() < Self::LEN {
+            return Err(Error::BufferTooSmall);
+        }
+        out[0] = self.tsn;
+        out[1..3].copy_from_slice(&self.nwk_of_interest.to_le_bytes());
+        Ok(Self::LEN)
+    }
+}
+
+/// `User_Desc_rsp`: answer to [`UserDescReq`]: the subject address
+/// plus the counted user label on success.
+///
+/// Requirement `05-3474-23-24318-02` (MINTED-pending-confirm).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UserDescRsp {
+    /// Echoed transaction sequence.
+    pub tsn: u8,
+    /// Outcome of the inquiry.
+    pub status: ZdpStatus,
+    /// Network address from the request.
+    pub nwk_of_interest: u16,
+    /// User label, first `label_len` octets valid (present only on
+    /// success).
+    pub label: [u8; MAX_USER_DESC_LEN],
+    /// How many label octets are present.
+    pub label_len: u8,
+}
+
+impl UserDescRsp {
+    /// Wire length without the label.
+    pub const MIN_LEN: usize = 5;
+
+    /// Decode a user-descriptor response frame.
+    pub fn decode(buf: &[u8]) -> Result<Self, Error> {
+        if buf.len() < Self::MIN_LEN {
+            return Err(Error::Truncated);
+        }
+        let status = ZdpStatus::from_code(buf[1]);
+        let mut rsp = Self {
+            tsn: buf[0],
+            status,
+            nwk_of_interest: u16::from_le_bytes([buf[2], buf[3]]),
+            label: [0; MAX_USER_DESC_LEN],
+            label_len: 0,
+        };
+        if !status.is_success() {
+            return Ok(rsp);
+        }
+        let len = buf[4] as usize;
+        if len > MAX_USER_DESC_LEN || buf.len() < Self::MIN_LEN + len {
+            return Err(Error::Truncated);
+        }
+        rsp.label[..len].copy_from_slice(&buf[5..5 + len]);
+        rsp.label_len = len as u8;
+        Ok(rsp)
+    }
+
+    /// Encode into `out`.
+    pub fn encode_into(&self, out: &mut [u8]) -> Result<usize, Error> {
+        let len = self.label_len as usize;
+        if len > MAX_USER_DESC_LEN {
+            return Err(Error::TooManyEntries);
+        }
+        let success = self.status.is_success();
+        let n = Self::MIN_LEN + if success { len } else { 0 };
+        if out.len() < n {
+            return Err(Error::BufferTooSmall);
+        }
+        out[0] = self.tsn;
+        out[1] = self.status.code();
+        out[2..4].copy_from_slice(&self.nwk_of_interest.to_le_bytes());
+        out[4] = self.label_len;
+        if success {
+            out[5..5 + len].copy_from_slice(&self.label[..len]);
+        }
+        Ok(n)
+    }
+
+    /// Label bytes as a slice.
+    #[must_use]
+    pub fn label_bytes(&self) -> &[u8] {
+        &self.label[..self.label_len as usize]
+    }
+}
+
 /// `Active_EP_req`: ask for the endpoint list of one network address
 /// (§2.4.3.1.6, Table 2-49, anchor p0132-L3218-L3222).
 ///
@@ -1122,6 +1437,610 @@ impl DeviceAnnce {
         let ieee = self.ieee.to_le_bytes();
         out[3..11].copy_from_slice(&ieee);
         out[11] = self.capability;
+        Ok(Self::LEN)
+    }
+}
+
+/// One child record in a [`ParentAnnce`] / [`ParentAnnceRsp`]: the
+/// end device's long and network addresses (paraphrase of the
+/// ChildInfo structure named by §2.4.3.1.12 / §2.4.4.2.22; no line
+/// anchor claimed).
+///
+/// Requirement `05-3474-23-24316-02` (MINTED-pending-confirm).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ChildInfo {
+    /// Joined child's long address.
+    pub child_ieee: u64,
+    /// Joined child's network address.
+    pub child_nwk: u16,
+}
+
+impl ChildInfo {
+    /// Wire length of one record.
+    pub const LEN: usize = 10;
+
+    /// Decode one record from the head of `buf`.
+    pub fn decode(buf: &[u8]) -> Result<Self, Error> {
+        if buf.len() < Self::LEN {
+            return Err(Error::Truncated);
+        }
+        Ok(Self {
+            child_ieee: u64::from_le_bytes([
+                buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
+            ]),
+            child_nwk: u16::from_le_bytes([buf[8], buf[9]]),
+        })
+    }
+
+    /// Encode one record into `out`.
+    pub fn encode_into(&self, out: &mut [u8]) -> Result<usize, Error> {
+        if out.len() < Self::LEN {
+            return Err(Error::BufferTooSmall);
+        }
+        out[0..8].copy_from_slice(&self.child_ieee.to_le_bytes());
+        out[8..10].copy_from_slice(&self.child_nwk.to_le_bytes());
+        Ok(Self::LEN)
+    }
+}
+
+/// Bound on child records in one [`ParentAnnce`] /
+/// [`ParentAnnceRsp`] (declared budget; longer over-air lists are
+/// rejected with [`Error::TooManyEntries`]).
+///
+/// Requirement `05-3474-23-24316-02` (MINTED-pending-confirm).
+pub const MAX_CHILD_INFO: usize = 4;
+
+/// `Parent_annce`: a parent names the children that joined under it
+/// so the network can spot address conflicts (§2.4.3.1.12; answered
+/// by [`ParentAnnceRsp`] on cluster `0x801F`, §2.4.4.2.22; no line
+/// anchor claimed).
+///
+/// Requirement `05-3474-23-24316-01` (MINTED-pending-confirm).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ParentAnnce {
+    /// Transaction sequence, echoed in the response.
+    pub tsn: u8,
+    /// Child records, first `child_len` entries valid.
+    pub children: [ChildInfo; MAX_CHILD_INFO],
+    /// How many child records are present.
+    pub child_len: u8,
+}
+
+/// Empty child record for array initialization.
+const EMPTY_CHILD_INFO: ChildInfo = ChildInfo {
+    child_ieee: 0,
+    child_nwk: 0,
+};
+
+impl ParentAnnce {
+    /// Wire length without child records.
+    pub const MIN_LEN: usize = 2;
+
+    /// Decode a parent announcement frame.
+    pub fn decode(buf: &[u8]) -> Result<Self, Error> {
+        if buf.len() < Self::MIN_LEN {
+            return Err(Error::Truncated);
+        }
+        let count = buf[1] as usize;
+        if count > MAX_CHILD_INFO {
+            return Err(Error::TooManyEntries);
+        }
+        if buf.len() < Self::MIN_LEN + ChildInfo::LEN * count {
+            return Err(Error::Truncated);
+        }
+        let mut ann = Self {
+            tsn: buf[0],
+            children: [EMPTY_CHILD_INFO; MAX_CHILD_INFO],
+            child_len: count as u8,
+        };
+        let mut i = 0;
+        while i < count {
+            let base = Self::MIN_LEN + ChildInfo::LEN * i;
+            ann.children[i] = ChildInfo::decode(&buf[base..base + ChildInfo::LEN])?;
+            i += 1;
+        }
+        Ok(ann)
+    }
+
+    /// Encode into `out`.
+    pub fn encode_into(&self, out: &mut [u8]) -> Result<usize, Error> {
+        let count = self.child_len as usize;
+        if count > MAX_CHILD_INFO {
+            return Err(Error::TooManyEntries);
+        }
+        let n = Self::MIN_LEN + ChildInfo::LEN * count;
+        if out.len() < n {
+            return Err(Error::BufferTooSmall);
+        }
+        out[0] = self.tsn;
+        out[1] = self.child_len;
+        let mut i = 0;
+        while i < count {
+            let base = Self::MIN_LEN + ChildInfo::LEN * i;
+            self.children[i].encode_into(&mut out[base..base + ChildInfo::LEN])?;
+            i += 1;
+        }
+        Ok(n)
+    }
+
+    /// Child records as a slice.
+    #[must_use]
+    pub fn child_list(&self) -> &[ChildInfo] {
+        &self.children[..self.child_len as usize]
+    }
+}
+
+/// `Parent_annce_rsp`: unicast answer to [`ParentAnnce`] carrying the
+/// same child records back (§2.4.4.2.22; no line anchor claimed).
+///
+/// Requirement `05-3474-23-24316-03` (MINTED-pending-confirm).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ParentAnnceRsp {
+    /// Echoed transaction sequence.
+    pub tsn: u8,
+    /// Outcome of the announcement.
+    pub status: ZdpStatus,
+    /// Child records, first `child_len` entries valid (present only
+    /// on success).
+    pub children: [ChildInfo; MAX_CHILD_INFO],
+    /// How many child records are present.
+    pub child_len: u8,
+}
+
+impl ParentAnnceRsp {
+    /// Wire length without child records.
+    pub const MIN_LEN: usize = 3;
+
+    /// Decode a parent-announcement response frame.
+    pub fn decode(buf: &[u8]) -> Result<Self, Error> {
+        if buf.len() < Self::MIN_LEN {
+            return Err(Error::Truncated);
+        }
+        let status = ZdpStatus::from_code(buf[1]);
+        let mut rsp = Self {
+            tsn: buf[0],
+            status,
+            children: [EMPTY_CHILD_INFO; MAX_CHILD_INFO],
+            child_len: 0,
+        };
+        if !status.is_success() {
+            return Ok(rsp);
+        }
+        let count = buf[2] as usize;
+        if count > MAX_CHILD_INFO {
+            return Err(Error::TooManyEntries);
+        }
+        if buf.len() < Self::MIN_LEN + ChildInfo::LEN * count {
+            return Err(Error::Truncated);
+        }
+        rsp.child_len = count as u8;
+        let mut i = 0;
+        while i < count {
+            let base = Self::MIN_LEN + ChildInfo::LEN * i;
+            rsp.children[i] = ChildInfo::decode(&buf[base..base + ChildInfo::LEN])?;
+            i += 1;
+        }
+        Ok(rsp)
+    }
+
+    /// Encode into `out`.
+    pub fn encode_into(&self, out: &mut [u8]) -> Result<usize, Error> {
+        let count = self.child_len as usize;
+        if count > MAX_CHILD_INFO {
+            return Err(Error::TooManyEntries);
+        }
+        let success = self.status.is_success();
+        let n = Self::MIN_LEN + if success { ChildInfo::LEN * count } else { 0 };
+        if out.len() < n {
+            return Err(Error::BufferTooSmall);
+        }
+        out[0] = self.tsn;
+        out[1] = self.status.code();
+        out[2] = self.child_len;
+        if success {
+            let mut i = 0;
+            while i < count {
+                let base = Self::MIN_LEN + ChildInfo::LEN * i;
+                self.children[i].encode_into(&mut out[base..base + ChildInfo::LEN])?;
+                i += 1;
+            }
+        }
+        Ok(n)
+    }
+
+    /// Child records as a slice.
+    #[must_use]
+    pub fn child_list(&self) -> &[ChildInfo] {
+        &self.children[..self.child_len as usize]
+    }
+}
+
+/// Bound on cluster identifiers per direction in an
+/// [`EndDeviceBindReq`] (declared budget; longer over-air lists are
+/// rejected with [`Error::TooManyEntries`]).
+///
+/// Requirement `05-3474-23-24320-01` (MINTED-pending-confirm).
+pub const MAX_EZB_CLUSTERS: usize = 8;
+
+/// `End_Device_Bind_req`: pair two devices' endpoints by profile and
+/// cluster lists (§2.4.3.2.1, by the cluster-numbering pattern of the
+/// sibling binding commands; no line anchor claimed).
+///
+/// Requirement `05-3474-23-24320-01` (MINTED-pending-confirm).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EndDeviceBindReq {
+    /// Transaction sequence, echoed in the response.
+    pub tsn: u8,
+    /// Short address of the binding target.
+    pub binding_target: u16,
+    /// Requesting device's long address.
+    pub src_ieee: u64,
+    /// Requesting endpoint.
+    pub src_endpoint: u8,
+    /// Application profile both lists belong to.
+    pub profile_id: u16,
+    /// Input clusters, first `in_len` entries valid.
+    pub in_clusters: [u16; MAX_EZB_CLUSTERS],
+    /// How many input clusters are present.
+    pub in_len: u8,
+    /// Output clusters, first `out_len` entries valid.
+    pub out_clusters: [u16; MAX_EZB_CLUSTERS],
+    /// How many output clusters are present.
+    pub out_len: u8,
+}
+
+impl EndDeviceBindReq {
+    /// Shortest wire length (empty cluster lists).
+    pub const MIN_LEN: usize = 16;
+
+    /// Decode a bind-pairing request frame.
+    pub fn decode(buf: &[u8]) -> Result<Self, Error> {
+        if buf.len() < Self::MIN_LEN {
+            return Err(Error::Truncated);
+        }
+        let in_count = buf[14] as usize;
+        let out_at = 15 + 2 * in_count;
+        if in_count > MAX_EZB_CLUSTERS {
+            return Err(Error::TooManyEntries);
+        }
+        if buf.len() < out_at + 1 {
+            return Err(Error::Truncated);
+        }
+        let out_count = buf[out_at] as usize;
+        if out_count > MAX_EZB_CLUSTERS {
+            return Err(Error::TooManyEntries);
+        }
+        if buf.len() < out_at + 1 + 2 * out_count {
+            return Err(Error::Truncated);
+        }
+        let mut req = Self {
+            tsn: buf[0],
+            binding_target: u16::from_le_bytes([buf[1], buf[2]]),
+            src_ieee: u64::from_le_bytes([
+                buf[3], buf[4], buf[5], buf[6], buf[7], buf[8], buf[9], buf[10],
+            ]),
+            src_endpoint: buf[11],
+            profile_id: u16::from_le_bytes([buf[12], buf[13]]),
+            in_clusters: [0; MAX_EZB_CLUSTERS],
+            in_len: in_count as u8,
+            out_clusters: [0; MAX_EZB_CLUSTERS],
+            out_len: out_count as u8,
+        };
+        let mut i = 0;
+        while i < in_count {
+            req.in_clusters[i] = u16::from_le_bytes([buf[15 + 2 * i], buf[16 + 2 * i]]);
+            i += 1;
+        }
+        let mut j = 0;
+        while j < out_count {
+            req.out_clusters[j] =
+                u16::from_le_bytes([buf[out_at + 1 + 2 * j], buf[out_at + 2 + 2 * j]]);
+            j += 1;
+        }
+        Ok(req)
+    }
+
+    /// Encode into `out`.
+    pub fn encode_into(&self, out: &mut [u8]) -> Result<usize, Error> {
+        let in_count = self.in_len as usize;
+        let out_count = self.out_len as usize;
+        if in_count > MAX_EZB_CLUSTERS || out_count > MAX_EZB_CLUSTERS {
+            return Err(Error::TooManyEntries);
+        }
+        let n = Self::MIN_LEN + 2 * in_count + 2 * out_count;
+        if out.len() < n {
+            return Err(Error::BufferTooSmall);
+        }
+        out[0] = self.tsn;
+        out[1..3].copy_from_slice(&self.binding_target.to_le_bytes());
+        out[3..11].copy_from_slice(&self.src_ieee.to_le_bytes());
+        out[11] = self.src_endpoint;
+        out[12..14].copy_from_slice(&self.profile_id.to_le_bytes());
+        out[14] = self.in_len;
+        let mut i = 0;
+        while i < in_count {
+            out[15 + 2 * i..17 + 2 * i].copy_from_slice(&self.in_clusters[i].to_le_bytes());
+            i += 1;
+        }
+        let out_at = 15 + 2 * in_count;
+        out[out_at] = self.out_len;
+        let mut j = 0;
+        while j < out_count {
+            out[out_at + 1 + 2 * j..out_at + 3 + 2 * j]
+                .copy_from_slice(&self.out_clusters[j].to_le_bytes());
+            j += 1;
+        }
+        Ok(n)
+    }
+
+    /// Input clusters as a slice.
+    #[must_use]
+    pub fn in_list(&self) -> &[u16] {
+        &self.in_clusters[..self.in_len as usize]
+    }
+
+    /// Output clusters as a slice.
+    #[must_use]
+    pub fn out_list(&self) -> &[u16] {
+        &self.out_clusters[..self.out_len as usize]
+    }
+}
+
+/// `End_Device_Bind_rsp`: sequence echo plus outcome only.
+///
+/// Requirement `05-3474-23-24320-02` (MINTED-pending-confirm).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EndDeviceBindRsp {
+    /// Echoed transaction sequence.
+    pub tsn: u8,
+    /// Outcome of the pairing.
+    pub status: ZdpStatus,
+}
+
+impl EndDeviceBindRsp {
+    /// Wire length.
+    pub const LEN: usize = 2;
+
+    /// Decode a bind-pairing response frame.
+    pub fn decode(buf: &[u8]) -> Result<Self, Error> {
+        if buf.len() < Self::LEN {
+            return Err(Error::Truncated);
+        }
+        Ok(Self {
+            tsn: buf[0],
+            status: ZdpStatus::from_code(buf[1]),
+        })
+    }
+
+    /// Encode into `out`.
+    pub fn encode_into(&self, out: &mut [u8]) -> Result<usize, Error> {
+        if out.len() < Self::LEN {
+            return Err(Error::BufferTooSmall);
+        }
+        out[0] = self.tsn;
+        out[1] = self.status.code();
+        Ok(Self::LEN)
+    }
+}
+
+/// `System_Server_Discovery_req`: ask where a particular server
+/// lives, naming the wanted server bits (§2.4.3.1.14, Table 2-53;
+/// no line anchor claimed).
+///
+/// Requirement `05-3474-23-24315-01` (MINTED-pending-confirm).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SystemServerDiscoveryReq {
+    /// Transaction sequence, echoed in the response.
+    pub tsn: u8,
+    /// Wanted server flags (Table 2-34 bit assignments).
+    pub server_mask: u16,
+}
+
+impl SystemServerDiscoveryReq {
+    /// Wire length.
+    pub const LEN: usize = 3;
+
+    /// Decode a server-discovery request frame.
+    pub fn decode(buf: &[u8]) -> Result<Self, Error> {
+        if buf.len() < Self::LEN {
+            return Err(Error::Truncated);
+        }
+        Ok(Self {
+            tsn: buf[0],
+            server_mask: u16::from_le_bytes([buf[1], buf[2]]),
+        })
+    }
+
+    /// Encode into `out`.
+    pub fn encode_into(&self, out: &mut [u8]) -> Result<usize, Error> {
+        if out.len() < Self::LEN {
+            return Err(Error::BufferTooSmall);
+        }
+        out[0] = self.tsn;
+        out[1..3].copy_from_slice(&self.server_mask.to_le_bytes());
+        Ok(Self::LEN)
+    }
+}
+
+/// `System_Server_Discovery_rsp`: answer to
+/// [`SystemServerDiscoveryReq`] carrying the responder's server bits
+/// (§2.4.4.2.10, Figure 2-63: `Status` + `ServerMask` after the
+/// sequence octet; no line anchor claimed).
+///
+/// Requirement `05-3474-23-24315-02` (MINTED-pending-confirm).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SystemServerDiscoveryRsp {
+    /// Echoed transaction sequence.
+    pub tsn: u8,
+    /// Outcome of the inquiry.
+    pub status: ZdpStatus,
+    /// Responder's server flags.
+    pub server_mask: u16,
+}
+
+impl SystemServerDiscoveryRsp {
+    /// Wire length.
+    pub const LEN: usize = 4;
+
+    /// Decode a server-discovery response frame.
+    pub fn decode(buf: &[u8]) -> Result<Self, Error> {
+        if buf.len() < Self::LEN {
+            return Err(Error::Truncated);
+        }
+        Ok(Self {
+            tsn: buf[0],
+            status: ZdpStatus::from_code(buf[1]),
+            server_mask: u16::from_le_bytes([buf[2], buf[3]]),
+        })
+    }
+
+    /// Encode into `out`.
+    pub fn encode_into(&self, out: &mut [u8]) -> Result<usize, Error> {
+        if out.len() < Self::LEN {
+            return Err(Error::BufferTooSmall);
+        }
+        out[0] = self.tsn;
+        out[1] = self.status.code();
+        out[2..4].copy_from_slice(&self.server_mask.to_le_bytes());
+        Ok(Self::LEN)
+    }
+}
+
+/// Bound on long addresses in one [`ClearAllBindingsReq`] EUI64
+/// list (declared budget; longer over-air lists are rejected with
+/// [`Error::TooManyEntries`]).
+///
+/// Requirement `05-3474-23-2432C-02` (MINTED-pending-confirm).
+pub const MAX_CLEAR_EUI64S: usize = 8;
+
+/// EUI64-list TLV identifier for [`ClearAllBindingsReq`]
+/// (§2.4.3.2.12.2, TLV ID 0; carried as the fixed-position value, see
+/// below).
+///
+/// Requirement `05-3474-23-2432C-01` (MINTED-pending-confirm).
+pub const CLEAR_BINDINGS_EUI64_TAG: u8 = 0;
+
+/// `Clear_All_Bindings_req`: ask a device to drop the listed
+/// bindings, naming long addresses via the EUI64-list TLV (§2.4.3.2.12,
+/// Figures 2-30/2-31 + Table 2-57: TSN plus the TLV value — a count
+/// octet and one long address each. The TLV rides bare in fixed
+/// position: the "4 bytes" and count+entries geometry given for the
+/// sibling TLV legs leaves no room for extra tag/length octets; no
+/// line anchor claimed).
+///
+/// Requirement `05-3474-23-2432C-01` (MINTED-pending-confirm).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClearAllBindingsReq {
+    /// Transaction sequence, echoed in the response.
+    pub tsn: u8,
+    /// Allow-list long addresses, first `ieee_len` entries valid.
+    pub ieee: [u64; MAX_CLEAR_EUI64S],
+    /// How many allow-list entries are present.
+    pub ieee_len: u8,
+}
+
+impl ClearAllBindingsReq {
+    /// Shortest wire length (empty allow-list).
+    pub const MIN_LEN: usize = 2;
+
+    /// Decode a clear-bindings request frame.
+    pub fn decode(buf: &[u8]) -> Result<Self, Error> {
+        if buf.len() < Self::MIN_LEN {
+            return Err(Error::Truncated);
+        }
+        let count = buf[1] as usize;
+        if count > MAX_CLEAR_EUI64S {
+            return Err(Error::TooManyEntries);
+        }
+        if buf.len() < Self::MIN_LEN + 8 * count {
+            return Err(Error::Truncated);
+        }
+        let mut req = Self {
+            tsn: buf[0],
+            ieee: [0; MAX_CLEAR_EUI64S],
+            ieee_len: count as u8,
+        };
+        let mut i = 0;
+        while i < count {
+            let base = 2 + 8 * i;
+            req.ieee[i] = u64::from_le_bytes([
+                buf[base],
+                buf[base + 1],
+                buf[base + 2],
+                buf[base + 3],
+                buf[base + 4],
+                buf[base + 5],
+                buf[base + 6],
+                buf[base + 7],
+            ]);
+            i += 1;
+        }
+        Ok(req)
+    }
+
+    /// Encode into `out`.
+    pub fn encode_into(&self, out: &mut [u8]) -> Result<usize, Error> {
+        let count = self.ieee_len as usize;
+        if count > MAX_CLEAR_EUI64S {
+            return Err(Error::TooManyEntries);
+        }
+        let n = Self::MIN_LEN + 8 * count;
+        if out.len() < n {
+            return Err(Error::BufferTooSmall);
+        }
+        out[0] = self.tsn;
+        out[1] = self.ieee_len;
+        let mut i = 0;
+        while i < count {
+            let base = 2 + 8 * i;
+            out[base..base + 8].copy_from_slice(&self.ieee[i].to_le_bytes());
+            i += 1;
+        }
+        Ok(n)
+    }
+
+    /// Allow-list as a slice.
+    #[must_use]
+    pub fn ieee_list(&self) -> &[u64] {
+        &self.ieee[..self.ieee_len as usize]
+    }
+}
+
+/// `Clear_All_Bindings_rsp`: sequence echo plus outcome (Table 2-99:
+/// SUCCESS, NOT_SUPPORTED, NOT_AUTHORIZED, INV_REQUESTTYPE, or
+/// NO_MATCH; unlisted codes are preserved as unknown).
+///
+/// Requirement `05-3474-23-2432C-02` (MINTED-pending-confirm).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClearAllBindingsRsp {
+    /// Echoed transaction sequence.
+    pub tsn: u8,
+    /// Outcome of the clear.
+    pub status: ZdpStatus,
+}
+
+impl ClearAllBindingsRsp {
+    /// Wire length.
+    pub const LEN: usize = 2;
+
+    /// Decode a clear-bindings response frame.
+    pub fn decode(buf: &[u8]) -> Result<Self, Error> {
+        if buf.len() < Self::LEN {
+            return Err(Error::Truncated);
+        }
+        Ok(Self {
+            tsn: buf[0],
+            status: ZdpStatus::from_code(buf[1]),
+        })
+    }
+
+    /// Encode into `out`.
+    pub fn encode_into(&self, out: &mut [u8]) -> Result<usize, Error> {
+        if out.len() < Self::LEN {
+            return Err(Error::BufferTooSmall);
+        }
+        out[0] = self.tsn;
+        out[1] = self.status.code();
         Ok(Self::LEN)
     }
 }

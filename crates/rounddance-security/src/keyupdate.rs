@@ -17,7 +17,7 @@
 //! # Design notes (mirror `classical` / `mmo`)
 //!
 //! * `no_std` + `#![forbid(unsafe_code)]`, bounded + fallible.
-//! * One-shot [`mmo_hash_128`](crate::mmo::mmo_hash_128) only: the
+//! * One-shot [`crate::mmo::mmo_hash_128`] only: the
 //!   14-octet mask preimage fits the short-padding cap, so no
 //!   streaming hash state is needed.
 

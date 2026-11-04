@@ -4,8 +4,8 @@
 //! `NrfListener` (`rounddance-inspect/src/bin/inspect-live.rs`): the
 //! lab nRF sniffer firmware speaks a line protocol over 115200 8N1
 //! serial, and this module frames that byte stream with the streaming
-//! [`Framer`](rounddance_inspect::stream::Framer) pipe and decodes
-//! lines with [`parse_line`](rounddance_inspect::stream::parse_line) —
+//! [`rounddance_inspect::stream::Framer`] pipe and decodes
+//! lines with [`rounddance_inspect::stream::parse_line`] —
 //! the exact field semantics of the replay path's shared
 //! [`parse_received`](rounddance_inspect::sniffer::parse_received)
 //! parser (FCS stripped, missing radio fields defaulting to zero).
@@ -33,7 +33,7 @@
 //!
 //! Portability: this module is `std`-gated (host side) and
 //! `#![forbid(unsafe_code)]`-clean — it is generic over any
-//! [`Read`](std::io::Read) + [`Write`](std::io::Write) port. The raw
+//! [`std::io::Read`] + [`std::io::Write`] port. The raw
 //! termios serial driver (which needs `unsafe`) lives in the
 //! `rd-sniff` binary, mirroring the `inspect-live` split; unit tests
 //! drive the listener over an in-memory fake port.

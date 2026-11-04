@@ -1,0 +1,24 @@
+[package]
+name = "rounddance-hal-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "WASM guest HAL: the 15.4 Driver seam over host-call imports, so the stack runs inside a WASM runner on ESP32 targets the Rust IDF shim does not cover"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+
+[dependencies]
+rounddance-hal-esp = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-hal-esp" }
+rounddance-mac-sap = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-mac-sap" }
+
+[dev-dependencies]
+rounddance-commission = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-commission" }
+rounddance-mac-sap = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-mac-sap" }
+rounddance-security = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-security" }
+rounddance-zcl = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-zcl" }
+rounddance-zdo = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-zdo" }

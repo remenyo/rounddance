@@ -4,12 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Zigbee Direct commissioning core, session and advert (no_std)"
 
 [dependencies]
-rounddance-commission = { path = "../rounddance-commission" }
-rounddance-security = { path = "../rounddance-security" }
+rounddance-commission = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-commission" }
+rounddance-security = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-security" }
 
 [dev-dependencies]
-rounddance-commission = { path = "../rounddance-commission" }
-rounddance-security = { path = "../rounddance-security" }
-rounddance-sim = { path = "../rounddance-sim" }
+rounddance-commission = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-commission" }
+rounddance-security = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-security" }

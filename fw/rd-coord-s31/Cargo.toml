@@ -1,0 +1,43 @@
+[package]
+name = "rd-coord-s31"
+version = "0.1.0"
+edition = "2021"
+resolver = "2"
+
+[[bin]]
+name = "rd-coord-s31"
+harness = false # do not use the built-in cargo test harness
+
+[dependencies]
+esp-idf-sys = { version = "0.38", features = ["native"] }
+# NOTE: no esp-idf-hal / esp-idf-svc here on purpose. This firmware uses
+# only our own HAL (rounddance-hal-esp over esp-idf-sys FFI + NVS) plus
+# std threads/time, so the HAL crates — whose 0.47 sources carry a
+# per-chip port surface the S31 preview lacks — are not compiled at
+# all. If future S31 firmware needs HAL drivers (GPIO/ADC/I2S/...),
+# that is a separate esp-idf-hal port task, not this shim.
+rounddance-hal-esp = { path = "../../crates/rounddance-hal-esp", features = ["esp"] }
+rounddance-commission = { path = "../../crates/rounddance-commission" }
+rounddance-mac-sap = { path = "../../crates/rounddance-mac-sap" }
+rounddance-security = { path = "../../crates/rounddance-security" }
+
+[build-dependencies]
+embuild = "0.33.5"
+
+# Local S31 shim (see B-011): esp-idf-sys 0.38.1 / embuild 0.33.7 do not
+# name the esp32s31 MCU, so this workspace vendors both crates with the
+# S31 chip added (Chip::ESP32S31 + triple/toolchain table entries).
+# Scoped to THIS workspace only — C6 images use separate workspaces and
+# are untouched by this patch.
+[patch.crates-io]
+esp-idf-sys = { path = "../vendor/esp-idf-sys" }
+embuild = { path = "../vendor/embuild" }
+
+[profile.release]
+opt-level = "s"
+
+[profile.dev]
+debug = true
+opt-level = "z"
+
+[workspace]

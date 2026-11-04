@@ -1,7 +1,7 @@
 # rounddance
 
 An open-source Zigbee-compatible stack in Rust, with a `no_std` core,
-targeting Linux, ESP32 (C6), and browsers.
+targeting Linux, ESP32 (C6, S31), WASM guests, and browsers.
 
 ## What it is
 
@@ -13,17 +13,20 @@ Depend on it as a single library via `crates/rounddance`
 
 ## What is proven
 
-Air-proven on real C6 radios: coordinator↔joiner join handshake plus
+Air-proven on real silicon: C6 coordinator↔joiner join handshake plus
 a secured ZCL toggle with verified Default Response, NVM-backed frame
 counters, confirm-driven retries, join-rate policy, three-pairing
-interop breadth. Parked with cause: joiner vs foreign trust center,
-spare-radio legs, peer key-update. Details: PROGRESS.md, BLOCKERS.md,
-`~/hwscratch/w115/`.
+interop breadth; S31 native coordinator (isolated air-proof: join →
+Device_annce → NodeDesc → secured toggle → verified Default Response,
+sniffer-corroborated) and C6 router uplink (`state Active`, endpoint
+hosted, hold/poll-service live). Parked with cause: joiner vs foreign
+trust center, forwarded-traffic + sleepy-child E2E (needs third node),
+spare-radio legs, peer key-update. Details: PROGRESS.md, BLOCKERS.md.
 
 ## Quickstart
 
 ```sh
-cargo test --workspace          # 1140 suites
+cargo test --workspace          # 151 suites / 1151 passed, 0 failed
 cargo run -p rounddance --example first_transaction   # form→join→toggle sim
 cargo run -p rounddance --example sealed_frame        # seal/open + wrong-key refusal
 cargo doc -p rounddance --no-deps                    # API docs
@@ -38,8 +41,9 @@ paths only.
 
 - `crates/rounddance` — library facade (depend on this)
 - `crates/rounddance-{nwk,aps,zdo,security,zcl,gp,commission,compat,direct,roles,mac-sap,ifc}` — protocol core
-- `crates/rounddance-{sim,hal-host,hal-esp,browser,rcp,inspect,sniffer}` — execution environments and tools
+- `crates/rounddance-{sim,hal-host,hal-esp,hal-wasm,browser,rcp,inspect,sniffer}` — execution environments and tools
 - `crates/rounddance-ffi` — C-ABI staticlib (separate artifact)
+- `crates/rounddance/examples/` — 16 runnable domain tours (MAC → inspector + 2 end-to-end), indexed in its README
 - `fw/` — ESP-IDF firmware binaries; `harness/` — sim harness; `tools/` — lab arbitrator
 - `docs/` — gate audit, interface specs; `REQUIREMENTS.md` — corpus traceability
 

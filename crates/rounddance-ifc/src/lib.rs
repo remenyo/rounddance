@@ -2,7 +2,7 @@
 //!
 //! Telco-style versioned function boundary shared by every split in the
 //! stack: MAC driver vs core, core vs core over USB/UART or IP loopback,
-//! sim media, and the management agent. One [`Envelope`] (CBOR-encoded,
+//! sim media, and the management agent. One [`envelope::Envelope`] (CBOR-encoded,
 //! framed by [`frame`]) crosses all bindings; [`handshake`] negotiates the
 //! version once per link; [`credit`] carries backpressure the same way
 //! [`MacDataSap`](https://github.com/remenyo/rounddance) queue-free

@@ -4,10 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Green Power proxy/sink frame codecs and commissioning (no_std)"
 
 [dependencies]
-rounddance-security = { path = "../rounddance-security" }
+rounddance-security = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-security" }
 
 [dev-dependencies]
-rounddance-mac-sap = { path = "../rounddance-mac-sap" }
-rounddance-sim = { path = "../rounddance-sim" }
+rounddance-mac-sap = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-mac-sap" }

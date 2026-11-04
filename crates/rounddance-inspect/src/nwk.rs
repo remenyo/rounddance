@@ -1,4 +1,4 @@
-//! NWK dissector: reused `rounddance-nwk` codec → [`NwkNode`](crate::tree::NwkNode).
+//! NWK dissector: reused `rounddance-nwk` codec → [`crate::tree::NwkNode`].
 //!
 //! Only the stack protocol version decodes: any other version
 //! nibble refuses before a single header field is trusted, so

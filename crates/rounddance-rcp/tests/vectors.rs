@@ -238,6 +238,88 @@ fn golden_set_promiscuous_and_version() {
 }
 
 #[test]
+fn golden_mac_frame_channel_tag_and_data_header() {
+    use rounddance_rcp::cmd::K_MAC_FRAME;
+    use rounddance_rcp::mac::{FC0_DATA, FC1_SHORT_SHORT, MHR_DATA};
+    // MacFrame event: [flags, rssi, lqi, channel, psdu…] pins the
+    // proto-2 arrival-channel tag against an independent CRC.
+    let mut psdu = [0u8; MAX_PSDU];
+    psdu[..2].copy_from_slice(&[0xDE, 0xAD]);
+    let mut wire = [0u8; 160];
+    let n = Event::MacFrame {
+        inter_pan: false,
+        rssi: -50,
+        lqi: 200,
+        channel: 15,
+        len: 2,
+        psdu,
+    }
+    .encode(0x0D, &mut wire)
+    .unwrap();
+    let body = [K_MAC_FRAME, 0x0D, 0x00, 0xCE, 200, 15, 0xDE, 0xAD];
+    let crc = reference_crc16(&body);
+    // LEN = KIND + SEQ + 6 payload + CRC.
+    assert_eq!(n, 2 + body.len() + 2);
+    assert_eq!(
+        &wire[..n],
+        &[
+            SYNC,
+            (body.len() + 2) as u8,
+            K_MAC_FRAME,
+            0x0D,
+            0x00,
+            0xCE,
+            200,
+            15,
+            0xDE,
+            0xAD,
+            (crc & 0xFF) as u8,
+            (crc >> 8) as u8
+        ]
+    );
+    let f = decode_one(&wire[..n]);
+    assert!(matches!(
+        Event::decode(&f).unwrap(),
+        Event::MacFrame {
+            channel: 15,
+            len: 2,
+            ..
+        }
+    ));
+    // Data header shape the driver builds: FC0/FC1/seq/pan/dst/src
+    // + MSDU, 9 + len, ACK bit exactly when requested.
+    let mut out = [0u8; 127];
+    for (ack, fc0) in [(false, FC0_DATA), (true, FC0_DATA | 0x20)] {
+        let m = rounddance_rcp::mac::build_data_psdu(
+            0x42,
+            0x1a2b,
+            0x0002,
+            0x0000,
+            &[0xCA],
+            ack,
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(m, MHR_DATA + 1);
+        assert_eq!(
+            &out[..m],
+            &[
+                fc0,
+                FC1_SHORT_SHORT,
+                0x42,
+                0x2B,
+                0x1A,
+                0x02,
+                0x00,
+                0x00,
+                0x00,
+                0xCA
+            ]
+        );
+    }
+}
+
+#[test]
 fn golden_garbage_prefix_drops_exactly_once() {
     // The peer's scripted desync prefix: noise, then a SYNC-led run
     // with an illegal LEN — exactly one BadLen drop, parser re-armed.

@@ -27,6 +27,7 @@
 //! | [`host`] | `rounddance-hal-host` | Host HAL: clock, timer, entropy, store, loopback radio, scenarios |
 //! | [`ifc`] | `rounddance-ifc` | Inter-module interface spec (CBOR envelope, HDLC-lite framing) |
 //! | [`hal_esp`] | `rounddance-hal-esp` | ESP HAL: `EspAdapter` + apps over a `Driver` seam (`MockDriver` on host) |
+//! | [`hal_wasm`] | `rounddance-hal-wasm` | WASM guest HAL: `EspAdapter` + apps over host-call imports (native runner owns the radio; S31 path) |
 //! | [`browser`] | `rounddance-browser` | Browser/WASM bindings over the host HAL |
 //! | [`rcp`] | `rounddance-rcp` | RCP frame codec (SYNC/LEN/KIND/SEQ/CRC16) for S3+H2 OTBR path |
 //! | [`inspect`] | `rounddance-inspect` | Packet inspector over live or captured frames |
@@ -52,6 +53,18 @@
 //! cargo run -p rounddance --example sealed_frame
 //! ```
 //!
+//! Benchmark every layer with the host clock only (no engine):
+//!
+//! ```sh
+//! cargo run --release -p rounddance --example bench_stack
+//! ```
+//!
+//! Every stack domain has a runnable tour under
+//! `crates/rounddance/examples/` (see `README.md` there): MAC, NWK,
+//! APS, ZDO, security, ZCL, Green Power, commissioning, Touchlink,
+//! 3.0-compat, routing, RCP, IFC, the inspector, plus the two
+//! end-to-end scenarios above.
+//!
 //! # Status (honest)
 //!
 //! Air-proven on real C6 radios: coordinator↔joiner join handshake plus
@@ -68,6 +81,7 @@ pub use rounddance_direct as direct;
 pub use rounddance_gp as gp;
 pub use rounddance_hal_esp as hal_esp;
 pub use rounddance_hal_host as host;
+pub use rounddance_hal_wasm as hal_wasm;
 pub use rounddance_ifc as ifc;
 pub use rounddance_inspect as inspect;
 pub use rounddance_mac_sap as mac_sap;

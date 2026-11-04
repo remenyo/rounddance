@@ -42,6 +42,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --workspace
 
+  # Spec-annotation tags live in source comments (tools/coverage/README.md);
+  # CI has no private-corpus access, so it validates tag shape + @verifies
+  # targets only. Full line-resolution runs locally via check.py --strict.
+  coverage-tags:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 tools/coverage/check.py --syntax-only
+
   no-std:
     runs-on: ubuntu-latest
     steps:
@@ -63,7 +72,9 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
       # lab-arbitrator is a host-only unix/pty tool and can never build for wasm.
-      - run: cargo check --workspace --exclude lab-arbitrator --target wasm32-unknown-unknown
+      # rounddance-pchost is a host-only serial/runner tool (std + libc termios)
+      # and can never build for wasm either.
+      - run: cargo check --workspace --exclude lab-arbitrator --exclude rounddance-pchost --target wasm32-unknown-unknown
 
   # tools/host-wasm-check.sh: native vs wasm32-wasip1 under wasmtime
   # must print IDENTICAL. wasmtime is not preinstalled on

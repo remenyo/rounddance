@@ -7,23 +7,22 @@ repository.workspace = true
 description = "Host HAL backends (Linux/Pi + WASM): clock, timer, entropy, persistent store, log, loopback radio"
 
 [dependencies]
-rounddance-mac-sap = { path = "../rounddance-mac-sap" }
-rounddance-sim = { path = "../rounddance-sim" }
-rounddance-nwk = { path = "../rounddance-nwk" }
-rounddance-aps = { path = "../rounddance-aps" }
-rounddance-zdo = { path = "../rounddance-zdo" }
-rounddance-security = { path = "../rounddance-security" }
-rounddance-zcl = { path = "../rounddance-zcl" }
-rounddance-commission = { path = "../rounddance-commission" }
-rounddance-roles = { path = "../rounddance-roles" }
+rounddance-mac-sap = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-mac-sap" }
+rounddance-sim = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-sim" }
+rounddance-nwk = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-nwk" }
+rounddance-aps = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-aps" }
+rounddance-zdo = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-zdo" }
+rounddance-security = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-security" }
+rounddance-zcl = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-zcl" }
+rounddance-commission = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-commission" }
+rounddance-roles = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-roles" }
 
 [dev-dependencies]
-rounddance-mac-sap = { path = "../rounddance-mac-sap" }
-rounddance-sim = { path = "../rounddance-sim" }
-rounddance-nwk = { path = "../rounddance-nwk" }
-rounddance-aps = { path = "../rounddance-aps" }
-rounddance-zdo = { path = "../rounddance-zdo" }
-rounddance-security = { path = "../rounddance-security" }
-rounddance-zcl = { path = "../rounddance-zcl" }
-rounddance-commission = { path = "../rounddance-commission" }
-rounddance-roles = { path = "../rounddance-roles" }
+rounddance-mac-sap = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-mac-sap" }
+rounddance-nwk = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-nwk" }
+rounddance-aps = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-aps" }
+rounddance-zdo = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-zdo" }
+rounddance-security = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-security" }
+rounddance-zcl = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-zcl" }
+rounddance-commission = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-commission" }
+rounddance-roles = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-roles" }

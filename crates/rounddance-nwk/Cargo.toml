@@ -4,3 +4,4 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Zigbee NWK layer frame codecs and routing tables (no_std)"

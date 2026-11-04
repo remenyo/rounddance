@@ -120,15 +120,22 @@ impl OtbrNode {
 }
 
 /// Move every radiated frame from `a`'s firmware to `b`'s RX queue,
-/// pumping both ends around the transfer. The peer RX queue is
-/// bounded: under retry storms it fills and sheds (counted on the
-/// driver side as overruns), so the harness never asserts room here.
+/// pumping both ends around the transfer. The sender's tuned
+/// channel at radiate time rides along as the arrival channel (the
+/// scripted medium is ideal: no loss, no capture effect). The peer
+/// RX queue is bounded: under retry storms it fills and sheds
+/// (counted on the driver side as overruns), so the harness never
+/// asserts room here.
 fn transfer(a: &mut OtbrNode, b: &mut OtbrNode) {
     a.pump();
     while let Some(tx) = a.peer.take_tx() {
-        let _ = b
-            .peer
-            .queue_rx(&tx.psdu[..tx.len as usize], -50, 200, tx.inter_pan);
+        let _ = b.peer.queue_rx_on(
+            &tx.psdu[..tx.len as usize],
+            -50,
+            200,
+            tx.inter_pan,
+            tx.channel,
+        );
     }
     b.pump();
 }
@@ -432,6 +439,78 @@ fn rcp_secured_zcl_on_over_uart() {
     // The captured over-air bytes replayed by an attacker fail the
     // replay guard instead of toggling anything twice.
     assert!(accept_frame(&keys, &mut replay, COORD_IEEE, aps.payload).is_err());
+}
+
+// RD-RCP-17/18, v1 legs: two nodes, real MAC headers on the
+// scripted air. The coordinator's NPDU arrives with its parsed
+// source + a host timestamp (not AddrMode::None + whole-PSDU);
+// a MAC-command PSDU (OTA-shaped beacon) proxies verbatim through
+// the peer medium into the far MAC queue with its meters; and a
+// per-request inter-PAN retune lands on the peer before the frame.
+#[test]
+fn rcp_v1_header_src_mac_proxy_and_retune() {
+    use rounddance_mac_sap::MacInterPanSap as _;
+    let mut coord = OtbrNode::new();
+    let mut joiner = OtbrNode::new();
+    coord.form(COORD_SHORT, COORD_IEEE);
+    joiner.form(JOINER_SHORT, JOINER_IEEE);
+
+    // Data leg: parsed source + host timestamp on the far end.
+    coord.advance(77_000);
+    let h = coord
+        .driver
+        .data_request(TxRequest {
+            dst: MacAddress::short(PAN, JOINER_SHORT),
+            msdu: FramePayload::from_slice(&[0xCA, 0xFE]).unwrap(),
+            options: TxOptions::ACK,
+        })
+        .unwrap();
+    coord.pump();
+    let c = coord.driver.poll_confirm().unwrap();
+    assert_eq!((c.handle, c.status), (h, TxStatus::Delivered));
+    assert_eq!(c.timestamp_us, Some(77_000));
+    transfer(&mut coord, &mut joiner);
+    let ind = joiner.driver.poll_indication().unwrap();
+    assert_eq!(
+        ind.src,
+        MacAddress::short(PAN, COORD_SHORT),
+        "source parses from the MHR"
+    );
+    assert_eq!(ind.msdu.as_slice(), &[0xCA, 0xFE]);
+    assert_eq!(ind.timestamp_us, Some(joiner.driver.now_us()));
+
+    // MAC-command proxy leg: OTA-shaped beacon crosses the medium
+    // verbatim into the far MAC queue (upper layer classifies).
+    let mut beacon = [0u8; 26];
+    beacon[..14].copy_from_slice(&[
+        0x00, 0x80, 0x5A, 0x01, 0xC6, 0x00, 0x00, 0xFF, 0xCF, 0x00, 0x00, 0x00, 0x22, 0x8C,
+    ]);
+    beacon[14..22].copy_from_slice(&[0x43, 0x36, 0x4A, 0x4F, 0x49, 0x4E, 0x30, 0x31]);
+    beacon[22..25].copy_from_slice(&[0xFF, 0xFF, 0xFF]);
+    let mh = coord.driver.transmit_mac(&beacon).unwrap();
+    coord.pump();
+    assert_eq!(coord.driver.poll_confirm().unwrap().handle, mh);
+    transfer(&mut coord, &mut joiner);
+    assert!(joiner.driver.poll_indication().is_none());
+    let mac = joiner.driver.poll_mac_indication().unwrap();
+    assert_eq!(mac.psdu(), &beacon);
+    assert_eq!(mac.channel_number(), 15);
+
+    // Per-request retune leg: inter-PAN on 20 re-tunes the peer.
+    let ih = joiner
+        .driver
+        .interpan_request(
+            Channel::new(20).unwrap(),
+            &FramePayload::from_slice(&[0x78, 0x56]).unwrap(),
+        )
+        .unwrap();
+    joiner.pump();
+    assert_eq!(joiner.peer.channel(), Some(20));
+    assert_eq!(joiner.driver.poll_interpan_confirm().unwrap().handle, ih);
+    transfer(&mut joiner, &mut coord);
+    let ip = coord.driver.poll_interpan_indication().unwrap();
+    assert_eq!(ip.channel, Channel::new(20).unwrap());
+    assert_eq!(ip.msdu.as_slice(), &[0x78, 0x56]);
 }
 
 // RD-RCP-06, leg 1: one lost UART confirm costs exactly one resend,

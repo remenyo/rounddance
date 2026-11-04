@@ -13,8 +13,8 @@
 use crate::children::{AgingPolicy, ChildEntry, ChildTable, ChildrenError};
 use crate::indirect::{IndirectError, IndirectQueue, PendingFrame};
 use rounddance_nwk::{
-    DiscoveryTable, LinkStatusEntry, NeighborCosts, RouteTable, RoutingError, SeenRequests,
-    ROUTE_LIFETIME_MS,
+    DiscoveryTable, LinkEstimator, LinkStatusEntry, NeighborCosts, RouteTable, RoutingError,
+    SeenRequests, ROUTE_LIFETIME_MS,
 };
 
 /// Failures from the router machine.
@@ -67,6 +67,9 @@ pub struct RouterMachine {
     discovery: DiscoveryTable,
     seen: SeenRequests,
     links: NeighborCosts,
+    /// Delivery-ratio link estimates (TX-confirm driven; feeds
+    /// adaptive route selection alongside the advertised costs).
+    estimator: LinkEstimator,
     /// Last request identifier issued by our own discoveries.
     rreq_seq: u8,
 }
@@ -84,6 +87,7 @@ impl RouterMachine {
             discovery: DiscoveryTable::new(),
             seen: SeenRequests::new(),
             links: NeighborCosts::new(),
+            estimator: LinkEstimator::new(),
             rreq_seq: 0,
         }
     }
@@ -314,6 +318,35 @@ impl RouterMachine {
         self.discovery
             .authorize_retry(dst, now_ms)
             .map_err(RouterError::Routing)
+    }
+
+    /// Fold one TX confirm for a frame sent via `next_hop`: feeds the
+    /// delivery-ratio estimator. Call on every data confirm (Delivered
+    /// or not); the estimator grades the link, not the frame.
+    pub fn note_tx_result(&mut self, next_hop: u16, delivered: bool) {
+        if self.state != RouterState::Active {
+            return;
+        }
+        self.estimator.note_result(next_hop, delivered);
+    }
+
+    /// Current estimated 1..7 cost toward `neighbor` from TX confirms,
+    /// or `None` when never measured (fall back to advertised costs).
+    #[must_use]
+    pub fn estimated_cost(&self, neighbor: u16) -> Option<u8> {
+        self.estimator.cost(neighbor)
+    }
+
+    /// Drop the route covering `dst`, if any. The failure-driven half
+    /// of adaptive routing: after enough confirm-lost frames the
+    /// caller evicts the dead route so re-discovery can install a
+    /// better one instead of waiting out the full lifetime. Returns
+    /// `true` when an entry was dropped.
+    pub fn invalidate_route(&mut self, dst: u16) -> bool {
+        if self.state != RouterState::Active {
+            return false;
+        }
+        self.routes.remove(dst)
     }
 
     /// Age routing state: expires installed routes, retires dead

@@ -54,8 +54,8 @@ pub use formation::{
 };
 pub use keyprov::{netkey_from_hex, parse_hex_netkey, NetkeyHexError};
 pub use secured::{
-    build_secured_nwk_frame, SecuredError, SecuredNwkParams, SECURED_FRAME_MAX, SECURED_LEVEL,
-    SECURED_PT_MAX, SECURED_SEQ_NO,
+    build_secured_nwk_frame, build_secured_nwk_frame_via, SecuredError, SecuredNwkParams,
+    SECURED_FRAME_MAX, SECURED_LEVEL, SECURED_PT_MAX, SECURED_SEQ_NO,
 };
 pub use steering::{
     BaselineSteeringPolicy, BeaconSurveyEntry, DiscoveryScan, LinkEvidencePolicy, SteeringMachine,
@@ -82,8 +82,8 @@ pub use touchlink::{
     TOUCHLINK_PROFILE, TOUCHLINK_UTILITY_PROFILE, TRANSACTION_LIFETIME_MS,
 };
 pub use transport::{
-    build_transport_key_frame, ha_transport_key, TransportError, TransportKeyParams, HA_LINK_KEY,
-    TRANSPORT_AUX_BASE, TRANSPORT_FRAME_LEN, TRANSPORT_TAIL_LEN,
+    build_transport_key_frame, build_transport_key_frame_via, ha_transport_key, TransportError,
+    TransportKeyParams, HA_LINK_KEY, TRANSPORT_AUX_BASE, TRANSPORT_FRAME_LEN, TRANSPORT_TAIL_LEN,
 };
 
 /// Crate identifier.

@@ -23,7 +23,7 @@
 //! payload).
 //!
 //! Secured NWK frames open through
-//! [`decrypt`](crate::decrypt) when the caller supplies loaded lab
+//! [`crate::decrypt`] when the caller supplies loaded lab
 //! keys ([`dissect_with_keys`]); without a matching slotted key the
 //! chain stops with the historical `secured` note and the bytes stay
 //! sealed. A MAC sealed outer stops `mac-secured` instead: no link

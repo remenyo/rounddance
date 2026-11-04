@@ -35,6 +35,7 @@
 
 pub mod commissioning;
 pub mod frame;
+pub mod gpd;
 pub mod proxy;
 pub mod receive;
 pub mod reply;
@@ -51,6 +52,7 @@ pub use frame::{
     WireSecurityLevel, COUNT_MIC_LEN, FRAME_COUNTER_LEN, GP_ENDPOINT, MAX_GPDF, MAX_GPD_PAYLOAD,
     PROTOCOL_VERSION,
 };
+pub use gpd::{GpdDevice, GpdState, GPD_TOGGLE_CMD};
 pub use proxy::{
     BasicProxy, Blocklist, CommissioningModeCmd, DropReason, GpTxQueue, GpTxQueueEntry,
     ProxyCommissioning, ProxyError, ProxyNotification, ProxyOutcome, ProxyState, ProxyTable,

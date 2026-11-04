@@ -1,8 +1,8 @@
 //! Offline run: Listener or pcap packets → dissect → fold → reports.
 //!
 //! Host-side (`std`) only: the decode legs themselves
-//! ([`chain`](rounddance_inspect::chain),
-//! [`SessionEngine`](rounddance_inspect::session::SessionEngine)) stay
+//! ([`rounddance_inspect::chain`],
+//! [`rounddance_inspect::session::SessionEngine`]) stay
 //! `no_std` + `#![forbid(unsafe_code)]`; this module only owns file
 //! IO, growable report buffers, and pcap-out writers.
 //!
@@ -13,12 +13,12 @@
 //! and folds with
 //! [`note_tree`](rounddance_inspect::session::SessionEngine::note_tree).
 //! [`run_listener`] covers any
-//! [`Listener`](rounddance_inspect::capture::Listener) backend (the
+//! [`rounddance_inspect::capture::Listener`] backend (the
 //! offline golden path is
 //! [`ReplayListener`](rounddance_inspect::sniffer::ReplayListener));
 //! [`run_packets`] covers pcap/pcapng file input;
 //! [`run_stream`] replays raw wire bytes through the streaming
-//! [`Ingest`](rounddance_inspect::stream::Ingest) pipe. The
+//! [`rounddance_inspect::stream::Ingest`] pipe. The
 //! live == replay invariant is the byte-identity of the Listener and
 //! Ingest legs over the same feed (pinned by test, never assumed).
 
@@ -213,7 +213,7 @@ pub fn run_radio_packets(
 }
 
 /// Replay raw sniffer wire bytes through the streaming
-/// [`Ingest`](rounddance_inspect::stream::Ingest) pipe in
+/// [`rounddance_inspect::stream::Ingest`] pipe in
 /// `chunk`-sized pushes (chunk `0` behaves as whole-input: a single
 /// push, then drain). Returns the folded run plus the pipe counters.
 ///

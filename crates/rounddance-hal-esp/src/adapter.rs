@@ -265,7 +265,7 @@ fn map_mgmt_err(e: DriverError) -> MacError {
 ///
 /// The PSDU is the exact on-air command bytes (`Len`-stripped, tail
 /// meters excluded); upper layers feed it to
-/// [`mac_cmd::classify`](crate::mac_cmd::classify) / [`CoordinatorApp`](crate::app::CoordinatorApp).
+/// [`crate::mac_cmd::classify`] / [`crate::app::CoordinatorApp`].
 #[derive(Clone, Copy, Debug)]
 pub struct MacIndication {
     psdu: [u8; MAX_PSDU],

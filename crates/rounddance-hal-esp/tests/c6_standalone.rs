@@ -471,7 +471,9 @@ fn joiner_on_mac_psdu_scans_and_hands_off_assoc() {
     // order (LSB-first, as the NCP-verified handshake shape
     // requires), coordinator short.
     let mut out = [0u8; 19];
-    let n = joiner.take_assoc_req(&mut out, APP_PAN).unwrap();
+    let n = joiner
+        .take_assoc_req(&mut out, APP_PAN, COORD_SHORT)
+        .unwrap();
     assert_eq!(n, 19);
     assert_eq!(
         &out[..9],

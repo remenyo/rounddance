@@ -13,7 +13,7 @@
 //! from the crypto stack's own field source (`p256` 0.14
 //! `arithmetic/field.rs`: modulus `ffffffff00000001…ffffffff`, i.e.
 //! `p = 2^{224}(2^{32} - 1) + 2^{192} + 2^{96} - 1`, trailing octet
-//! `0xFF`), and is re-pinned by [`tests::prime_is_three_mod_four`]
+//! `0xFF`), and is re-pinned by the `prime_is_three_mod_four` test
 //! rather than assumed. Because that shape holds, a square root is a
 //! single exponentiation to `(p + 1) / 4`; anything that is not a
 //! quadratic residue is rejected as [`EccError::InvalidPoint`].

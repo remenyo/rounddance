@@ -1,0 +1,11 @@
+CONFIG_IDF_TARGET="esp32s31"
+# S31 standalone coordinator: same stack discipline as the C6 coordinator
+# (adapter construction overflows 8K; 16K it is).
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
+CONFIG_ESP_IPC_TASK_STACK_SIZE=4096
+# C++ without RTTI, without exceptions (user directive): Rust-only tree.
+CONFIG_COMPILER_CXX_EXCEPTIONS=n
+CONFIG_COMPILER_CXX_RTTI=n
+CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096
+CONFIG_FREERTOS_IDLE_TASKSTACKSIZE=4096
+CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT=4096

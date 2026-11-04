@@ -10,4 +10,4 @@ description = "Browser-shape WASM bundle of the first complete transaction (form
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-rounddance-hal-host = { path = "../rounddance-hal-host" }
+rounddance-hal-host = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-hal-host" }

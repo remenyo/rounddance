@@ -1,0 +1,17 @@
+[package]
+name = "rd-rcp"
+version = "0.1.0"
+edition = "2021"
+resolver = "2"
+
+[lib]
+name = "rd_rcp"
+path = "src/lib.rs"
+
+[dependencies]
+esp-idf-sys = { version = "0.38", features = ["native"] }
+rounddance-hal-esp = { path = "../../crates/rounddance-hal-esp", features = ["esp"] }
+rounddance-rcp = { path = "../../crates/rounddance-rcp" }
+rounddance-mac-sap = { path = "../../crates/rounddance-mac-sap" }
+
+[workspace]

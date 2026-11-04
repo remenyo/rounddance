@@ -14,8 +14,8 @@
 //!   algorithm (this harness itself may use `std`, but the RNG uses only
 //!   core integer ops so the same stream replays on ESP/WASM later).
 //! * [`ScriptedRadio`] implements the MAC SAP traits
-//!   ([`MacDataSap`](rounddance_mac_sap::MacDataSap) and
-//!   [`MacMgmtSap`](rounddance_mac_sap::MacMgmtSap)) behind a scripted
+//!   ([`rounddance_mac_sap::MacDataSap`] and
+//!   [`rounddance_mac_sap::MacMgmtSap`]) behind a scripted
 //!   medium: each queued frame is delivered, dropped, or delayed per the
 //!   script, with every decision appended to a virtual-time-stamped trace.
 //!   Replaying the same seed + script yields the identical trace.

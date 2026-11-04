@@ -2,7 +2,7 @@
 
 Stable C ABI over the Rounddance Zigbee stack (`rd_ffi.h`, same header
 as `harness/c/` in the repo root). The implementation is the prebuilt
-Rust staticlib `lib/librd_ffi.a` (`riscv32imac-esp-espidf`, built by
+Rust staticlib `lib/riscv32imac-esp-espidf/librounddance_ffi.a` (built by
 `idf/build-lib.sh`); this component only adapts it to the IDF build.
 
 Registry publication: release the tag, attach the archive, and

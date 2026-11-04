@@ -4,8 +4,8 @@
 //! (`Bind_req` When Generated / Effect on Receipt, anchors
 //! p0139-L3393 and p0139-L3399) and §2.4.3.2.3 (`Unbind_req`, anchors
 //! p0140-L3405 and p0140-L3410-L3414), executed against the
-//! `rounddance-aps` [`BindingTable`](rounddance_aps::BindingTable) and
-//! [`GroupTable`](rounddance_aps::GroupTable): group mode (0x01) maps to
+//! `rounddance-aps` [`rounddance_aps::BindingTable`] and
+//! [`rounddance_aps::GroupTable`]: group mode (0x01) maps to
 //! a group binding, extended mode (0x03) to a unicast binding. This
 //! crate owns the ZDP validation and status mapping; storage stays in
 //! the APS layer. All wording here is paraphrase (D1, `SCOPE.md` §2).

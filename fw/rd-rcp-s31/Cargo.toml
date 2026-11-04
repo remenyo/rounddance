@@ -1,0 +1,33 @@
+[package]
+name = "rd-rcp-s31"
+version = "0.1.0"
+edition = "2021"
+resolver = "2"
+
+[[bin]]
+name = "rd-rcp-s31"
+harness = false # do not use the built-in cargo test harness
+
+[dependencies]
+esp-idf-sys = { version = "0.38", features = ["native"] }
+rd-rcp = { path = "../rd-rcp" }
+
+[build-dependencies]
+embuild = "0.33.5"
+
+[profile.release]
+opt-level = "s"
+
+[profile.dev]
+debug = true
+opt-level = "z"
+
+# Local S31 shim (same as rd-coord-s31, see B-011): esp-idf-sys 0.38.1
+# / embuild 0.33.7 do not name the esp32s31 MCU, so this workspace
+# vendors both crates with the S31 chip added. Scoped to THIS
+# workspace only — the C6/H2 images use separate workspaces.
+[patch.crates-io]
+esp-idf-sys = { path = "../vendor/esp-idf-sys" }
+embuild = { path = "../vendor/embuild" }
+
+[workspace]

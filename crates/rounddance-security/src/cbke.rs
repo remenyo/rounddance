@@ -1,5 +1,5 @@
 //! CBKE handshake orchestration: explicit state machine over an
-//! injected [`EccBackend`](crate::ecc::EccBackend).
+//! injected [`crate::ecc::EccBackend`].
 //!
 //! Paraphrase-level model of the doc `07-5356` SE 1.4a §5 key-establishment
 //! flow (certificate exchange, static-key reconstruction, shared-secret
@@ -37,7 +37,7 @@ pub const TRANSCRIPT_MAX: usize = 512;
 pub const CONFIRM_LABEL_U: u8 = 1;
 /// Domain label for the responder confirmation key.
 pub const CONFIRM_LABEL_V: u8 = 2;
-/// Domain label for the link key (see [`session_keys`](crate::ecc::session_keys)).
+/// Domain label for the link key (see [`crate::ecc::session_keys`]).
 pub const SESSION_KEY_LABEL: u8 = 0;
 
 /// Role in the handshake: who confirms first.

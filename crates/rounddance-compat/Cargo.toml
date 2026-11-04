@@ -4,15 +4,16 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Zigbee revision gates and NCP adapter skeletons (no_std)"
 
 [dependencies]
-rounddance-mac-sap = { path = "../rounddance-mac-sap" }
+rounddance-mac-sap = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-mac-sap" }
 
 [dev-dependencies]
-rounddance-hal-esp = { path = "../rounddance-hal-esp" }
-rounddance-aps = { path = "../rounddance-aps" }
-rounddance-commission = { path = "../rounddance-commission" }
-rounddance-gp = { path = "../rounddance-gp" }
-rounddance-nwk = { path = "../rounddance-nwk" }
-rounddance-security = { path = "../rounddance-security" }
-rounddance-zcl = { path = "../rounddance-zcl" }
+rounddance-hal-esp = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-hal-esp" }
+rounddance-aps = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-aps" }
+rounddance-commission = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-commission" }
+rounddance-gp = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-gp" }
+rounddance-nwk = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-nwk" }
+rounddance-security = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-security" }
+rounddance-zcl = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-zcl" }

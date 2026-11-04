@@ -567,6 +567,28 @@ uptime continuous) — with USB DTR / esptool as the proven reset
 path. Row state stays implemented + verified (doc correction, no
 new behavior).
 
+## Wave-55 traceability — RCP v1 + NCP half-host + PC runner + RCP firmware (`rounddance-rcp`, `rounddance-pchost`, `fw/rd-rcp*`)
+
+All IDs below are repo-minted (`RD-RCP-*` extending the wave-18/54
+RCP contract, `RD-RCP-NCP-*` for the half-host role),
+MINTED-pending-confirm: no spec corpus covers the PC↔radio UART
+(no 802.15.4 MAC/RCP clauses are mined yet). Wire classes stay
+rounddance constructions documented in `docs/otbr/protocol.md`
+(v1); topology (per-chip pins, baud, reset) in
+`docs/otbr/topology.md`. Wording in code/tests is paraphrase only,
+never spec text (D1).
+
+| Requirement ID | State | Implementing code | Verifying test |
+|----------------|-------|-------------------|----------------|
+| RD-RCP-17 | implemented + verified | `mac.rs`: host-side 802.15.4 header build/parse (short-short data + broadcast inter-PAN, no Len prefix) + SAP-vs-PSDU accounting (`FrameTooLong`, never truncation); `driver.rs`: `data_request` wraps the MSDU from the provisioned PAN/short (unprovisioned → `NotReady`, extended → `Unsupported`), `interpan_request` builds the broadcast shape, RX parses back into sources + host-arrival timestamps | `mac.rs` round-trip + accounting + foreign-shape tests, `driver.rs::rx_carries_parsed_src_and_host_time` + `tx_guards_refuse_unbuildable_requests`, sim `rcp_otbr_path.rs::rcp_v1_header_src_mac_proxy_and_retune` (src + timestamp legs) |
+| RD-RCP-18 | implemented + verified | `cmd.rs`: proto-2 `K_MAC_FRAME` channel-tagged RX + `CAPS_TARGET_*` bits (`caps_target_name`); `driver.rs`: MAC-command queue (`transmit_mac` TxFrame proxy + `poll_mac_indication`), per-request inter-PAN retune (`SetChannel` before the frame), proto-1 `RxFrame` fallback, `MacFrame` 124-octet envelope budget; `mac.rs::snoop_assoc_short` latched to the current long-long `0x63cc` shape; `peer.rs`: `MacFrame` emission with sender-channel arrival + `target_caps` + shared snoop | `cmd.rs::mac_frame_and_target_caps` + fuzz `mac_frame_events_round_trip_and_survive_mutation`, `vectors.rs::golden_mac_frame_channel_tag_and_data_header`, `mac.rs::snoop_latches_only_our_success_response`, `driver.rs::mac_command_psdu_surfaces_on_mac_queue` + `interpan_request_retunes_per_request` + `version_probe_names_target_for_universal_runner`, `peer.rs::short_snoop_latches_assoc_short` (25-octet shape) + `rx_queue_emits_channel_tagged_events`, sim v1 MAC-proxy + retune legs |
+| RD-RCP-NCP-01 | implemented + verified | `ncp.rs`: NCP frame classes over the RCP envelope (host→NCP `0x20`–`0x25`, NCP→host `0xA0`–`0xA4`, fixed shapes, fallible codecs) | `ncp.rs::all_classes_round_trip` + `malformed_rejected` |
+| RD-RCP-NCP-02 | implemented + verified | `ncp.rs`: `NcpHost` (fire-and-forget commands, polled event queue, injected clock) + `NcpDevice` (formed/permit/admit/toggle scripted chip with table-full + unknown-device guards) | `ncp.rs::device_guards_and_toggle` (refuse-before-form, bad-channel, unknown-toggle, admit → joined, toggle 0→1→0) |
+| RD-RCP-NCP-03 | implemented + verified | `rounddance-pchost`: `PcRunner<U>` (owns `RcpDriver<U>`, wall-clock + manual advance, probe + provision) + `rd-pchost` binary (RCP coord/joiner flows over `CoordinatorApp`/`JoinerApp`, `--target` probe gate, air-byte logging, `--capture` tee) | `tests/pc_runner.rs::pc_runner_form_join_toggle_over_rcp` (two scripted links: dual beacon survey, assoc-req/rsp + snoop + host confirm, transport-key adopt, annce, node-desc, secured toggle + verified DefRsp, replay refused both legs) + `pc_runner_probe_names_target_and_replays` |
+| RD-RCP-NCP-04 | implemented + verified | `rounddance-pchost`: `NcpRunner<U>` (commission + event drain) + `rd-pchost --mode ncp` (form → permit → admit → toggle → Attr) | `tests/pc_runner.rs::pc_runner_ncp_drive_lamp` |
+| RD-RCP-NCP-05 | implemented + verified | `rounddance-pchost::serial`: `SerialUart` (POSIX 460800 8N1 raw via `termios2`+`BOTHER`, O_NONBLOCK backpressure as `UartFull`, DTR assert/pulse; `unsafe` confined to this module with SAFETY comments, crate `#![deny(unsafe_code)]`) | `tests/serial_pty.rs::serial_uart_crosses_pty_both_ways` (framed command decodes off the pty, event frame crosses back byte-identical) + `serial_uart_refuses_wrong_baud` |
+| RD-RCP-NCP-06 | implemented + verified | `fw/rd-rcp` engine (15.4 via `EspIdfDriver` raw PSDU path, UART1 460800 8N1, `Ready`-at-boot, per-command apply, `MacFrame` forward + SHORT-SNOOP filter programming, caps-bit version, standing +10 dBm cap; IDF v6.1 `uart_set_pin`-is-a-macro handled by binding `_uart_set_pin6`) + `fw/rd-rcp-h2` / `-c6` / `-s31` thin images (target pins/UART/caps, build-time `RD_RCP_*_PIN` overrides, sdkconfig + toolchain per target, C6/H2 plain `esp-idf-sys`, S31 vendored shim) | `cargo +esp check` exit 0 on all three images; `cargo +esp build` links H2 + C6 to ELF; C6 ELF converts via `esptool elf2image` (magic `0xE9`, 641,488 B); air proof pending an arbitrator lease (backup-first + readback-verify per the standing approval) |
+
 ## Wave-19 traceability — browser path (`rounddance-browser`)
 
 All IDs below are repo-minted (`RD-BROWSER-<seq>`), MINTED-pending-confirm:
@@ -1986,3 +2008,225 @@ paraphrase only (D1).
 | RD-154-24-921-01 | implemented (structural) | SAP carries no key parameters (unsecured-only path; anchor §9.2.1 p0160; suite-agility halves held — no crypto/key seam) | structural (absence boundary) |
 | RD-154-24-922-01 | implemented (structural) | level-zero passthrough; gated fail-closed ⇒ `Unsupported` (anchor §9.2.2 steps a–b p0161; new algorithm checks held — no transform seam) | `mac-sap/src/lib.rs::error_display_is_human_readable` (`Unsupported` renders) |
 | RD-154-24-944-01 | implemented + verified | aux-header opacity boundary (anchor §9.4.1 p0172–0174, reconcile; wire shape identical) | `inspect/tests/goldens.rs::golden_captured_air_secured_nwk_stops_chain` |
+
+## Wave-universal traceability — S31/C6 board bindings, C6 router ESP wiring, GPD device, Mgmt_NWK_Disc/Rtg/Bind, Parent_annce, End_Device_Bind
+
+Repo-minted IDs, MINTED-pending-confirm. Wording in code/tests is paraphrase only (D1).
+
+| Requirement ID | State | Implementing code | Verifying test |
+|----------------|-------|-------------------|----------------|
+| 05-3474-23-24330-01 | implemented + verified | `rounddance-zdo/src/mgmt.rs`: `MgmtNwkDiscReq` | `rounddance-zdo/tests/vectors.rs::vector_mgmt_nwk_disc_05_3474_23_24330_01` |
+| 05-3474-23-24330-02 | implemented + verified | `rounddance-zdo/src/mgmt.rs`: `MgmtNwkDiscRsp` + `NetworkEntry` | `rounddance-zdo/tests/vectors.rs::vector_mgmt_nwk_disc_05_3474_23_24330_01` |
+| 05-3474-23-24332-03 | implemented + verified | `rounddance-zdo/src/mgmt.rs`: `MgmtRtgReq` + `RtgEntry` | `rounddance-zdo/tests/vectors.rs::vector_mgmt_rtg_05_3474_23_24332_03` |
+| 05-3474-23-24332-04 | implemented + verified | `rounddance-zdo/src/mgmt.rs`: `MgmtRtgRsp` + `RtgEntry` | `rounddance-zdo/tests/vectors.rs::vector_mgmt_rtg_05_3474_23_24332_03` |
+| 05-3474-23-24333-01 | implemented + verified | `rounddance-zdo/src/mgmt.rs`: `MgmtBindReq` + `MgmtBindEntry` | `rounddance-zdo/tests/vectors.rs::vector_mgmt_bind_05_3474_23_24333_01` |
+| 05-3474-23-24333-02 | implemented + verified | `rounddance-zdo/src/mgmt.rs`: `MgmtBindRsp` + `MgmtBindEntry` | `rounddance-zdo/tests/vectors.rs::vector_mgmt_bind_05_3474_23_24333_01` |
+| 05-3474-23-24316-01 | implemented + verified | `rounddance-zdo/src/zdp.rs`: `ParentAnnce` 0x001F + `ChildInfo` list (§2.4.3.1.12; corrected from 0x0016/no-response per Table 2-43 + normative ClusterID sentence, see correction note below) | `rounddance-zdo/tests/vectors.rs::vector_parent_annce_05_3474_23_24316_01` |
+| 05-3474-23-24320-01 | implemented + verified | `rounddance-zdo/src/zdp.rs`: `EndDeviceBindReq` | `rounddance-zdo/tests/vectors.rs::vector_end_device_bind_05_3474_23_24320_01` |
+| 05-3474-23-24320-02 | implemented + verified | `rounddance-zdo/src/zdp.rs`: `EndDeviceBindRsp` | `rounddance-zdo/tests/vectors.rs::vector_end_device_bind_05_3474_23_24320_01` |
+| 14-0563-19-A16GPD-01 | implemented + verified | `rounddance-gp/src/gpd.rs`: `GpdDevice::build_commissioning` | `rounddance-gp/tests/gpd_device.rs::gpd_commission_then_toggle_roundtrip`, `gpd_sink_chain.rs::gpd_commission_data_hands_off_to_nwk` |
+| 14-0563-19-A16GPD-02 | implemented + verified | `rounddance-gp/src/gpd.rs`: `mark_commissioned` + `build_data` | `rounddance-gp/tests/gpd_device.rs::gpd_commission_then_toggle_roundtrip`, `gpd_sink_chain.rs::gpd_commission_data_hands_off_to_nwk` |
+| 14-0563-19-A16GPD-03 | implemented + verified | `rounddance-gp/src/gpd.rs`: `build_success` | `rounddance-gp/tests/gpd_device.rs::gpd_bidir_success_closes_commissioning`, `gpd_sink_chain.rs::gpd_bidir_loop_reply_then_success_commissions` |
+| 14-0563-19-A16GPD-04 | implemented + verified | `rounddance-gp/src/gpd.rs`: `build_bidir_commissioning` | `rounddance-gp/tests/gpd_sink_chain.rs::gpd_bidir_loop_reply_then_success_commissions` |
+
+## Wave-universal-2 traceability — Complex/User descriptors, Direct-Join, Parent_annce follow-up, End_Device_Bind follow-up, router refuse gate
+
+Repo-minted IDs, MINTED-pending-confirm. Wording in code/tests is paraphrase only (D1).
+
+| Requirement ID | State | Implementing code | Verifying test |
+|----------------|-------|-------------------|----------------|
+| 05-3474-23-24317-01 | implemented + verified | `rounddance-zdo/src/zdp.rs`: `ComplexDescReq` | `rounddance-zdo/tests/vectors.rs::vector_complex_desc_05_3474_23_24317_01` |
+| 05-3474-23-24317-02 | implemented + verified | `rounddance-zdo/src/zdp.rs`: `ComplexDescRsp` + `ComplexField` | `rounddance-zdo/tests/vectors.rs::vector_complex_desc_05_3474_23_24317_01` |
+| 05-3474-23-24318-01 | implemented + verified | `rounddance-zdo/src/zdp.rs`: `UserDescReq` | `rounddance-zdo/tests/vectors.rs::vector_user_desc_05_3474_23_24318_01` |
+| 05-3474-23-24318-02 | implemented + verified | `rounddance-zdo/src/zdp.rs`: `UserDescRsp` | `rounddance-zdo/tests/vectors.rs::vector_user_desc_05_3474_23_24318_01` |
+| 05-3474-23-24336-01 | implemented + verified | `rounddance-zdo/src/mgmt.rs`: `MgmtDirectJoinReq` | `rounddance-zdo/tests/vectors.rs::vector_mgmt_direct_join_05_3474_23_24336_01` |
+| 05-3474-23-24336-02 | implemented + verified | `rounddance-zdo/src/mgmt.rs`: `MgmtDirectJoinRsp` | `rounddance-zdo/tests/vectors.rs::vector_mgmt_direct_join_05_3474_23_24336_01` |
+
+## Wave-universal-3 traceability — Complex/User descriptors, Mgmt_Direct_Join/Cache, discovery-cache + bind-register families, Parent_annce request/response
+
+Repo-minted IDs, MINTED-pending-confirm. Wording in code/tests is paraphrase only (D1).
+Deprecation note: R23.2 marks Complex/User descriptors (§2.4.3.1.8/1.9), Discovery_Cache (§2.4.3.1.10),
+User_Desc_set (§2.4.3.1.13), End_Device_Bind (§2.4.3.2.1), the Bind_Register family (§2.4.3.2.4–2.9),
+Mgmt_NWK_Disc (§2.4.3.3.1) and Mgmt_Cache (§2.4.3.3.8) as heading-only DEPRECATED entries.
+This layer keeps their IDs + response pairing (high-bit rule §2.4.4.1) for 3.0-compat recognition;
+wire codecs are retained for decode of older peers only. Parent_annce (§2.4.3.1.12, rsp §2.4.4.2.22),
+Mgmt_Rtg (§2.4.3.3.3), Mgmt_Bind (§2.4.3.3.4) and Mgmt_Direct_Join (§2.4.3.3.6) are current.
+
+| Requirement ID | State | Implementing code | Verifying test |
+|----------------|-------|-------------------|----------------|
+| 05-3474-23-24317-01 | implemented + verified | `rounddance-zdo/src/zdp.rs`: `ComplexDescReq` (DEPRECATED R23.2, 3.0-compat) | `rounddance-zdo/tests/vectors.rs::vector_complex_desc_05_3474_23_24317_01` |
+| 05-3474-23-24317-02 | implemented + verified | `rounddance-zdo/src/zdp.rs`: `ComplexDescRsp` + `ComplexField` (DEPRECATED R23.2, 3.0-compat) | `rounddance-zdo/tests/vectors.rs::vector_complex_desc_05_3474_23_24317_01` |
+| 05-3474-23-24318-01 | implemented + verified | `rounddance-zdo/src/zdp.rs`: `UserDescReq` (DEPRECATED R23.2, 3.0-compat) | `rounddance-zdo/tests/vectors.rs::vector_user_desc_05_3474_23_24318_01` |
+| 05-3474-23-24318-02 | implemented + verified | `rounddance-zdo/src/zdp.rs`: `UserDescRsp` (DEPRECATED R23.2, 3.0-compat) | `rounddance-zdo/tests/vectors.rs::vector_user_desc_05_3474_23_24318_01` |
+| 05-3474-23-24319-01 | implemented + verified | `rounddance-zdo/src/cluster.rs`: `CLUSTER_DISCOVERY_CACHE_REQ` 0x0012 (DEPRECATED R23.2, ID + pairing only) | `rounddance-zdo/tests/vectors.rs::vector_deprecated_cluster_pairing_05_3474_23_244_02` |
+| 05-3474-23-2431B-01 | implemented + verified | `rounddance-zdo/src/cluster.rs`: `CLUSTER_USER_DESC_SET_REQ` 0x0014 (DEPRECATED R23.2, ID + pairing only) | `rounddance-zdo/tests/vectors.rs::vector_deprecated_cluster_pairing_05_3474_23_244_02` |
+| 05-3474-23-24316-02 | implemented + verified | `rounddance-zdo/src/zdp.rs`: `ChildInfo` | `rounddance-zdo/tests/vectors.rs::vector_parent_annce_05_3474_23_24316_01` |
+| 05-3474-23-24316-03 | implemented + verified | `rounddance-zdo/src/zdp.rs`: `ParentAnnceRsp` (rsp §2.4.4.2.22) | `rounddance-zdo/tests/vectors.rs::vector_parent_annce_05_3474_23_24316_01` |
+| 05-3474-23-24324-01 | implemented + verified | `rounddance-zdo/src/cluster.rs`: `CLUSTER_BIND_REGISTER_REQ` 0x0023 (DEPRECATED R23.2, ID + pairing only) | `rounddance-zdo/tests/vectors.rs::vector_deprecated_cluster_pairing_05_3474_23_244_02` |
+| 05-3474-23-24325-01 | implemented + verified | `rounddance-zdo/src/cluster.rs`: `CLUSTER_REPLACE_DEVICE_REQ` 0x0024 (DEPRECATED R23.2, ID + pairing only) | `rounddance-zdo/tests/vectors.rs::vector_deprecated_cluster_pairing_05_3474_23_244_02` |
+| 05-3474-23-24326-01 | implemented + verified | `rounddance-zdo/src/cluster.rs`: `CLUSTER_STORE_BAK_BIND_ENTRY_REQ` 0x0025 (DEPRECATED R23.2, ID + pairing only) | `rounddance-zdo/tests/vectors.rs::vector_deprecated_cluster_pairing_05_3474_23_244_02` |
+| 05-3474-23-24327-01 | implemented + verified | `rounddance-zdo/src/cluster.rs`: `CLUSTER_REMOVE_BAK_BIND_ENTRY_REQ` 0x0026 (DEPRECATED R23.2, ID + pairing only) | `rounddance-zdo/tests/vectors.rs::vector_deprecated_cluster_pairing_05_3474_23_244_02` |
+| 05-3474-23-24328-01 | implemented + verified | `rounddance-zdo/src/cluster.rs`: `CLUSTER_BACKUP_BIND_TABLE_REQ` 0x0027 (DEPRECATED R23.2, ID + pairing only) | `rounddance-zdo/tests/vectors.rs::vector_deprecated_cluster_pairing_05_3474_23_244_02` |
+| 05-3474-23-24329-01 | implemented + verified | `rounddance-zdo/src/cluster.rs`: `CLUSTER_RECOVER_BIND_TABLE_REQ` 0x0028 (DEPRECATED R23.2, ID + pairing only) | `rounddance-zdo/tests/vectors.rs::vector_deprecated_cluster_pairing_05_3474_23_244_02` |
+| 05-3474-23-24338-01 | implemented + verified | `rounddance-zdo/src/mgmt.rs`: `MgmtCacheReq` (DEPRECATED R23.2 §2.4.3.3.8, 3.0-compat) | `rounddance-zdo/tests/vectors.rs::vector_mgmt_cache_05_3474_23_24338_01` |
+| 05-3474-23-24338-02 | implemented + verified | `rounddance-zdo/src/mgmt.rs`: `MgmtCacheRsp` + `CacheEntry` (DEPRECATED R23.2, 3.0-compat) | `rounddance-zdo/tests/vectors.rs::vector_mgmt_cache_05_3474_23_24338_01` |
+| 05-3474-23-24315-01 | implemented + verified | `rounddance-zdo/src/zdp.rs`: `SystemServerDiscoveryReq` (§2.4.3.1.14 current) | `rounddance-zdo/tests/vectors.rs::vector_system_server_discovery_05_3474_23_24315_01` |
+| 05-3474-23-24315-02 | implemented + verified | `rounddance-zdo/src/zdp.rs`: `SystemServerDiscoveryRsp` (rsp §2.4.4.2.10, Status + ServerMask) | `rounddance-zdo/tests/vectors.rs::vector_system_server_discovery_05_3474_23_24315_01` |
+
+## Wave-universal-4 traceability — R23.2 cluster numbers, store reqs, System_Server_Discovery, Enhanced_Update, Beacon Survey, Joining-list policy
+
+Repo-minted IDs, MINTED-pending-confirm. Wording in code/tests is paraphrase only (D1).
+Correction (Table 2-43 + normative ClusterID sentences): Complex_Desc_req is 0x0010 (not 0x0007), User_Desc_req is 0x0011 (not 0x0008), Parent_annce is 0x001F with rsp 0x801F (not 0x0016/no response); 0x0007/0x0008/0x0009 carry no R23.2 ZDP assignment. Mgmt_Direct_Join (§2.4.3.3.6) confirmed DEPRECATED (heading-only). Discovery_Cache (§2.4.3.1.10) and Mgmt_Cache (§2.4.3.3.8) likewise DEPRECATED heading-only entries. System_Server_Discovery (§2.4.3.1.14/§2.4.4.2.10), Mgmt_NWK_Enhanced_Update (§2.4.3.3.10) and Mgmt_NWK_IEEE_Joining_List (§2.4.3.3.11) are current.
+
+| Requirement ID | State | Implementing code | Verifying test |
+| 05-3474-23-24315-01 | implemented + verified | `rounddance-zdo/src/zdp.rs`: `SystemServerDiscoveryReq` (§2.4.3.1.14, current) | `rounddance-zdo/tests/vectors.rs::vector_system_server_discovery_05_3474_23_24315_01` |
+| 05-3474-23-24315-02 | implemented + verified | `rounddance-zdo/src/zdp.rs`: `SystemServerDiscoveryRsp` (rsp §2.4.4.2.10, Status + ServerMask) | `rounddance-zdo/tests/vectors.rs::vector_system_server_discovery_05_3474_23_24315_01` |
+| 05-3474-23-2431C-01 | implemented + verified | `rounddance-zdo/src/cluster.rs`: `CLUSTER_DISCOVERY_STORE_REQ` 0x0016 (DEPRECATED R23.2, ID + pairing only) | `rounddance-zdo/tests/vectors.rs::vector_deprecated_cluster_pairing_05_3474_23_244_02` |
+| 05-3474-23-2431D-01 | implemented + verified | `rounddance-zdo/src/cluster.rs`: `CLUSTER_NODE_DESC_STORE_REQ` 0x0017 (DEPRECATED R23.2, ID + pairing only) | `rounddance-zdo/tests/vectors.rs::vector_deprecated_cluster_pairing_05_3474_23_244_02` |
+| 05-3474-23-2432A-01 | implemented + verified | `rounddance-zdo/src/cluster.rs`: `CLUSTER_BACKUP_SOURCE_BIND_REQ` 0x0029 (DEPRECATED R23.2, ID + pairing only) | `rounddance-zdo/tests/vectors.rs::vector_mgmt_newer_clusters_05_3474_23_244_02` |
+| 05-3474-23-2432B-01 | implemented + verified | `rounddance-zdo/src/cluster.rs`: `CLUSTER_RECOVER_SOURCE_BIND_REQ` 0x002A (DEPRECATED R23.2, ID + pairing only) | `rounddance-zdo/tests/vectors.rs::vector_mgmt_newer_clusters_05_3474_23_244_02` |
+| 05-3474-23-2432C-01 | implemented + verified | `rounddance-zdo/src/zdp.rs`: `ClearAllBindingsReq` (TLV ID 0, EUI64 list) | `rounddance-zdo/tests/vectors.rs::vector_clear_all_bindings_05_3474_23_2432c_01` |
+| 05-3474-23-2432C-02 | implemented + verified | `rounddance-zdo/src/zdp.rs`: `ClearAllBindingsRsp` (Table 2-99 status set) | `rounddance-zdo/tests/vectors.rs::vector_clear_all_bindings_05_3474_23_2432c_01` |
+| 05-3474-23-243310-01 | implemented + verified | `rounddance-zdo/src/mgmt.rs`: `MgmtNwkEnhancedUpdateReq` (Table 2-65, conditional ScanCount/nwkUpdateId) | `rounddance-zdo/tests/vectors.rs::vector_mgmt_nwk_enhanced_update_05_3474_23_243310_01` |
+| 05-3474-23-243310-02 | implemented + verified | `rounddance-zdo/src/mgmt.rs`: `MgmtNwkEnhancedUpdateNotify` (Table 2-110: Status + page mask + counters + ED list) | `rounddance-zdo/tests/vectors.rs::vector_mgmt_nwk_enhanced_update_05_3474_23_243310_01` |
+| 05-3474-23-2433A-01 | implemented + verified | `rounddance-zdo/src/mgmt.rs`: `MgmtNwkIeeeJoiningListReq` | `rounddance-zdo/tests/vectors.rs::vector_mgmt_nwk_ieee_joining_list_05_3474_23_2433a_01` |
+| 05-3474-23-2433A-02 | implemented + verified | `rounddance-zdo/src/mgmt.rs`: `MgmtNwkIeeeJoiningListRsp` + `JoiningPolicy` (Table 2-111/2-112) | `rounddance-zdo/tests/vectors.rs::vector_mgmt_nwk_ieee_joining_list_05_3474_23_2433a_01` |
+| 05-3474-23-2433C-01 | implemented + verified | `rounddance-zdo/src/mgmt.rs`: `MgmtNwkBeaconSurveyReq` (Fig 2-40/2-41 config TLV ID 0 + ChannelList + config octet) | `rounddance-zdo/tests/vectors.rs::vector_mgmt_nwk_beacon_survey_05_3474_23_2433c_01` |
+| 05-3474-23-2433C-02 | implemented + verified | `rounddance-zdo/src/mgmt.rs`: `MgmtNwkBeaconSurveyRsp` + `BeaconSurveyResults` + `PotentialParent` (Table 2-114/2-115/2-116: Status + counters + current parent + LQA/count + legs) | `rounddance-zdo/tests/vectors.rs::vector_mgmt_nwk_beacon_survey_rsp_05_3474_23_2433c_01` |
+| 05-3474-23-3210-01 | implemented + verified | `rounddance-zdo/src/mgmt.rs`: `ChannelList` + `ChannelPageMask` (§3.2.2.2.1, Tables 3-6/3-7/3-8) | `rounddance-zdo/tests/vectors.rs::vector_channel_list_05_3474_23_3210_01` |
+
+## Wave-universal-wasm traceability — S31 WASM guest HAL (host-call driver seam)
+
+Repo-minted IDs, MINTED-pending-confirm. Wording in code/tests is paraphrase only (D1).
+The Rust IDF shim (`esp-idf-sys` 0.38.1, newest on crates.io) rejects the `esp32s31`
+MCU, so the S31 coordinator cannot build as a native `esp` image (`B-011`); this wave
+carries the S31 path as a WASM guest instead (per `SCOPE.md` §6 S31 WASM-isolation row):
+the stack runs unmodified in `wasm32-unknown-unknown` over 8 `host.rd_host_*` imports
+the native C runner implements against the IDF C 15.4 driver (which carries S31 SoC
+support, `SOC_IEEE802154_SUPPORTED=1`).
+
+| Requirement ID | State | Implementing code | Verifying test |
+|----------------|-------|-------------------|----------------|
+| RD-WASM-RT-01 | implemented + verified | `rounddance-hal-wasm/src/host.rs`: `HostOps` (testable form of the host-call contract) | `rounddance-hal-wasm/tests/guest_adapter.rs` (provision/TX/RX/scan/NotReady over `MockHost`) |
+| RD-WASM-RT-02 | implemented + verified | `rounddance-hal-wasm/src/ffi.rs`: `extern` guest imports + `FfiHost` (SAFETY-confined, crate `#![deny(unsafe_code)]`) + `host/rd_wasm_host.h` C ABI | `rounddance-hal-wasm/tests/guest_exports.rs` (stub host drives the real export); `gcc -fsyntax-only` on the header |
+| RD-WASM-RT-03 | implemented + verified | `rounddance-hal-wasm/src/mock.rs`: `MockHost` over `MockDriver` | `rounddance-hal-wasm/tests/guest_adapter.rs` (scripted TX events, RX injection, canned ED) |
+| RD-WASM-RT-04 | implemented + verified | `rounddance-hal-wasm/src/wasm.rs`: `WasmDriver<H: HostOps>` adapts the `Driver` seam | `rounddance-hal-wasm/tests/guest_adapter.rs` (parity with `MockDriver` directly) + `guest_join_toggle.rs` (full join→toggle over two guest adapters) |
+| RD-WASM-RT-05 | implemented + verified | `rounddance-hal-wasm/src/guest.rs`: `rd_guest_radio_selftest` export (host-verified guest entry-point pattern) | `rounddance-hal-wasm/tests/guest_exports.rs`; artifact imports exactly `host.rd_host_*` ×8 + exports `memory` + the selftest |
+
+## Wave-universal-shim traceability — S31 toolchain enablement (vendored esp-idf-sys + embuild)
+
+Repo-minted IDs, MINTED-pending-confirm. Upstream `esp-idf-sys` 0.38.1 / `embuild` 0.33.7
+(newest on crates.io) do not name the `esp32s31` MCU, so `fw/rd-coord-s31` vendors both
+crates under `fw/vendor/` with the S31 chip added; `[patch.crates-io]` is scoped to the
+`fw/rd-coord-s31` workspace only (C6 images resolve the unmodified crates.io originals).
+The S31 target itself is real in this IDF tree (`components/soc/esp32s31/`,
+`SOC_IEEE802154_SUPPORTED=1`, RISC-V `riscv32-esp-elf-` toolchain, IDF `PREVIEW_TARGETS`;
+see `B-011`).
+
+| Requirement ID | State | Implementing code | Verifying test |
+|----------------|-------|-------------------|----------------|
+| RD-SHIM-01 | implemented + verified | `fw/vendor/esp-idf-sys/build/native/cargo_driver/chip.rs`: `Chip::ESP32S31` + riscv32imac detect list + `riscv32-esp-elf` toolchain group | `cargo +esp check --manifest-path fw/rd-coord-s31/Cargo.toml` exit 0 (forced re-check: `Checking rd-coord-s31 ... Finished`) |
+| RD-SHIM-02 | implemented + verified | `fw/vendor/embuild/src/pio.rs`: `ESP32S31` in the riscv32imac PIO target table + MCU→triple mapping | `cargo +esp check --manifest-path fw/rd-coord-s31/Cargo.toml` exit 0 |
+| RD-SHIM-03 | implemented + verified | `fw/rd-coord-s31/Cargo.toml`: `[patch.crates-io]` scoped to the S31 workspace; HAL crates dropped from deps (own HAL over `esp-idf-sys` FFI needs no `esp-idf-hal` port) | `cargo +esp check --manifest-path fw/rd-coord-s31/Cargo.toml` exit 0; `fw/vendor/README.md` isolation contract |
+
+## Wave-universal on-target proof — S31 coordinator (2026-11-04, B-011 CLOSED)
+
+| Requirement ID | State | Implementing code | Verifying test |
+|----------------|-------|-------------------|----------------|
+| RD-AIR-S31-01 | proven on-target | `fw/rd-coord-s31` (shimmed build, `riscv32imafc-esp-espidf`) flashed to ESP32-S31 rev v0.0 (ttyUSB1, MAC 30:ed:a0:f3:ce:94): bootloader@0x2000 + partition-table@0x8000 + app@0x10000, hash verified | Boot log: `RDCOORD-S31 target=esp32s31 pan=0xc601 ch=15`, AUX fresh, `C6APP FORMED`, `PERMIT open`, admitted joiner `a0f262fffe8597a4`, answering beacon-requests with beacons on air |
+| RD-AIR-S31-02 | partially proven on-target (assoc+annce+ZDO-answer over the air; toggle leg open) | `fw/rd-coord-s31` flashed image (pre-follow-through) + `fw/rd-joiner` on ACM9 | Dual serial 2026-11-04 (`/tmp/opencode/s31-60s.log`, `/tmp/opencode/join9-60s.log`): assoc-req/rsp short 0x0001, annce Delivered + parsed on S31, NodeDescRsp received on S31; sniffer 196 frames ch15 (`/tmp/opencode/sniff-s31/s31join1.*`, 20 secured decryptable, 0 orphans) |
+| RD-AIR-S31-03 | proven on-target (isolated S31) | `fw/rd-coord-s31` v2 image (678,688 B) on USB1, ACM4 erased, joiner ACM9 | Full handshake 2026-11-04: assoc 0x0001, transport open, Annce, NodeDesc tsn=1, toggle Delivered, `LAMP on=true`, `DEFRSP-OK`; sniffer 840 frames / 81 decryptable / 0 orphans with assoc-req/rsp on air (`/tmp/opencode/sniff-s31/s31iso.*`, `/tmp/opencode/s31-iso.log`, `/tmp/opencode/join9-iso.log`) |
+
+| RD-AIR-RTR-01 | proven on-target (uplink join + Active + endpoint) | `fw/rd-router` v2 (own-EUI uplink via `JoinerApp::new_with_ieee`) on ACM6 E510, S31 v3 TC | 2026-11-04 dual serial: assoc own-EUI, RSP short 0x0002, transport open, `UPLINK-JOINED`, `state Active`, hold/poll paths live (`/tmp/opencode/router-v2.log`, `/tmp/opencode/s31-v3b.log`) |
+| RD-AIR-RTR-02 | partially proven on-target (MAC child service + sleepy polling live; secured routed traffic open) | ACM4 child (`RD_ASSOC_PARENT=0002`, own EUI, 5 s polls) + ACM6 router v4, S31 v3 TC | Assoc-req/RSP 0x0003 + steady `TX-POLL`/`POLL-EMPTY 0x0003` on air, sniffer-corroborated; host test proves hold→serve; residue: TC→child key relay + TC routing (unimplemented) |
+
+## Wave-routing-bakeoff traceability — cost metric choice + loss-adaptive estimator (repo-minted RD-ROUTE)
+
+Repo-minted IDs, MINTED-pending-confirm. The 1..7 link-cost scale and its aging are
+spec-fixed; the accumulation fold and the cost estimator are implementation space
+(the estimator watches TX confirms instead of meter readings, which read flat 9–11
+on the bench C6 units). Wording in code/tests is paraphrase only, never spec text (D1).
+Defaults are byte-identical to the legacy behavior (`SaturatingSum` == `add_path_cost`).
+
+| Requirement ID | State | Implementing code | Verifying test |
+|----------------|-------|-------------------|----------------|
+| RD-ROUTE-01 | implemented + verified | `rounddance-nwk/src/route.rs`: `PathCostMetric::{SaturatingSum,HopCount,Bottleneck}` + `accumulate_path_cost` (out-of-scale clamp) | `nwk/tests/vectors.rs::vector_path_cost_metrics_rd_route_01` |
+| RD-ROUTE-02 | implemented + verified | `route.rs`: `LinkEstimator` (Q8 EWMA alpha=1/8, min-step 1; bands to 1..7; unmeasured → None) | `nwk/tests/vectors.rs::vector_link_estimator_bands_rd_route_02` |
+| RD-ROUTE-03 | implemented + verified | `route.rs`: `RouteTable::remove` + `roles::RouterMachine::{note_tx_result,estimated_cost,invalidate_route}` | `nwk/tests/vectors.rs::vector_route_remove_rd_route_03` |
+| RD-ROUTE-04 | implemented + verified | Bake-off scenario (static reinstalls cost-1 dead route, 0/9 delivered; estimator evicts at grade ≥5, re-discovers onto relay, 3/3 delivered; replay-identical) | `sim/tests/route_estimator_bakeoff.rs` (2 tests) |
+
+## Wave-grandchild-relay traceability — TC→grandchild key relay + TC routing (doc 05-3474-23 R23.2 §3.3/§3.6)
+
+Closes RD-AIR-RTR-02 residue (TC→child key relay + TC routing
+unimplemented): the Trust Center learns a grandchild through its
+router parent, delivers the network key addressed to the grandchild
+with a relay leg, and routes post-key ZDO/ZCL through the installed
+next hop. 4 repo-minted IDs (`05-3474-23-3661-*`, dots stripped),
+MINTED-pending-confirm. Wording in code/tests is paraphrase only,
+never spec text (D1). Reused corpus IDs where they cover behavior:
+header framing `05-3474-23-331-01/02`, command-header rule
+`05-3474-23-34-01`, inbound guard `05-3474-23-3213-01`, install-code
+admission `22-65816-030-56-03`, symmetric exchange `22-65816-030-91-02`,
+announce `05-3474-23-24311-11`, replay `05-3474-23-4312-01`.
+
+| Requirement ID | State | Implementing code | Verifying test |
+|----------------|-------|-------------------|----------------|
+| 05-3474-23-3661-01 | implemented + verified | `commission::transport::build_transport_key_frame_via` (explicit MAC dst for the relay leg; NWK dst stays the final short; MSDU byte-identical to the direct frame) + `hal-esp::CoordinatorApp::take_transport_key_to` (next-hop MAC else direct; resets that source's replay state) | `hal-esp/tests/grandchild_relay.rs::tc_to_grandchild_key_delivery_via_relay` (MAC dst = router, NWK dst = grandchild, grandchild opens + adopts, duplicate idempotent) |
+| 05-3474-23-3661-02 | implemented + verified | `commission::secured::build_secured_nwk_frame_via` (same MSDU, fresh MAC; NWK header preserved verbatim, no radius rewrite inside the authenticated region) + `hal-esp::RouterDevice::relay_for` + `nwk_dst_of` (verbatim-MSDU relay, direct-child shortcut, None when uncovered) + `hal-esp::CoordinatorApp::{build_toggle_request_to, take_node_desc_req}` (MAC = next hop, NWK dst final) | `hal-esp/tests/grandchild_relay.rs::routed_secured_toggle_survives_relay_and_verifies` (toggle MAC = router, NWK = grandchild, relayed open, lamp flips once, DefRsp verifies; replay refused) |
+| 05-3474-23-3661-03 | implemented + verified | `hal-esp::CoordinatorApp::admit_grandchild` (Trust-Center admit + EUI map + route via parent, MAC latch untouched) + relayed-annce learning in `on_annce` (unknown short remembered + direct leg installed when uncovered) | `hal-esp/tests/grandchild_relay.rs::tc_admit_grandchild_installs_route_via_router` (route install, expiry, reinstall) |
+| 05-3474-23-3661-04 | implemented + verified | `hal-esp::CoordinatorApp::{next_hop, start_discovery, note_discovery_reply, install_route, authorize_discovery_retry, tick_routing}` over `RouteTable`/`DiscoveryTable` (single-flight, stray-reply refusal, expiry) + `hal-esp::RouterDevice::{start_discovery, note_discovery_reply, authorize_discovery_retry, tick_routing, should_suppress_request}` (already-seamed machine, now exercised for the relay path) | `hal-esp/tests/grandchild_relay.rs::{tc_discovery_session_resolves_to_route, router_relay_forwards_to_child_and_originates_discovery}` |
+
+## Uncovered-module traceability — ERL / Daily Schedule / Occupancy / Linky / Device-Type / Aliro / DRLC / Messaging (docs 17-05031-011, 17-05035-016, 07-5123-08, 15-0014-05, 17-05019-012, 23-02016-002, 26-42802-001)
+
+New `rounddance-zcl` modules (`uncovered::{erl,dailysched,occupancy,linky,devtype,aliro}` + `drlc` 0x0701 + `messaging` 0x0703) pin the previously zero-cited document models. 28 repo-minted IDs, MINTED-pending-confirm. Wording in code/tests is paraphrase only, never spec text (D1). Per-line anchors live in the module docs + `tests/uncovered_vectors.rs` (25 tests) and the `coverage_*` suites; the checker (`tools/coverage/check.py`) resolves them live.
+
+| Requirement ID | State | Implementing code | Verifying test |
+|----------------|-------|-------------------|----------------|
+| 17-05031-011-4-01 | implemented + verified | `zcl::uncovered::erl` ERL Interface device 0x0509 descriptor (identity, classification, revision rule) | `tests/uncovered_vectors.rs` erl legs |
+| 17-05031-011-4-02 | implemented + verified | `erl` mandatory server/client cluster set | `tests/uncovered_vectors.rs` erl legs |
+| 17-05031-011-4-03 | implemented + verified | `erl` required attribute rows | `tests/uncovered_vectors.rs` erl legs |
+| 17-05031-011-4-04 | implemented + verified | `erl` rx/tx command tables | `tests/uncovered_vectors.rs` erl legs |
+| 17-05031-011-4-05 | implemented + verified | `erl` endpoint conformance (`conforms`) | `tests/uncovered_vectors.rs` erl legs + fuzz leg |
+| 17-05031-011-4-06 | implemented + verified | `erl` revision-history rule (highest revision reported) | `tests/uncovered_vectors.rs` erl legs |
+| 17-05035-016-1015-01 | implemented + verified | `zcl::uncovered::dailysched` Daily Schedule cluster 0x070D definition (identity, revision) | `tests/uncovered_vectors.rs` schedule legs |
+| 17-05035-016-1015-02 | implemented + verified | `dailysched` codecs (PublishSchedule/DayProfile/Cancel/GetSchedule/GetDayProfile) | `tests/uncovered_vectors.rs` schedule legs |
+| 17-05035-016-1015-03 | implemented + verified | `dailysched` bounded store with supersession | `tests/uncovered_vectors.rs` schedule legs + day-boundary sim loop |
+| 17-05035-016-1015-04 | implemented + verified | `dailysched` server behavior + live-attribute refresh | `tests/uncovered_vectors.rs` schedule legs |
+| 17-05035-016-1015-05 | implemented + verified | `dailysched` client builders | `tests/uncovered_vectors.rs` schedule legs + fuzz legs |
+| 07-5123-08-48-01 | implemented + verified | `zcl::uncovered::occupancy` Occupancy Sensing cluster 0x0406 definition | `tests/uncovered_vectors.rs` occupancy legs |
+| 07-5123-08-48-02 | implemented + verified | `occupancy` attribute set | `tests/uncovered_vectors.rs` occupancy legs |
+| 07-5123-08-48-03 | implemented + verified | `occupancy` sensor-type/bitmap alignment table | `tests/uncovered_vectors.rs` occupancy legs |
+| 07-5123-08-48-04 | implemented + verified | `occupancy` motion-driven behavior | `tests/uncovered_vectors.rs` occupancy legs |
+| 07-5123-08-48-05 | implemented + verified | `occupancy` PIR hold timer | `tests/uncovered_vectors.rs` occupancy legs + fuzz leg |
+| 15-0014-05-13-01 | implemented + verified | `occupancy` lighting-profile alignment (lamps/controllers need unmodeled color/ballast/level clusters — deferred with cause) | `tests/uncovered_vectors.rs` occupancy legs |
+| 17-05019-012-104-01 | implemented + verified | `zcl::uncovered::linky` Linky metering extension (mode octet + disconnect-reason codecs) | `tests/uncovered_vectors.rs` linky legs |
+| 17-05019-012-104-02 | implemented + verified | `linky` 23-row attribute table + tier-count rule | `tests/uncovered_vectors.rs` linky legs |
+| 17-05019-012-104-03 | implemented + verified | `linky` day-maximum tracker | `tests/uncovered_vectors.rs` linky legs + fuzz leg |
+| 23-02016-002-14-01 | implemented + verified | `zcl::uncovered::devtype` device registry framework | `tests/uncovered_vectors.rs` devtype legs |
+| 23-02016-002-14-02 | implemented + verified | `devtype` Door Lock 0x000A descriptor tables | `tests/uncovered_vectors.rs` devtype legs |
+| 23-02016-002-14-03 | implemented + verified | `devtype` per-cluster behavior routing | `tests/uncovered_vectors.rs` devtype legs |
+| 23-02016-002-14-04 | implemented + verified | `devtype` Groups/Scenes conformance check | `tests/uncovered_vectors.rs` devtype legs |
+| 23-02016-002-14-05 | implemented + verified | `devtype` Door Lock conformance helper | `tests/uncovered_vectors.rs` devtype legs + fuzz leg |
+| 26-42802-001-11-01 | implemented + verified | `zcl::uncovered::aliro` Aliro Reader bridge (local 0xFC00, explicitly not a CSA assignment) | `tests/uncovered_vectors.rs` aliro legs |
+| 26-42802-001-11-02 | implemented + verified | `aliro` advertisement feature codec | `tests/uncovered_vectors.rs` aliro legs |
+| 26-42802-001-11-03 | implemented + verified | `aliro` event-attribute codec + reader-state behavior | `tests/uncovered_vectors.rs` aliro legs + fuzz leg |
+| 07-5123-08-103-01 | implemented + verified | `zcl::drlc` Demand Response and Load Control cluster 0x0701 (codecs, supersession table, client/server behaviors) | `tests/coverage_zcl_clusters.rs` (19 tests) |
+| 07-5123-08-105-01 | implemented + verified | `zcl::messaging` Messaging cluster 0x0703 (codecs, message box, server behavior) | `tests/coverage_se_clusters.rs` (14 tests) |
+
+## Coverage-closure wave index — per-line cite-or-disposition record
+
+Each doc below is closed to 100% triage: every extraction line is either cited by implementing code + test, or dispositioned with cause (N-A / deferred) in the annex. The annexes (under `docs/coverage/`) are the per-range record; the checker (`tools/coverage/check.py`) re-derives the live counts from source tags on every run, so this table cannot rot. Zero new requirement IDs in this section (index only).
+
+| Doc | Disposition | New tests (all green at merge) | Annex |
+|-----|-------------|-------------------------------|-------|
+| 05-3474-23 ch2/ch3 (APS/NWK) | 1365/1365 ranges: 41 directly pinned + 134 topic-pinned, 101 deferred (AIB/NIB stores, post-route command codecs, broadcast-tx, route-repair), 1089 N-A (boilerplate + other crates' shares) | `aps/tests/coverage_core_aps_codec.rs` (13), `nwk/tests/coverage_core_nwk_codec.rs` (11), `nwk/tests/coverage_core_routing.rs` (6), `mac-sap/tests/coverage_core_sap_surface.rs` (5), `sim/tests/coverage_core_aps_nwk_loop.rs` (4) | `docs/coverage/05-3474-23-ch2-ch3.md` |
+| 05-3474-23 ch4 (security) | 474/474 ranges: 41 test-closed, 305 N-A, 118 page furniture, 10 deferred (incl. no-new-primitives rule, caller-side `0xFFFFFFFF` reject, challenge state machine) | `security/tests/coverage_core_ch4_{counter_replay,aux_nonce,keyhierarchy}.rs` (24) | `docs/coverage/05-3474-23-ch4.md` |
+| 22-65816-030 (BDB) | 246/246 ranges: behavior pinned, N-A with owner for app/HAL timing+NVM+manufacturing, security-crate crypto, ZCL clusters, NWK/APS/MAC emission; 2 deferred (§9.9 MAY-level interview sequencing, §13 air sequencing + NVM wipe) | `commission/tests/coverage_bdb_formation_steering.rs` (31), `roles/tests/coverage_bdb_roles.rs` (15), `zdo/tests/coverage_bdb_zdo_tables.rs` (20) | `docs/coverage/22-65816-030.md` |
+| 05-3474-23 comm-adjacent | 154/154 cited-page ranges (descriptors, ZDP, mgmt, address conflicts, NLME join/leave) | same 66 BDB-wave tests | `docs/coverage/05-3474-23-comm.md` |
+| 07-5123-08 (ZCL) | engine + DRLC/Messaging closed from zero; ch15 appliance (2162 ranges) largest honest remainder | `zcl/tests/coverage_zcl_{engine,clusters}.rs` (41) + `uncovered_vectors.rs` (25) + `drlc.rs`/`messaging.rs` modules | `docs/coverage/07-5123-08.md` |
+| 07-5356-22 clusters | D.2 + D.5 zero→full vectors; D.6/D.7/D.9/D.10/D.11 deferred with pins | `zcl/tests/coverage_se_clusters.rs` (14) | `docs/coverage/07-5356-22-clusters.md` |
+| 26-42802-001 (Aliro) | page/clause granularity (no margin anchors in extraction — method limit recorded) | `zcl/tests/coverage_aliro_leftover.rs` (13) | `docs/coverage/26-42802-001.md` |
+| leftover clusters | ERL ≈67%, Daily ≈67%, Linky ≈3.1%, Device-Type ≈1.4%, Lighting ≈0.3% (lamps/controllers deferred — unmodeled color/ballast/level) | `uncovered_vectors.rs` remainder | `docs/coverage/leftover-clusters.md` |
+| 14-0563-19 (GP) | 893/893: 798 covered-by-test, 15 boilerplate N-A, 14 owned-scope (§A.2 → nwk/aps/zdo), 66 deferred lane (§A.4 → device-model lane) | `gp/tests/coverage_14-0563-19_{proxy_sink,commissioning_reply}.rs` (40) | `docs/coverage/14-0563-19.md` |
+| 20-27688-041 (Direct) | 363/363: 307 covered, 30 boilerplate, 8 arch N-A (radio-SDK ceiling), 14 owned-scope (classical commission), 4 descriptive | `direct/tests/coverage_20-27688-041_{gatt_session,commissioning}.rs` (23) | `docs/coverage/20-27688-041.md` |
+| policy + IoT-Sec | 60/60: IoT-Sec honestly mostly guidance-N-A by design | `compat/tests/coverage_policy_compat_iotsec.rs` (14) | `docs/coverage/policy-compat-iotsec.md` |

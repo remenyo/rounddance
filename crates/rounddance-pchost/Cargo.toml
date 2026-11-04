@@ -1,0 +1,27 @@
+[package]
+name = "rounddance-pchost"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "PC host runner: wall-clock RCP radio role + NCP half-host role over a serial UART (std-only host tool)"
+
+[[bin]]
+name = "rd-pchost"
+path = "src/main.rs"
+
+[dependencies]
+rounddance-mac-sap = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-mac-sap" }
+rounddance-rcp = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-rcp" }
+rounddance-hal-esp = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-hal-esp" }
+rounddance-commission = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-commission" }
+rounddance-nwk = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-nwk" }
+rounddance-aps = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-aps" }
+rounddance-security = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-security" }
+rounddance-zcl = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-zcl" }
+rounddance-zdo = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-zdo" }
+rounddance-roles = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-roles" }
+libc = "0.2"
+
+[dev-dependencies]
+libc = "0.2"

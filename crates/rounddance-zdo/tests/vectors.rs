@@ -35,7 +35,8 @@ fn vector_response_clusters_05_3474_23_244_02() {
     assert_eq!(response_cluster(CLUSTER_BIND_REQ), Some(0x8021));
     assert_eq!(response_cluster(CLUSTER_MGMT_NWK_UPDATE_REQ), Some(0x8038));
     assert_eq!(response_cluster(CLUSTER_DEVICE_ANNCE), None);
-    assert_eq!(response_cluster(0x0010), None);
+    assert_eq!(response_cluster(CLUSTER_COMPLEX_DESC_REQ), Some(0x8010));
+    assert_eq!(response_cluster(0x0007), None);
 }
 
 // 05-3474-23-24311-02: single NWK_addr_req.
@@ -715,4 +716,946 @@ fn vector_status_codes_05_3474_23_244_01() {
     // Unnamed values (e.g. NO_DESCRIPTOR until mined) survive.
     assert_eq!(ZdpStatus::from_code(0x8C), ZdpStatus::Unknown(0x8C));
     assert_eq!(ZdpStatus::Unknown(0x8C).code(), 0x8C);
+}
+
+// 05-3474-23-24330-01 + 05-3474-23-24330-02: discovery request then a
+// two-entry response page over the air shape.
+#[test]
+fn vector_mgmt_nwk_disc_05_3474_23_24330_01() {
+    let req = MgmtNwkDiscReq::decode(&[0x71, 0x00, 0x08, 0x00, 0x00, 0x05, 0x00]).unwrap();
+    assert_eq!(req.scan_channels, 0x0000_0800);
+    assert_eq!(req.scan_duration, 0x05);
+    assert_eq!(req.start_index, 0x00);
+    let mut out = [0u8; 8];
+    let n = req.encode_into(&mut out).unwrap();
+    assert_eq!(&out[..n], &[0x71, 0x00, 0x08, 0x00, 0x00, 0x05, 0x00]);
+    assert_eq!(MgmtNwkDiscReq::decode(&[0x71]), Err(ZdoError::Truncated));
+
+    let rsp = MgmtNwkDiscRsp {
+        tsn: 0x71,
+        status: ZdpStatus::Success,
+        network_count: 2,
+        start_index: 0,
+        entries: [
+            NetworkEntry {
+                ext_pan: 0x0102_0304_0506_0708,
+                pan: 0x1A62,
+                channel: 15,
+                stack_profile: 2,
+                version: 1,
+                permit_joining: true,
+            },
+            NetworkEntry {
+                ext_pan: 0x1112_1314_1516_1718,
+                pan: 0x3761,
+                channel: 25,
+                stack_profile: 2,
+                version: 1,
+                permit_joining: false,
+            },
+            NetworkEntry {
+                ext_pan: 0,
+                pan: 0,
+                channel: 0,
+                stack_profile: 0,
+                version: 0,
+                permit_joining: false,
+            },
+            NetworkEntry {
+                ext_pan: 0,
+                pan: 0,
+                channel: 0,
+                stack_profile: 0,
+                version: 0,
+                permit_joining: false,
+            },
+        ],
+        entry_len: 2,
+    };
+    let mut rbuf = [0u8; 64];
+    let rn = rsp.encode_into(&mut rbuf).unwrap();
+    let back = MgmtNwkDiscRsp::decode(&rbuf[..rn]).unwrap();
+    assert_eq!(back, rsp);
+    assert_eq!(back.entry_list().len(), 2);
+    assert!(back.entry_list()[0].permit_joining);
+    // Over-budget page and truncation are refused, never truncated.
+    let mut over = rsp;
+    over.entry_len = 5;
+    assert_eq!(over.encode_into(&mut rbuf), Err(ZdoError::TooManyEntries));
+    assert_eq!(MgmtNwkDiscRsp::decode(&rbuf[..4]), Err(ZdoError::Truncated));
+    // Error responses carry no list.
+    let err = MgmtNwkDiscRsp::decode(&[0x71, 0x81, 0x00, 0x00, 0x00]).unwrap();
+    assert_eq!(err.status, ZdpStatus::DeviceNotFound);
+    assert_eq!(err.entry_len, 0);
+}
+
+// 05-3474-23-24332-03 + 05-3474-23-24332-04: routing-table page.
+#[test]
+fn vector_mgmt_rtg_05_3474_23_24332_03() {
+    let req = MgmtRtgReq::decode(&[0x72, 0x00]).unwrap();
+    assert_eq!(req.start_index, 0x00);
+    let mut out = [0u8; 4];
+    let n = req.encode_into(&mut out).unwrap();
+    assert_eq!(&out[..n], &[0x72, 0x00]);
+    assert_eq!(MgmtRtgReq::decode(&[0x72]), Err(ZdoError::Truncated));
+
+    let rsp = MgmtRtgRsp {
+        tsn: 0x72,
+        status: ZdpStatus::Success,
+        table_size: 3,
+        start_index: 0,
+        entries: [
+            RtgEntry {
+                dest: 0x0000,
+                status: 0,
+                next_hop: 0x0000,
+            },
+            RtgEntry {
+                dest: 0x0001,
+                status: 0,
+                next_hop: 0x0004,
+            },
+            RtgEntry {
+                dest: 0x0005,
+                status: 1,
+                next_hop: 0x0004,
+            },
+            RtgEntry {
+                dest: 0,
+                status: 0,
+                next_hop: 0,
+            },
+            RtgEntry {
+                dest: 0,
+                status: 0,
+                next_hop: 0,
+            },
+            RtgEntry {
+                dest: 0,
+                status: 0,
+                next_hop: 0,
+            },
+            RtgEntry {
+                dest: 0,
+                status: 0,
+                next_hop: 0,
+            },
+            RtgEntry {
+                dest: 0,
+                status: 0,
+                next_hop: 0,
+            },
+        ],
+        entry_len: 3,
+    };
+    let mut rbuf = [0u8; 64];
+    let rn = rsp.encode_into(&mut rbuf).unwrap();
+    let back = MgmtRtgRsp::decode(&rbuf[..rn]).unwrap();
+    assert_eq!(back, rsp);
+    assert_eq!(back.entry_list()[1].next_hop, 0x0004);
+    // Reserved route states are refused on both paths.
+    assert_eq!(
+        RtgEntry::decode(&[0x00, 0x00, 0x03, 0x00, 0x00]),
+        Err(ZdoError::InvalidValue(0x03))
+    );
+    assert_eq!(
+        RtgEntry {
+            dest: 0,
+            status: 9,
+            next_hop: 0
+        }
+        .encode_into(&mut out),
+        Err(ZdoError::InvalidValue(9))
+    );
+    let mut over = rsp;
+    over.entry_len = 9;
+    assert_eq!(over.encode_into(&mut rbuf), Err(ZdoError::TooManyEntries));
+    let err = MgmtRtgRsp::decode(&[0x72, 0x84, 0x00, 0x00, 0x00]).unwrap();
+    assert_eq!(err.status, ZdpStatus::NotSupported);
+}
+
+// 05-3474-23-24333-01 + 05-3474-23-24333-02: binding-table page with
+// group and extended entries.
+#[test]
+fn vector_mgmt_bind_05_3474_23_24333_01() {
+    let req = MgmtBindReq::decode(&[0x73, 0x00]).unwrap();
+    assert_eq!(req.start_index, 0x00);
+    let mut out = [0u8; 4];
+    let n = req.encode_into(&mut out).unwrap();
+    assert_eq!(&out[..n], &[0x73, 0x00]);
+    assert_eq!(MgmtBindReq::decode(&[0x73]), Err(ZdoError::Truncated));
+
+    let group = MgmtBindEntry {
+        src_ieee: 0x1122_3344_5566_7788,
+        src_endpoint: 0x01,
+        cluster_id: 0x0006,
+        dst: crate::BindDstMode::Group { group_addr: 0x0001 },
+    };
+    let ext = MgmtBindEntry {
+        src_ieee: 0x0102_0304_0506_0708,
+        src_endpoint: 0x02,
+        cluster_id: 0x0008,
+        dst: crate::BindDstMode::Extended {
+            dst_ieee: 0x1112_1314_1516_1718,
+            dst_endpoint: 0x03,
+        },
+    };
+    let rsp = MgmtBindRsp {
+        tsn: 0x73,
+        status: ZdpStatus::Success,
+        table_size: 2,
+        start_index: 0,
+        entries: [
+            group,
+            ext,
+            MgmtBindEntry {
+                src_ieee: 0,
+                src_endpoint: 0,
+                cluster_id: 0,
+                dst: crate::BindDstMode::Group { group_addr: 0 },
+            },
+            MgmtBindEntry {
+                src_ieee: 0,
+                src_endpoint: 0,
+                cluster_id: 0,
+                dst: crate::BindDstMode::Group { group_addr: 0 },
+            },
+        ],
+        entry_len: 2,
+    };
+    let mut rbuf = [0u8; 96];
+    let rn = rsp.encode_into(&mut rbuf).unwrap();
+    let back = MgmtBindRsp::decode(&rbuf[..rn]).unwrap();
+    assert_eq!(back, rsp);
+    assert_eq!(back.entry_list().len(), 2);
+    assert_eq!(back.entry_list()[0], group);
+    // Bogus destination modes are refused, not misread.
+    let mut bad = [0u8; 16];
+    bad[..11].copy_from_slice(&[
+        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x01, 0x06, 0x00,
+    ]);
+    bad[11] = 0x02;
+    assert_eq!(
+        MgmtBindEntry::decode(&bad),
+        Err(ZdoError::InvalidValue(0x02))
+    );
+    let mut over = rsp;
+    over.entry_len = 5;
+    assert_eq!(over.encode_into(&mut rbuf), Err(ZdoError::TooManyEntries));
+    let err = MgmtBindRsp::decode(&[0x73, 0x8A, 0x00, 0x00, 0x00]).unwrap();
+    assert_eq!(err.status, ZdpStatus::NoTableSpace);
+}
+
+// New management clusters pair with 0x8000 responses like the rest.
+#[test]
+fn vector_mgmt_new_clusters_05_3474_23_244_02() {
+    assert_eq!(CLUSTER_MGMT_NWK_DISC_REQ, 0x0030);
+    assert_eq!(CLUSTER_MGMT_RTG_REQ, 0x0032);
+    assert_eq!(CLUSTER_MGMT_BIND_REQ, 0x0033);
+    assert_eq!(response_cluster(CLUSTER_MGMT_NWK_DISC_REQ), Some(0x8030));
+    assert_eq!(response_cluster(CLUSTER_MGMT_RTG_REQ), Some(0x8032));
+    assert_eq!(response_cluster(CLUSTER_MGMT_BIND_REQ), Some(0x8033));
+}
+
+// 05-3474-23-24316-01..03: Parent_annce names joined children and
+// the unicast Parent_annce_rsp echoes them back.
+#[test]
+fn vector_parent_annce_05_3474_23_24316_01() {
+    assert_eq!(CLUSTER_PARENT_ANNCE, 0x001F);
+    assert_eq!(response_cluster(CLUSTER_PARENT_ANNCE), Some(0x801F));
+    assert!(transaction_expected(CLUSTER_PARENT_ANNCE));
+    let wire: &[u8] = &[
+        0x74, 0x02, // tsn, 2 children
+        0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 0x05, 0x00, 0x08, 0x07, 0x06, 0x05, 0x04,
+        0x03, 0x02, 0x01, 0x06, 0x00,
+    ];
+    let ann = ParentAnnce::decode(wire).unwrap();
+    assert_eq!(ann.tsn, 0x74);
+    assert_eq!(ann.child_list().len(), 2);
+    assert_eq!(ann.child_list()[0].child_ieee, 0x1122_3344_5566_7788);
+    assert_eq!(ann.child_list()[0].child_nwk, 0x0005);
+    assert_eq!(ann.child_list()[1].child_ieee, 0x0102_0304_0506_0708);
+    let mut out = [0u8; 32];
+    let n = ann.encode_into(&mut out).unwrap();
+    assert_eq!(&out[..n], wire);
+    assert_eq!(ParentAnnce::decode(&wire[..11]), Err(ZdoError::Truncated));
+    assert_eq!(
+        ann.encode_into(&mut out[..11]),
+        Err(ZdoError::BufferTooSmall)
+    );
+    let mut over = ann;
+    over.child_len = 5;
+    assert_eq!(over.encode_into(&mut out), Err(ZdoError::TooManyEntries));
+
+    let rsp_wire: &[u8] = &[
+        0x74, 0x00, 0x01, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 0x05, 0x00,
+    ];
+    let rsp = ParentAnnceRsp::decode(rsp_wire).unwrap();
+    assert!(rsp.status.is_success());
+    assert_eq!(rsp.child_list().len(), 1);
+    assert_eq!(rsp.child_list()[0].child_nwk, 0x0005);
+    let mut rout = [0u8; 32];
+    let rn = rsp.encode_into(&mut rout).unwrap();
+    assert_eq!(&rout[..rn], rsp_wire);
+    let err = ParentAnnceRsp::decode(&[0x74, 0x81, 0x00]).unwrap();
+    assert_eq!(err.status, ZdpStatus::DeviceNotFound);
+    assert_eq!(err.child_len, 0);
+}
+
+// 05-3474-23-24320-01 + 05-3474-23-24320-02: end-device bind pairing
+// with input and output cluster lists.
+#[test]
+fn vector_end_device_bind_05_3474_23_24320_01() {
+    assert_eq!(CLUSTER_END_DEVICE_BIND_REQ, 0x0020);
+    assert_eq!(response_cluster(CLUSTER_END_DEVICE_BIND_REQ), Some(0x8020));
+    assert!(transaction_expected(CLUSTER_END_DEVICE_BIND_REQ));
+    let wire: &[u8] = &[
+        0x74, 0xFD, 0xFF, // tsn, binding target 0xFFFD
+        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, // src ieee
+        0x01, 0x04, 0x01, // src ep, profile 0x0104
+        0x02, 0x00, 0x00, 0x06, 0x00, // 2 in-clusters: 0x0000, 0x0006
+        0x01, 0x08, 0x00, // 1 out-cluster: 0x0008
+    ];
+    let req = EndDeviceBindReq::decode(wire).unwrap();
+    assert_eq!(req.binding_target, 0xFFFD);
+    assert_eq!(req.src_ieee, 0x0807_0605_0403_0201);
+    assert_eq!(req.in_list(), &[0x0000, 0x0006]);
+    assert_eq!(req.out_list(), &[0x0008]);
+    let mut out = [0u8; 32];
+    let n = req.encode_into(&mut out).unwrap();
+    assert_eq!(&out[..n], wire);
+    // Over-budget lists and truncation are refused, never truncated.
+    let mut over = req;
+    over.in_len = 9;
+    assert_eq!(over.encode_into(&mut out), Err(ZdoError::TooManyEntries));
+    assert_eq!(
+        EndDeviceBindReq::decode(&wire[..15]),
+        Err(ZdoError::Truncated)
+    );
+    let mut bad_count = wire.to_vec();
+    bad_count[14] = 9;
+    assert_eq!(
+        EndDeviceBindReq::decode(&bad_count),
+        Err(ZdoError::TooManyEntries)
+    );
+    let rsp = EndDeviceBindRsp::decode(&[0x74, 0x00]).unwrap();
+    assert!(rsp.status.is_success());
+    let mut rout = [0u8; 4];
+    assert_eq!(rsp.encode_into(&mut rout).unwrap(), 2);
+    assert_eq!(&rout[..2], &[0x74, 0x00]);
+}
+
+// 05-3474-23-24317-01 + 05-3474-23-24317-02: complex-descriptor page
+// with two tag-length-value fields.
+#[test]
+fn vector_complex_desc_05_3474_23_24317_01() {
+    assert_eq!(CLUSTER_COMPLEX_DESC_REQ, 0x0010);
+    assert_eq!(response_cluster(CLUSTER_COMPLEX_DESC_REQ), Some(0x8010));
+    assert!(transaction_expected(CLUSTER_COMPLEX_DESC_REQ));
+    let req = ComplexDescReq::decode(&[0x75, 0x34, 0x12]).unwrap();
+    assert_eq!(req.nwk_of_interest, 0x1234);
+    let mut out = [0u8; 4];
+    assert_eq!(req.encode_into(&mut out).unwrap(), 3);
+    assert_eq!(&out[..3], &[0x75, 0x34, 0x12]);
+    assert_eq!(
+        ComplexDescReq::decode(&[0x75, 0x34]),
+        Err(ZdoError::Truncated)
+    );
+
+    let rsp = ComplexDescRsp {
+        tsn: 0x75,
+        status: ZdpStatus::Success,
+        nwk_of_interest: 0x1234,
+        fields: [
+            ComplexField {
+                tag: 0x01,
+                body: {
+                    let mut b = [0u8; MAX_COMPLEX_FIELD_LEN];
+                    b[0] = 0xAA;
+                    b[1] = 0xBB;
+                    b
+                },
+                len: 2,
+            },
+            ComplexField {
+                tag: 0x02,
+                body: {
+                    let mut b = [0u8; MAX_COMPLEX_FIELD_LEN];
+                    b[0] = 0xCC;
+                    b
+                },
+                len: 1,
+            },
+            ComplexField {
+                tag: 0,
+                body: [0; MAX_COMPLEX_FIELD_LEN],
+                len: 0,
+            },
+            ComplexField {
+                tag: 0,
+                body: [0; MAX_COMPLEX_FIELD_LEN],
+                len: 0,
+            },
+        ],
+        field_len: 2,
+    };
+    let mut rbuf = [0u8; 64];
+    let rn = rsp.encode_into(&mut rbuf).unwrap();
+    let back = ComplexDescRsp::decode(&rbuf[..rn]).unwrap();
+    assert_eq!(back, rsp);
+    assert_eq!(back.field_list().len(), 2);
+    assert_eq!(back.field_list()[0].tag, 0x01);
+    // Over-budget pages and truncation are refused, never truncated.
+    let mut over = rsp;
+    over.field_len = 5;
+    assert_eq!(over.encode_into(&mut rbuf), Err(ZdoError::TooManyEntries));
+    assert_eq!(ComplexDescRsp::decode(&rbuf[..4]), Err(ZdoError::Truncated));
+    let err = ComplexDescRsp::decode(&[0x75, 0x84, 0x34, 0x12, 0x00]).unwrap();
+    assert_eq!(err.status, ZdpStatus::NotSupported);
+    assert_eq!(err.field_len, 0);
+}
+
+// 05-3474-23-24318-01 + 05-3474-23-24318-02: user label roundtrip.
+#[test]
+fn vector_user_desc_05_3474_23_24318_01() {
+    assert_eq!(CLUSTER_USER_DESC_REQ, 0x0011);
+    assert_eq!(response_cluster(CLUSTER_USER_DESC_REQ), Some(0x8011));
+    assert!(transaction_expected(CLUSTER_USER_DESC_REQ));
+    let req = UserDescReq::decode(&[0x76, 0x78, 0x56]).unwrap();
+    assert_eq!(req.nwk_of_interest, 0x5678);
+    let mut out = [0u8; 4];
+    assert_eq!(req.encode_into(&mut out).unwrap(), 3);
+    assert_eq!(&out[..3], &[0x76, 0x78, 0x56]);
+
+    let mut label = [0u8; MAX_USER_DESC_LEN];
+    label[..5].copy_from_slice(b"lamp1");
+    let rsp = UserDescRsp {
+        tsn: 0x76,
+        status: ZdpStatus::Success,
+        nwk_of_interest: 0x5678,
+        label,
+        label_len: 5,
+    };
+    let mut rbuf = [0u8; 32];
+    let rn = rsp.encode_into(&mut rbuf).unwrap();
+    let back = UserDescRsp::decode(&rbuf[..rn]).unwrap();
+    assert_eq!(back, rsp);
+    assert_eq!(back.label_bytes(), b"lamp1");
+    // Over-long labels are refused on encode; short reads on decode.
+    let mut over = rsp;
+    over.label_len = 17;
+    assert_eq!(over.encode_into(&mut rbuf), Err(ZdoError::TooManyEntries));
+    assert_eq!(UserDescRsp::decode(&rbuf[..7]), Err(ZdoError::Truncated));
+    let err = UserDescRsp::decode(&[0x76, 0x81, 0x78, 0x56, 0x00]).unwrap();
+    assert_eq!(err.status, ZdpStatus::DeviceNotFound);
+}
+
+// 05-3474-23-24336-01 + 05-3474-23-24336-02: direct-join admission of
+// one designated device.
+#[test]
+fn vector_mgmt_direct_join_05_3474_23_24336_01() {
+    assert_eq!(CLUSTER_MGMT_DIRECT_JOIN_REQ, 0x0035);
+    assert_eq!(response_cluster(CLUSTER_MGMT_DIRECT_JOIN_REQ), Some(0x8035));
+    assert!(transaction_expected(CLUSTER_MGMT_DIRECT_JOIN_REQ));
+    let wire: &[u8] = &[0x77, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x8E];
+    let req = MgmtDirectJoinReq::decode(wire).unwrap();
+    assert_eq!(req.device_ieee, 0x0807_0605_0403_0201);
+    assert_eq!(req.capability, 0x8E);
+    let mut out = [0u8; 12];
+    let n = req.encode_into(&mut out).unwrap();
+    assert_eq!(&out[..n], wire);
+    assert_eq!(
+        MgmtDirectJoinReq::decode(&wire[..9]),
+        Err(ZdoError::Truncated)
+    );
+    let rsp = MgmtDirectJoinRsp::decode(&[0x77, 0x00]).unwrap();
+    assert!(rsp.status.is_success());
+    let mut rout = [0u8; 4];
+    assert_eq!(rsp.encode_into(&mut rout).unwrap(), 2);
+    assert_eq!(&rout[..2], &[0x77, 0x00]);
+}
+
+// Deprecated-but-recognized clusters: IDs + response pairing stay
+// wired for 3.0-compat (R23.2 heading-only entries carry no wire
+// codec in this layer).
+#[test]
+fn vector_deprecated_cluster_pairing_05_3474_23_244_02() {
+    assert_eq!(CLUSTER_DISCOVERY_CACHE_REQ, 0x0012);
+    assert_eq!(CLUSTER_USER_DESC_SET_REQ, 0x0014);
+    assert_eq!(CLUSTER_DISCOVERY_STORE_REQ, 0x0016);
+    assert_eq!(CLUSTER_NODE_DESC_STORE_REQ, 0x0017);
+    assert_eq!(CLUSTER_BIND_REGISTER_REQ, 0x0023);
+    assert_eq!(CLUSTER_REPLACE_DEVICE_REQ, 0x0024);
+    assert_eq!(CLUSTER_STORE_BAK_BIND_ENTRY_REQ, 0x0025);
+    assert_eq!(CLUSTER_REMOVE_BAK_BIND_ENTRY_REQ, 0x0026);
+    assert_eq!(CLUSTER_BACKUP_BIND_TABLE_REQ, 0x0027);
+    assert_eq!(CLUSTER_RECOVER_BIND_TABLE_REQ, 0x0028);
+    assert_eq!(CLUSTER_MGMT_CACHE_REQ, 0x0037);
+    for req in [
+        CLUSTER_DISCOVERY_CACHE_REQ,
+        CLUSTER_USER_DESC_SET_REQ,
+        CLUSTER_BIND_REGISTER_REQ,
+        CLUSTER_REPLACE_DEVICE_REQ,
+        CLUSTER_STORE_BAK_BIND_ENTRY_REQ,
+        CLUSTER_REMOVE_BAK_BIND_ENTRY_REQ,
+        CLUSTER_BACKUP_BIND_TABLE_REQ,
+        CLUSTER_RECOVER_BIND_TABLE_REQ,
+        CLUSTER_DISCOVERY_STORE_REQ,
+        CLUSTER_NODE_DESC_STORE_REQ,
+        CLUSTER_MGMT_CACHE_REQ,
+    ] {
+        assert_eq!(response_cluster(req), Some(req | RESPONSE_BIT));
+        assert!(transaction_expected(req));
+    }
+}
+
+// 05-3474-23-24338-01 + 05-3474-23-24338-02: discovery-cache table
+// page (DEPRECATED in R23.2 §2.4.3.3.8 heading-only; paged shape
+// retained for 3.0-compat).
+#[test]
+fn vector_mgmt_cache_05_3474_23_24338_01() {
+    assert_eq!(response_cluster(CLUSTER_MGMT_CACHE_REQ), Some(0x8037));
+    let req = MgmtCacheReq::decode(&[0x77, 0x00]).unwrap();
+    assert_eq!(req.start_index, 0x00);
+    let mut out = [0u8; 4];
+    assert_eq!(req.encode_into(&mut out).unwrap(), 2);
+    assert_eq!(MgmtCacheReq::decode(&[0x77]), Err(ZdoError::Truncated));
+
+    let rsp = MgmtCacheRsp {
+        tsn: 0x77,
+        status: ZdpStatus::Success,
+        table_size: 2,
+        start_index: 0,
+        entries: [
+            CacheEntry {
+                ieee: 0x1122_3344_5566_7788,
+                nwk: 0x0005,
+            },
+            CacheEntry {
+                ieee: 0x0102_0304_0506_0708,
+                nwk: 0x0006,
+            },
+            CacheEntry { ieee: 0, nwk: 0 },
+            CacheEntry { ieee: 0, nwk: 0 },
+        ],
+        entry_len: 2,
+    };
+    let mut rbuf = [0u8; 64];
+    let rn = rsp.encode_into(&mut rbuf).unwrap();
+    let back = MgmtCacheRsp::decode(&rbuf[..rn]).unwrap();
+    assert_eq!(back, rsp);
+    assert_eq!(back.entry_list()[1].nwk, 0x0006);
+    let mut over = rsp;
+    over.entry_len = 5;
+    assert_eq!(over.encode_into(&mut rbuf), Err(ZdoError::TooManyEntries));
+    assert_eq!(MgmtCacheRsp::decode(&rbuf[..4]), Err(ZdoError::Truncated));
+    let err = MgmtCacheRsp::decode(&[0x77, 0x89, 0x00, 0x00, 0x00]).unwrap();
+    assert_eq!(err.status, ZdpStatus::NoMemory);
+}
+
+// 05-3474-23-24315-01 + 05-3474-23-24315-02: system-server discovery
+// by 16-bit server mask, response echoes the responder's mask.
+#[test]
+fn vector_system_server_discovery_05_3474_23_24315_01() {
+    assert_eq!(CLUSTER_SYSTEM_SERVER_DISCOVERY_REQ, 0x0015);
+    assert_eq!(
+        response_cluster(CLUSTER_SYSTEM_SERVER_DISCOVERY_REQ),
+        Some(0x8015)
+    );
+    assert!(transaction_expected(CLUSTER_SYSTEM_SERVER_DISCOVERY_REQ));
+    let req = SystemServerDiscoveryReq::decode(&[0x78, 0x01, 0x00]).unwrap();
+    assert_eq!(req.server_mask, 0x0001);
+    let mut out = [0u8; 4];
+    assert_eq!(req.encode_into(&mut out).unwrap(), 3);
+    assert_eq!(&out[..3], &[0x78, 0x01, 0x00]);
+    assert_eq!(
+        SystemServerDiscoveryReq::decode(&[0x78, 0x01]),
+        Err(ZdoError::Truncated)
+    );
+    let rsp = SystemServerDiscoveryRsp::decode(&[0x78, 0x00, 0x01, 0x00]).unwrap();
+    assert!(rsp.status.is_success());
+    assert_eq!(rsp.server_mask, 0x0001);
+    let mut rout = [0u8; 8];
+    let rn = rsp.encode_into(&mut rout).unwrap();
+    assert_eq!(rn, 4);
+    assert_eq!(&rout[..rn], &[0x78, 0x00, 0x01, 0x00]);
+    assert_eq!(
+        SystemServerDiscoveryRsp::decode(&[0x78, 0x00, 0x01]),
+        Err(ZdoError::Truncated)
+    );
+    let err = SystemServerDiscoveryRsp::decode(&[0x78, 0x85, 0x00, 0x00]).unwrap();
+    assert_eq!(err.status, ZdpStatus::Timeout);
+}
+
+// 05-3474-23-2432C-01 + 05-3474-23-2432C-02: clear-bindings with a
+// two-address EUI64 TLV, then the status-only response.
+#[test]
+fn vector_clear_all_bindings_05_3474_23_2432c_01() {
+    assert_eq!(CLUSTER_CLEAR_ALL_BINDINGS_REQ, 0x002B);
+    assert_eq!(
+        response_cluster(CLUSTER_CLEAR_ALL_BINDINGS_REQ),
+        Some(0x802B)
+    );
+    assert!(transaction_expected(CLUSTER_CLEAR_ALL_BINDINGS_REQ));
+    let wire: &[u8] = &[
+        0x78, 0x02, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x11, 0x12, 0x13, 0x14, 0x15,
+        0x16, 0x17, 0x18,
+    ];
+    let req = ClearAllBindingsReq::decode(wire).unwrap();
+    assert_eq!(
+        req.ieee_list(),
+        &[0x0807_0605_0403_0201, 0x1817_1615_1413_1211]
+    );
+    let mut out = [0u8; 32];
+    let n = req.encode_into(&mut out).unwrap();
+    assert_eq!(&out[..n], wire);
+    // Over-long lists and truncation are refused, never truncated.
+    let mut over = req;
+    over.ieee_len = 9;
+    assert_eq!(over.encode_into(&mut out), Err(ZdoError::TooManyEntries));
+    assert_eq!(
+        ClearAllBindingsReq::decode(&wire[..10]),
+        Err(ZdoError::Truncated)
+    );
+    assert_eq!(
+        ClearAllBindingsReq::decode(&wire[..1]),
+        Err(ZdoError::Truncated)
+    );
+    // Response carries the Table 2-99 outcome set.
+    let rsp = ClearAllBindingsRsp::decode(&[0x78, 0x8B]).unwrap();
+    assert_eq!(rsp.status, ZdpStatus::NotPermitted);
+    let rsp2 = ClearAllBindingsRsp::decode(&[0x78, 0x00]).unwrap();
+    assert!(rsp2.status.is_success());
+    let mut rout = [0u8; 4];
+    assert_eq!(rsp2.encode_into(&mut rout).unwrap(), 2);
+    assert_eq!(&rout[..2], &[0x78, 0x00]);
+}
+
+// 05-3474-23-2433A-01 + 05-3474-23-2433A-02: joining allow-list page
+// with two long addresses, plus the empty-list and error shapes.
+#[test]
+fn vector_mgmt_nwk_ieee_joining_list_05_3474_23_2433a_01() {
+    assert_eq!(CLUSTER_MGMT_NWK_IEEE_JOINING_LIST_REQ, 0x003A);
+    assert_eq!(
+        response_cluster(CLUSTER_MGMT_NWK_IEEE_JOINING_LIST_REQ),
+        Some(0x803A)
+    );
+    assert!(transaction_expected(CLUSTER_MGMT_NWK_IEEE_JOINING_LIST_REQ));
+    assert_eq!(JoiningPolicy::decode(0x00), Ok(JoiningPolicy::AllJoin));
+    assert_eq!(JoiningPolicy::decode(0x01), Ok(JoiningPolicy::IeelistJoin));
+    assert_eq!(JoiningPolicy::decode(0x02), Ok(JoiningPolicy::NoJoin));
+    assert_eq!(
+        JoiningPolicy::decode(0x03),
+        Err(ZdoError::InvalidValue(0x03))
+    );
+    let req = MgmtNwkIeeeJoiningListReq::decode(&[0x79, 0x00]).unwrap();
+    assert_eq!(req.start_index, 0x00);
+    let rsp = MgmtNwkIeeeJoiningListRsp {
+        tsn: 0x79,
+        status: ZdpStatus::Success,
+        update_id: 0x04,
+        policy: JoiningPolicy::IeelistJoin,
+        total: 2,
+        start_index: 0,
+        entries: [
+            0x1122_3344_5566_7788,
+            0x0102_0304_0506_0708,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ],
+        entry_len: 2,
+    };
+    let mut rbuf = [0u8; 64];
+    let rn = rsp.encode_into(&mut rbuf).unwrap();
+    let back = MgmtNwkIeeeJoiningListRsp::decode(&rbuf[..rn]).unwrap();
+    assert_eq!(back, rsp);
+    assert_eq!(back.entry_list().len(), 2);
+    assert_eq!(back.policy.code(), 0x01);
+    // Empty list omits the page; errors omit everything but status.
+    let empty = MgmtNwkIeeeJoiningListRsp {
+        tsn: 0x79,
+        status: ZdpStatus::Success,
+        update_id: 0x05,
+        policy: JoiningPolicy::NoJoin,
+        total: 0,
+        start_index: 0,
+        entries: [0; MAX_JOINING_IEEE],
+        entry_len: 0,
+    };
+    let mut ebuf = [0u8; 16];
+    let en = empty.encode_into(&mut ebuf).unwrap();
+    assert_eq!(en, 5);
+    assert_eq!(
+        MgmtNwkIeeeJoiningListRsp::decode(&ebuf[..en]).unwrap(),
+        empty
+    );
+    let err =
+        MgmtNwkIeeeJoiningListRsp::decode(&[0x79, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00]).unwrap();
+    assert_eq!(err.status, ZdpStatus::NotSupported);
+    assert_eq!(err.entry_len, 0);
+    // Over-budget pages and truncation are refused.
+    let mut over = rsp;
+    over.entry_len = 9;
+    assert_eq!(over.encode_into(&mut rbuf), Err(ZdoError::TooManyEntries));
+    assert_eq!(
+        MgmtNwkIeeeJoiningListRsp::decode(&rbuf[..6]),
+        Err(ZdoError::Truncated)
+    );
+}
+
+// Deprecated source-bind family + newer mgmt clusters pair by the
+// high bit; Enhanced_Update and Beacon_Survey have ID + pairing only
+// (ChannelList/TLV codecs are follow-ups).
+#[test]
+fn vector_mgmt_newer_clusters_05_3474_23_244_02() {
+    assert_eq!(CLUSTER_BACKUP_SOURCE_BIND_REQ, 0x0029);
+    assert_eq!(CLUSTER_RECOVER_SOURCE_BIND_REQ, 0x002A);
+    assert_eq!(CLUSTER_MGMT_NWK_ENHANCED_UPDATE_REQ, 0x0039);
+    assert_eq!(CLUSTER_MGMT_NWK_BEACON_SURVEY_REQ, 0x003C);
+    for req in [
+        CLUSTER_BACKUP_SOURCE_BIND_REQ,
+        CLUSTER_RECOVER_SOURCE_BIND_REQ,
+        CLUSTER_CLEAR_ALL_BINDINGS_REQ,
+        CLUSTER_MGMT_NWK_ENHANCED_UPDATE_REQ,
+        CLUSTER_MGMT_NWK_IEEE_JOINING_LIST_REQ,
+        CLUSTER_MGMT_NWK_BEACON_SURVEY_REQ,
+    ] {
+        assert_eq!(response_cluster(req), Some(req | RESPONSE_BIT));
+        assert!(transaction_expected(req));
+    }
+}
+
+// 05-3474-23-3210-01: channel list with two page masks, LE packing
+// (top 5 bits page, low 27 bits channels).
+#[test]
+fn vector_channel_list_05_3474_23_3210_01() {
+    let list = ChannelList {
+        pages: [
+            ChannelPageMask::make(0, 0x07FF_F800),
+            ChannelPageMask::make(28, 0x0000_0001),
+            ChannelPageMask(0),
+            ChannelPageMask(0),
+        ],
+        page_len: 2,
+    };
+    assert_eq!(list.pages[0].split(), (0, 0x07FF_F800));
+    assert_eq!(list.pages[1].split(), (28, 0x0000_0001));
+    let mut buf = [0u8; 16];
+    let n = list.encode_into(&mut buf).unwrap();
+    assert_eq!(n, 9);
+    assert_eq!(buf[0], 2);
+    assert_eq!(
+        u32::from_le_bytes([buf[1], buf[2], buf[3], buf[4]]),
+        0x07FF_F800
+    );
+    assert_eq!(
+        u32::from_le_bytes([buf[5], buf[6], buf[7], buf[8]]),
+        (28 << 27) | 1
+    );
+    let (back, used) = ChannelList::decode(&buf[..n]).unwrap();
+    assert_eq!(back, list);
+    assert_eq!(used, n);
+    assert_eq!(ChannelList::decode(&[]), Err(ZdoError::Truncated));
+    let mut over = list;
+    over.page_len = 5;
+    assert_eq!(over.encode_into(&mut buf), Err(ZdoError::TooManyEntries));
+}
+
+// 05-3474-23-243310-01 + 05-3474-23-243310-02: enhanced update across
+// all three duration classes, plus the scan-outcome notify.
+#[test]
+fn vector_mgmt_nwk_enhanced_update_05_3474_23_243310_01() {
+    assert_eq!(CLUSTER_MGMT_NWK_ENHANCED_UPDATE_REQ, 0x0039);
+    assert_eq!(
+        response_cluster(CLUSTER_MGMT_NWK_ENHANCED_UPDATE_REQ),
+        Some(0x8039)
+    );
+    assert!(transaction_expected(CLUSTER_MGMT_NWK_ENHANCED_UPDATE_REQ));
+    // Energy-scan request: channel list + duration + scan count.
+    let req = MgmtNwkEnhancedUpdateReq {
+        tsn: 0x7A,
+        channels: ChannelList {
+            pages: [
+                ChannelPageMask::make(0, 0x07FF_F800),
+                ChannelPageMask(0),
+                ChannelPageMask(0),
+                ChannelPageMask(0),
+            ],
+            page_len: 1,
+        },
+        scan_duration: 0x03,
+        scan_count: Some(2),
+        nwk_update_id: None,
+    };
+    let mut buf = [0u8; 16];
+    let n = req.encode_into(&mut buf).unwrap();
+    let back = MgmtNwkEnhancedUpdateReq::decode(&buf[..n]).unwrap();
+    assert_eq!(back, req);
+    assert_eq!(back.scan_count, Some(2));
+    assert_eq!(back.nwk_update_id, None);
+    // Channel-change request: duration 0xfe carries the update ID.
+    let chg = MgmtNwkEnhancedUpdateReq {
+        tsn: 0x7B,
+        channels: req.channels,
+        scan_duration: 0xFE,
+        scan_count: None,
+        nwk_update_id: Some(0x42),
+    };
+    let mut cbuf = [0u8; 16];
+    let cn = chg.encode_into(&mut cbuf).unwrap();
+    let cback = MgmtNwkEnhancedUpdateReq::decode(&cbuf[..cn]).unwrap();
+    assert_eq!(cback, chg);
+    assert_eq!(cback.scan_count, None);
+    assert_eq!(cback.nwk_update_id, Some(0x42));
+    assert!(MgmtNwkEnhancedUpdateReq::decode(&buf[..2]).is_err());
+
+    // Notify: status + single-page mask + counters + ED list.
+    let mut energy = [0u8; MAX_ENHANCED_ENERGY];
+    energy[0] = 0x5A;
+    energy[1] = 0xFF;
+    let notify = MgmtNwkEnhancedUpdateNotify {
+        tsn: 0x7A,
+        status: ZdpStatus::Success,
+        scanned: ChannelPageMask::make(0, 0x0000_1800),
+        total_transmissions: 0x000A,
+        failed_transmissions: 0x0001,
+        energy,
+        energy_len: 2,
+    };
+    let mut nbuf = [0u8; 48];
+    let nn = notify.encode_into(&mut nbuf).unwrap();
+    assert_eq!(nn, 13);
+    let nback = MgmtNwkEnhancedUpdateNotify::decode(&nbuf[..nn]).unwrap();
+    assert_eq!(nback, notify);
+    assert_eq!(nback.scanned.split(), (0, 0x0000_1800));
+    assert_eq!(&nback.energy[..2], &[0x5A, 0xFF]);
+    let mut over = notify;
+    over.energy_len = 28;
+    assert_eq!(over.encode_into(&mut nbuf), Err(ZdoError::TooManyEntries));
+    assert_eq!(
+        MgmtNwkEnhancedUpdateNotify::decode(&nbuf[..10]),
+        Err(ZdoError::Truncated)
+    );
+}
+
+// 05-3474-23-2433C-01 + 05-3474-23-2433C-02: beacon-survey request
+// with the configuration TLV; the results/parents TLV response legs
+// stay a follow-up.
+#[test]
+fn vector_mgmt_nwk_beacon_survey_05_3474_23_2433c_01() {
+    assert_eq!(CLUSTER_MGMT_NWK_BEACON_SURVEY_REQ, 0x003C);
+    assert_eq!(
+        response_cluster(CLUSTER_MGMT_NWK_BEACON_SURVEY_REQ),
+        Some(0x803C)
+    );
+    assert!(transaction_expected(CLUSTER_MGMT_NWK_BEACON_SURVEY_REQ));
+    let req = MgmtNwkBeaconSurveyReq {
+        tsn: 0x7C,
+        channels: ChannelList {
+            pages: [
+                ChannelPageMask::make(0, 0x07FF_F800),
+                ChannelPageMask(0),
+                ChannelPageMask(0),
+                ChannelPageMask(0),
+            ],
+            page_len: 1,
+        },
+        config: 0x01,
+    };
+    let mut buf = [0u8; 16];
+    let n = req.encode_into(&mut buf).unwrap();
+    assert_eq!(&buf[..2], &[0x7C, 0x01]);
+    let back = MgmtNwkBeaconSurveyReq::decode(&buf[..n]).unwrap();
+    assert_eq!(back, req);
+    assert_eq!(back.channels.page_len, 1);
+    assert_eq!(back.config, 0x01);
+    // Trailing garbage is refused, never misread as another page.
+    let mut long = buf.to_vec();
+    long.extend_from_slice(&[0x99]);
+    assert!(MgmtNwkBeaconSurveyReq::decode(&long).is_err());
+    assert!(MgmtNwkBeaconSurveyReq::decode(&buf[..2]).is_err());
+}
+
+// 05-3474-23-2433C-02: beacon-survey response with two candidate
+// parents, plus the empty and error shapes.
+#[test]
+fn vector_mgmt_nwk_beacon_survey_rsp_05_3474_23_2433c_01() {
+    let rsp = MgmtNwkBeaconSurveyRsp {
+        tsn: 0x7C,
+        status: ZdpStatus::Success,
+        results: BeaconSurveyResults {
+            total: 10,
+            on_network: 6,
+            potential_parent: 2,
+            other: 4,
+        },
+        current_parent: 0x0000,
+        current_lqa: 200,
+        parents: [
+            PotentialParent {
+                short: 0x0001,
+                lqa: 210,
+            },
+            PotentialParent {
+                short: 0x0002,
+                lqa: 190,
+            },
+            PotentialParent { short: 0, lqa: 0 },
+            PotentialParent { short: 0, lqa: 0 },
+            PotentialParent { short: 0, lqa: 0 },
+        ],
+        parent_len: 2,
+    };
+    let mut rbuf = [0u8; 32];
+    let rn = rsp.encode_into(&mut rbuf).unwrap();
+    assert_eq!(rn, 16);
+    let back = MgmtNwkBeaconSurveyRsp::decode(&rbuf[..rn]).unwrap();
+    assert_eq!(back, rsp);
+    assert_eq!(back.results.total, 10);
+    assert_eq!(
+        back.parent_list(),
+        &[
+            PotentialParent {
+                short: 0x0001,
+                lqa: 210
+            },
+            PotentialParent {
+                short: 0x0002,
+                lqa: 190
+            }
+        ][..]
+    );
+    // Empty parents and error shapes.
+    let empty = MgmtNwkBeaconSurveyRsp {
+        tsn: 0x7C,
+        status: ZdpStatus::Success,
+        results: BeaconSurveyResults {
+            total: 0,
+            on_network: 0,
+            potential_parent: 0,
+            other: 0,
+        },
+        current_parent: 0xFFFF,
+        current_lqa: 0,
+        parents: [PotentialParent { short: 0, lqa: 0 }; MAX_POTENTIAL_PARENTS],
+        parent_len: 0,
+    };
+    let mut ebuf = [0u8; 16];
+    assert_eq!(empty.encode_into(&mut ebuf).unwrap(), 10);
+    assert_eq!(MgmtNwkBeaconSurveyRsp::decode(&ebuf[..10]).unwrap(), empty);
+    let err = MgmtNwkBeaconSurveyRsp::decode(&[0x7C, 0x85]).unwrap();
+    assert_eq!(err.status, ZdpStatus::Timeout);
+    assert_eq!(err.parent_len, 0);
+    // Over-budget pages and truncation are refused.
+    let mut over = rsp;
+    over.parent_len = 6;
+    assert_eq!(over.encode_into(&mut rbuf), Err(ZdoError::TooManyEntries));
+    assert_eq!(
+        MgmtNwkBeaconSurveyRsp::decode(&rbuf[..9]),
+        Err(ZdoError::Truncated)
+    );
 }

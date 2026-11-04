@@ -3,18 +3,27 @@
 //! [`EmulatedRcp`] speaks [`crate::cmd`] over two FIFOs, applies
 //! commands to a small radio-state model (channel, TX power, PAN,
 //! addresses), and answers exactly where the real firmware would:
-//! [`Event::Ready`](crate::Event::Ready) after reset, [`Event`]
-//! confirms per TX, [`Event::EnergyResult`](crate::Event::EnergyResult)
+//! [`crate::Event::Ready`] after reset, [`Event`]
+//! confirms per TX, [`crate::Event::EnergyResult`]
 //! per scan. It is a contract pin, not a firmware: timing is
 //! immediate (the test harness moves the bytes), and every fault the
 //! driver must survive is scriptable — dropped confirms (timeout),
 //! corrupted responses (CRC desync), raw garbage (framing desync),
 //! forced error events, and queued inbound air frames.
 //!
+//! The peer emits the proto-2 channel-tagged [`Event::MacFrame`]
+//! (arrival channel = tuned channel, 15 before provisioning) and
+//! reports [`crate::RCP_PROTO_VERSION`] with its configured target
+//! bit (`target_caps`: set one of `CAPS_TARGET_*` to model an
+//! H2/C6/S31 unit; zero = generic/scripted). It still decodes the
+//! proto-1 [`Event::RxFrame`] shape so
+//! old captures replay through the same decoder.
+//!
 //! Requirement traceability (repo-minted, MINTED-pending-confirm):
 //! `RD-RCP-09` (power-cap mirror), `RD-RCP-10` (scripted faults),
 //! `RD-RCP-12` (promiscuous/filtered mirror), `RD-RCP-13`
-//! (version answers), `RD-RCP-14` (SHORT-SNOOP latch).
+//! (version answers), `RD-RCP-14` (SHORT-SNOOP latch),
+//! `RD-RCP-18` (channel-tagged RX + target caps).
 
 use crate::cmd::{
     Command, Event, TxOutcome, E_BAD_CHANNEL, E_BAD_COMMAND, E_POWER_CAPPED, MAX_PSDU,
@@ -36,6 +45,11 @@ pub const fn channel_energy(channel: u8) -> u8 {
 pub struct Radiated {
     /// True = inter-PAN path.
     pub inter_pan: bool,
+    /// Peer's tuned channel at radiate time (15 before
+    /// provisioning): the scripted medium delivers it as the
+    /// arrival channel (a real receiver stamps its own tuned
+    /// channel instead — both ends agree after the retune leg).
+    pub channel: u8,
     /// Live PSDU length.
     pub len: u8,
     /// PSDU bytes (first `len` live).
@@ -91,6 +105,10 @@ pub struct EmulatedRcp {
     pub garbage_next: u8,
     /// Error event emitted on the next [`EmulatedRcp::poll`], if set.
     pub error_next: Option<u8>,
+    /// Target-capability bit OR'd into the version report (`0` =
+    /// generic/scripted peer; set one of `CAPS_TARGET_H2/C6/S31`
+    /// to model a real radio unit for the universal-probe leg).
+    pub target_caps: u16,
     tx_log: [Option<Radiated>; 8],
     pending_rx: [Option<PendingRx>; 8],
     /// Diagnostics.
@@ -100,6 +118,7 @@ pub struct EmulatedRcp {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct PendingRx {
     inter_pan: bool,
+    channel: Option<u8>,
     rssi: i8,
     lqi: u8,
     len: u8,
@@ -129,6 +148,7 @@ impl EmulatedRcp {
             corrupt_next: 0,
             garbage_next: 0,
             error_next: None,
+            target_caps: 0,
             tx_log: [None, None, None, None, None, None, None, None],
             pending_rx: [None, None, None, None, None, None, None, None],
             stats: PeerStats {
@@ -193,52 +213,15 @@ impl EmulatedRcp {
     }
 
     /// Latch the assigned short from our own association response
-    /// before any slower path runs. The transport follows the
-    /// response within milliseconds, so the filtered-address check
-    /// only still matches when the short is already latched here —
-    /// the host's confirm (see
+    /// before any slower path runs (see
+    /// [`crate::mac::snoop_assoc_short`]: the response must be the
+    /// current long-long shape naming this unit's PAN and EUI with a
+    /// success status). The host's confirm (see
     /// [`crate::driver::RcpDriver::note_assoc_response`]) is the
-    /// idempotent second copy.
+    /// idempotent second copy. Wrong-PAN, foreign-EUI, and denied
+    /// responses are ignored, never latched.
     fn snoop_assoc_short(&mut self, psdu: &[u8]) {
-        let pan = match self.pan {
-            Some(p) => p,
-            None => return,
-        };
-        let ext = match self.ext {
-            Some(e) => e,
-            None => return,
-        };
-        if psdu.len() < 13 {
-            return;
-        }
-        let fcf = u16::from_le_bytes([psdu[0], psdu[1]]);
-        if fcf & 0x07 != 0x03 {
-            return;
-        }
-        if (fcf >> 10) & 0x03 != 0x03 {
-            return;
-        }
-        if u16::from_le_bytes([psdu[3], psdu[4]]) != pan {
-            return;
-        }
-        let mut dst = [0u8; 8];
-        dst.copy_from_slice(&psdu[5..13]);
-        if u64::from_le_bytes(dst) != ext {
-            return;
-        }
-        let moff = match (fcf >> 14) & 0x03 {
-            0x02 => 15,
-            0x03 => 21,
-            _ => return,
-        };
-        if psdu.len() < moff + 4 {
-            return;
-        }
-        if psdu[moff] != 0x02 || psdu[moff + 3] != 0x00 {
-            return;
-        }
-        let short = u16::from_le_bytes([psdu[moff + 1], psdu[moff + 2]]);
-        if short != 0xFFFF && Some(short) != self.short {
+        if let Some(short) = crate::mac::snoop_assoc_short(self.pan, self.ext, psdu, self.short) {
             self.short = Some(short);
             self.stats.short_snoops = self.stats.short_snoops.saturating_add(1);
         }
@@ -275,8 +258,34 @@ impl EmulatedRcp {
     /// Queue one inbound air frame for emission as an RX event on the
     /// next [`EmulatedRcp::poll`]; `false` when the RX queue is full.
     /// The SHORT-SNOOP runs first, so an association response latches
-    /// its short even when the RX queue is full.
+    /// its short even when the RX queue is full. Arrival channel is
+    /// the peer's tuned channel at emit time.
     pub fn queue_rx(&mut self, psdu: &[u8], rssi: i8, lqi: u8, inter_pan: bool) -> bool {
+        self.queue_rx_inner(psdu, rssi, lqi, inter_pan, None)
+    }
+
+    /// Queue one inbound air frame with an explicit arrival channel
+    /// (scripted-medium handoff: the sender's tuned channel at
+    /// radiate time). `false` when the RX queue is full.
+    pub fn queue_rx_on(
+        &mut self,
+        psdu: &[u8],
+        rssi: i8,
+        lqi: u8,
+        inter_pan: bool,
+        channel: u8,
+    ) -> bool {
+        self.queue_rx_inner(psdu, rssi, lqi, inter_pan, Some(channel))
+    }
+
+    fn queue_rx_inner(
+        &mut self,
+        psdu: &[u8],
+        rssi: i8,
+        lqi: u8,
+        inter_pan: bool,
+        channel: Option<u8>,
+    ) -> bool {
         if psdu.len() > MAX_PSDU {
             return false;
         }
@@ -285,6 +294,7 @@ impl EmulatedRcp {
         buf[..psdu.len()].copy_from_slice(psdu);
         let rx = PendingRx {
             inter_pan,
+            channel,
             rssi,
             lqi,
             len: psdu.len() as u8,
@@ -358,6 +368,7 @@ impl EmulatedRcp {
     fn log_tx(&mut self, inter_pan: bool, len: u8, psdu: &[u8; MAX_PSDU]) {
         let radiated = Radiated {
             inter_pan,
+            channel: self.channel.unwrap_or(15),
             len,
             psdu: *psdu,
         };
@@ -451,7 +462,7 @@ impl EmulatedRcp {
                 self.emit(&Event::Version {
                     fw_version: RCP_FW_VERSION,
                     proto_version: RCP_PROTO_VERSION,
-                    caps: RCP_CAPS,
+                    caps: RCP_CAPS | self.target_caps,
                     eui: self.eui,
                 });
             }
@@ -485,10 +496,15 @@ impl EmulatedRcp {
             let rx = self.pending_rx[i].take();
             if let Some(rx) = rx {
                 self.stats.rx_emitted = self.stats.rx_emitted.saturating_add(1);
-                self.emit(&Event::RxFrame {
+                // Explicit arrival channel (medium handoff) wins;
+                // otherwise the tuned channel, or 15 before
+                // provisioning (same fallback the driver uses).
+                let channel = rx.channel.or(self.channel).unwrap_or(15);
+                self.emit(&Event::MacFrame {
                     inter_pan: rx.inter_pan,
                     rssi: rx.rssi,
                     lqi: rx.lqi,
+                    channel,
                     len: rx.len,
                     psdu: rx.psdu,
                 });
@@ -609,19 +625,21 @@ mod tests {
 
     const SNOOP_EXT: u64 = 0xAC87_65FF_FE43_2112;
 
-    fn assoc_rsp_psdu(pan: u16, ext: u64, assigned: u16, status: u8) -> [u8; 19] {
-        // MAC command, long dest, short source: FCF 0x8C03, seq,
-        // dst pan + dst ext, src short, then the assoc-rsp body
-        // (id 0x02, assigned short, status).
-        let mut psdu = [0u8; 19];
-        psdu[0..2].copy_from_slice(&0x8C03u16.to_le_bytes());
+    fn assoc_rsp_psdu(pan: u16, ext: u64, assigned: u16, status: u8) -> [u8; 25] {
+        // Current long-long assoc-rsp shape: FCF 0xCC63, seq, dst
+        // pan + dst ext (the joiner, wire order) + src ext (the
+        // coordinator, wire order) + body (id 0x02, assigned short,
+        // status). TCW = u64 LE of the lab TC EUI in wire order.
+        const TCW: u64 = 0xa0f2_62ff_fe86_7f68;
+        let mut psdu = [0u8; 25];
+        psdu[0..2].copy_from_slice(&0xCC63u16.to_le_bytes());
         psdu[2] = 0x55;
         psdu[3..5].copy_from_slice(&pan.to_le_bytes());
         psdu[5..13].copy_from_slice(&ext.to_le_bytes());
-        psdu[13..15].copy_from_slice(&0x0000u16.to_le_bytes());
-        psdu[15] = 0x02;
-        psdu[16..18].copy_from_slice(&assigned.to_le_bytes());
-        psdu[18] = status;
+        psdu[13..21].copy_from_slice(&TCW.to_le_bytes());
+        psdu[21] = 0x02;
+        psdu[22..24].copy_from_slice(&assigned.to_le_bytes());
+        psdu[24] = status;
         psdu
     }
 
@@ -679,20 +697,21 @@ mod tests {
         peer.poll();
         let evs = collect(&mut peer);
         assert_eq!(evs.len(), 3, "all three queued frames emit");
-        assert!(matches!(evs[2], Event::RxFrame { len: 19, .. }));
+        assert!(matches!(evs[2], Event::MacFrame { len: 25, .. }));
     }
 
     #[test]
-    fn rx_queue_emits_events() {
+    fn rx_queue_emits_channel_tagged_events() {
         let mut peer = EmulatedRcp::new();
         assert!(peer.queue_rx(&[9, 8, 7], -60, 180, false));
         peer.poll();
         assert_eq!(
             collect(&mut peer),
-            [Event::RxFrame {
+            [Event::MacFrame {
                 inter_pan: false,
                 rssi: -60,
                 lqi: 180,
+                channel: 15,
                 len: 3,
                 psdu: {
                     let mut p = [0u8; MAX_PSDU];

@@ -1,5 +1,5 @@
 //! Green-Power device-frame dissector: reused `rounddance-gp` codec
-//! → [`GpNode`](crate::tree::GpNode).
+//! → [`crate::tree::GpNode`].
 //!
 //! GPDFs ride straight in the 802.15.4 MAC payload (stub NWK,
 //! protocol version 3), so the chain only reaches here after the

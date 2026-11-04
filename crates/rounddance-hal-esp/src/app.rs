@@ -17,7 +17,7 @@
 //! only binds them to the two C6 images and the radio.
 //!
 //! Radio facts inherited from the OTA proof (no hardware is touched by
-//! this crate's tests — they run over [`MockDriver`]):
+//! this crate's tests — they run over [`crate::mock::MockDriver`]):
 //! * channel 15, PAN `0xC601`, TX `+10` dBm (standing cap);
 //! * coordinator short `0x0000`, joiner short `0x0001` (placeholder
 //!   `0xFFFF` until association, as on device);
@@ -42,7 +42,9 @@ use rounddance_commission::{
     LogicalType, MmoJoinKdf, PanChoice, SteeringMachine, SteeringState, TrustCenter,
     TRANSPORT_AUX_BASE,
 };
-use rounddance_nwk::{decode as nwk_decode, FrameType as NwkFrameType};
+use rounddance_nwk::{
+    decode as nwk_decode, DiscoveryTable, FrameType as NwkFrameType, RouteTable, ROUTE_LIFETIME_MS,
+};
 use rounddance_roles::{AgingPolicy, CoordinatorMachine, CoordinatorState};
 use rounddance_security::{
     ccm_star_open_into, AuxHeader, KeyIdentifier, KeySet, NwkNonce, ReplayTable, CCM_NONCE_LEN,
@@ -298,6 +300,13 @@ pub enum AppRole {
     Coordinator,
     /// Scans, associates, joins, announces, hosts the ZCL endpoint.
     Joiner,
+    /// Joins as a router, forwards, serves children + own endpoints.
+    /// Selected by image (`rd-router`) or generic board provisioning,
+    /// not by the two-MAC lab gate below.
+    Router,
+    /// Joins as a non-routing end device, polls, hosts endpoints.
+    /// Selected by image or generic board provisioning.
+    EndDevice,
 }
 
 /// Select the role from a unit base MAC (full 6-octet compare).
@@ -479,6 +488,18 @@ pub struct CoordinatorApp {
     /// closed window). Previously silent; counted since the Phase 4
     /// permit-policy leg.
     pub assoc_denied: u32,
+    /// Installed routes toward grandchildren (e.g. 0x0003 via the
+    /// router): the TC-side half of relayed delivery. One routing
+    /// path only — `next_hop` answers where `take_*_via` sends.
+    routes: RouteTable,
+    /// Outgoing discovery sessions for unresolved grandchildren.
+    discovery: DiscoveryTable,
+    /// Grandchild EUI→short map learned via relayed annce or
+    /// child-table sync (wire-order EUIs, like `extra_shorts`).
+    /// Direct children live in the child table; these never do.
+    grandchildren: [Option<([u8; 8], u16)>; 8],
+    /// Last route-request identifier stamped by our own discoveries.
+    rreq_seq: u8,
 }
 
 impl CoordinatorApp {
@@ -511,6 +532,10 @@ impl CoordinatorApp {
             assoc_new_in_window: 0,
             assoc_throttled: 0,
             assoc_denied: 0,
+            routes: RouteTable::new(),
+            discovery: DiscoveryTable::new(),
+            grandchildren: [None; 8],
+            rreq_seq: 0,
         }
     }
 
@@ -649,6 +674,182 @@ impl CoordinatorApp {
         Ok(())
     }
 
+    /// Admit a grandchild through its router parent (child-table sync).
+    ///
+    /// The grandchild never enters the direct child table: it is
+    /// admitted at the Trust Center (joined devices) and given a
+    /// route via `via` (e.g. `0x0003` via `0x0002`). The EUI→short
+    /// map is remembered for transport building, and the short poll
+    /// / assoc latch is untouched (the router owns the MAC leg).
+    ///
+    /// Requirement `05-3474-23-3661-03` (repo-minted,
+    /// MINTED-pending-confirm).
+    pub fn admit_grandchild<L: SerialLog>(
+        &mut self,
+        log: &mut L,
+        eui: [u8; 8],
+        short: u16,
+        via: u16,
+        now_ms: u64,
+    ) -> Result<(), AppError> {
+        if self.state() != CoordinatorState::Formed || !self.machine.permit_open() {
+            return Err(AppError::BadRole);
+        }
+        let ieee = u64::from_le_bytes(eui);
+        self.tc
+            .admit(ieee, short, JoinMethod::InstallCode, 100)
+            .map_err(AppError::Join)?;
+        if !self.grandchildren.contains(&Some((eui, short))) {
+            if let Some(slot) = self.grandchildren.iter_mut().find(|s| s.is_none()) {
+                *slot = Some((eui, short));
+            }
+        }
+        // EUI orientation tolerance: match either wire order.
+        if !self.extra_shorts.contains(&Some((eui, short))) {
+            let mut rev = eui;
+            rev.reverse();
+            if !self.extra_shorts.contains(&Some((rev, short))) {
+                if let Some(slot) = self.extra_shorts.iter_mut().find(|s| s.is_none()) {
+                    *slot = Some((eui, short));
+                }
+            }
+        }
+        let _ = self.assoc.allow(eui);
+        self.routes
+            .install(short, via, 1, now_ms, ROUTE_LIFETIME_MS)
+            .map_err(|_| AppError::BadRole)?;
+        let mut line = [0u8; 80];
+        let mut n = 0usize;
+        for &b in b"C6APP ADMIT-GRANDCHILD ieee=".iter() {
+            line[n] = b;
+            n += 1;
+        }
+        for &b in eui.iter() {
+            line[n] = HEX[(b >> 4) as usize];
+            line[n + 1] = HEX[(b & 0x0f) as usize];
+            n += 2;
+        }
+        for &b in b" short=0x".iter() {
+            line[n] = b;
+            n += 1;
+        }
+        for shift in [12u16, 8, 4, 0] {
+            line[n] = HEX[((short >> shift) & 0x0f) as usize];
+            n += 1;
+        }
+        for &b in b" via=0x".iter() {
+            line[n] = b;
+            n += 1;
+        }
+        for shift in [12u16, 8, 4, 0] {
+            line[n] = HEX[((via >> shift) & 0x0f) as usize];
+            n += 1;
+        }
+        if let Ok(s) = core::str::from_utf8(&line[..n]) {
+            log.log(s);
+        }
+        Ok(())
+    }
+
+    /// Next hop toward `dst` from the TC route table, if live.
+    ///
+    /// Requirement `05-3474-23-3661-04` (repo-minted,
+    /// MINTED-pending-confirm).
+    #[must_use]
+    pub fn next_hop(&self, dst: u16, now_ms: u64) -> Option<u16> {
+        self.routes.next_hop(dst, now_ms)
+    }
+
+    /// Open route discovery for `dst` (single-flight per dst).
+    ///
+    /// Requirement `05-3474-23-3661-04` (repo-minted,
+    /// MINTED-pending-confirm).
+    pub fn start_discovery(&mut self, dst: u16, now_ms: u64) -> Result<u8, AppError> {
+        if dst == COORD_SHORT {
+            return Err(AppError::BadRole);
+        }
+        self.rreq_seq = self.rreq_seq.wrapping_add(1);
+        self.discovery
+            .start(dst, self.rreq_seq, now_ms)
+            .map(|s| s.rreq_id)
+            .map_err(|_| AppError::BadRole)
+    }
+
+    /// Fold an inbound route reply: resolves the pending session and
+    /// installs the route. Stray replies return `false` and install
+    /// nothing.
+    ///
+    /// Requirement `05-3474-23-3661-04` (repo-minted,
+    /// MINTED-pending-confirm).
+    pub fn note_discovery_reply(
+        &mut self,
+        rreq_id: u8,
+        dst: u16,
+        next_hop: u16,
+        cost: u8,
+        now_ms: u64,
+    ) -> Result<bool, AppError> {
+        use rounddance_nwk::RoutingError;
+        match self.discovery.resolve(rreq_id, now_ms) {
+            Ok(_) => {
+                self.routes
+                    .install(dst, next_hop, cost, now_ms, ROUTE_LIFETIME_MS)
+                    .map_err(|_| AppError::BadRole)?;
+                Ok(true)
+            }
+            Err(RoutingError::UnknownReply) => Ok(false),
+            Err(_) => Err(AppError::BadRole),
+        }
+    }
+
+    /// Install a relay-learned route leg (reverse leg from a relayed
+    /// request, forward leg from a transiting reply).
+    ///
+    /// Requirement `05-3474-23-3661-03` (repo-minted,
+    /// MINTED-pending-confirm).
+    pub fn install_route(
+        &mut self,
+        dst: u16,
+        next_hop: u16,
+        cost: u8,
+        now_ms: u64,
+    ) -> Result<(), AppError> {
+        self.routes
+            .install(dst, next_hop, cost, now_ms, ROUTE_LIFETIME_MS)
+            .map_err(|_| AppError::BadRole)
+    }
+
+    /// Authorize a discovery retransmit for `dst`.
+    pub fn authorize_discovery_retry(&mut self, dst: u16, now_ms: u64) -> Result<bool, AppError> {
+        self.discovery
+            .authorize_retry(dst, now_ms)
+            .map_err(|_| AppError::BadRole)
+    }
+
+    /// Age installed routes + retire dead discovery sessions.
+    /// Returns `(routes_expired, sessions_retired)`.
+    pub fn tick_routing(&mut self, now_ms: u64) -> (usize, usize) {
+        let r = self.routes.expire(now_ms);
+        let d = self.discovery.sweep(now_ms);
+        (r, d)
+    }
+
+    /// EUI for a grandchild short, if learned.
+    fn grandchild_eui(&self, short: u16) -> Option<[u8; 8]> {
+        self.grandchildren
+            .iter()
+            .flatten()
+            .find(|(_, s)| *s == short)
+            .map(|(e, _)| *e)
+            .or_else(|| {
+                self.extra_shorts
+                    .iter()
+                    .flatten()
+                    .find(|(_, s)| *s == short)
+                    .map(|(e, _)| *e)
+            })
+    }
+
     /// True while the roles permit window is open (child-table gate).
     #[must_use]
     pub fn permit_open(&self) -> bool {
@@ -746,11 +947,20 @@ impl CoordinatorApp {
 
     /// Resolve an assigned short to its admitted EUI (the reverse of
     /// the [`CoordinatorApp::take_assoc_rsp`] short selection): extra
-    /// admissions first, then the [`JOINER_SHORT`] fallback. Unknown
-    /// shorts resolve to nothing, so stray polls re-arm nothing.
+    /// admissions first, grandchildren next, then the [`JOINER_SHORT`]
+    /// fallback. Unknown shorts resolve to nothing, so stray polls
+    /// re-arm nothing.
     fn short_to_eui(&self, short: u16) -> Option<[u8; 8]> {
         if let Some((eui, _)) = self
             .extra_shorts
+            .iter()
+            .flatten()
+            .find(|(_, s)| *s == short)
+        {
+            return Some(*eui);
+        }
+        if let Some((eui, _)) = self
+            .grandchildren
             .iter()
             .flatten()
             .find(|(_, s)| *s == short)
@@ -1037,6 +1247,67 @@ impl CoordinatorApp {
         }
     }
 
+    /// Build a Trust-Center→grandchild transport-key frame for an
+    /// explicit destination (routed delivery to `dst_short`).
+    ///
+    /// Unlike [`take_transport_key`](Self::take_transport_key) this
+    /// does not consume the assoc-latch pending flag: the grandchild
+    /// never latched at the MAC leg (the router owns it). The MAC
+    /// destination is the installed next hop when one covers
+    /// `dst_short` (relay leg), else `dst_short` itself (direct
+    /// radio-reachable leg). The NWK destination is always
+    /// `dst_short`; the MSDU is byte identical either way (relay
+    /// contract). Consumes one NWK aux counter + one APS counter and
+    /// resets that source's replay state (fresh key = fresh counter
+    /// space, b007 rule).
+    ///
+    /// Requirement `05-3474-23-3661-01` + `-3661-03` (repo-minted,
+    /// MINTED-pending-confirm).
+    pub fn take_transport_key_to(
+        &mut self,
+        out: &mut [u8],
+        netkey: &[u8; 16],
+        transport_key: &[u8; 16],
+        dst_short: u16,
+        now_ms: u64,
+    ) -> Result<usize, MacCmdError> {
+        use rounddance_commission::{
+            build_transport_key_frame_via, TransportKeyParams, TRANSPORT_FRAME_LEN,
+        };
+        if out.len() < TRANSPORT_FRAME_LEN {
+            return Err(MacCmdError::BufferTooSmall);
+        }
+        let Some(dst_eui) = self
+            .grandchild_eui(dst_short)
+            .or_else(|| self.short_to_eui(dst_short))
+        else {
+            return Err(MacCmdError::BufferTooSmall);
+        };
+        let mac_dst = self.next_hop(dst_short, now_ms).unwrap_or(dst_short);
+        let auxctr = self.nwk_auxctr.take();
+        let params = TransportKeyParams {
+            dst_pan: APP_PAN,
+            dst_short,
+            dst_eui,
+            src_eui: TC_EUI_WIRE,
+            mac_seq: self.take_mac_seq(),
+            nwk_seq: self.take_nwk_seq(),
+            nwk_radius: 0x1e,
+            aps_ctr: self.take_aps_counter(),
+            auxctr,
+            seq_no: 0x00,
+            netkey: *netkey,
+            transport_key: *transport_key,
+        };
+        match build_transport_key_frame_via(&params, mac_dst, out) {
+            Ok(n) => {
+                self.rx_replay.remove(u64::from_le_bytes(dst_eui));
+                Ok(n)
+            }
+            Err(_) => Err(MacCmdError::BufferTooSmall),
+        }
+    }
+
     /// Whether `short` holds a queued indirect payload (Phase 1 leg
     /// 1b). The fw poll handler uses this to program the hardware
     /// source-match table: entries present → leave OUT (ACK
@@ -1130,7 +1401,7 @@ impl CoordinatorApp {
         dst_short: u16,
         netkey: &[u8; 16],
     ) -> Result<usize, MacCmdError> {
-        use rounddance_commission::{build_secured_nwk_frame, SecuredNwkParams};
+        use rounddance_commission::{build_secured_nwk_frame_via, SecuredNwkParams};
         use rounddance_zdo::zdp::NodeDescReq;
         let c = self.take_aps_counter();
         if self.zdo_pending.open(0x0002, c).is_err() {
@@ -1159,6 +1430,13 @@ impl CoordinatorApp {
             .encode_into(&zbuf, &mut abuf)
             .map_err(|_| MacCmdError::BufferTooSmall)?;
         let auxctr = self.nwk_auxctr.take();
+        // Routed leg: MAC goes to the next hop when one covers the
+        // dst; NWK dst stays final (same relay contract as the
+        // transport and toggle legs). Direct when unrouted.
+        let mac_dst = self
+            .routes
+            .next_hop(dst_short, self.last_tick_ms)
+            .unwrap_or(dst_short);
         let params = SecuredNwkParams {
             dst_pan: APP_PAN,
             dst_short,
@@ -1171,7 +1449,10 @@ impl CoordinatorApp {
             auxctr,
             netkey: *netkey,
         };
-        match build_secured_nwk_frame(&abuf[..alen], &params, out) {
+        // last_tick_ms is the TC tick clock; routing uses caller ms.
+        // For host/sim determinism the caller ticks before building,
+        // so this resolves the installed leg.
+        match build_secured_nwk_frame_via(&abuf[..alen], &params, mac_dst, out) {
             Ok(n) => Ok(n),
             Err(_) => Err(MacCmdError::BufferTooSmall),
         }
@@ -1334,8 +1615,14 @@ impl CoordinatorApp {
     }
 
     /// Handle one ZDO Device_annce payload (TSN first): mark the
-    /// announced child heard when it is admitted (best-effort: an
-    /// unknown short still reports the annce, it just marks nothing).
+    /// announced child heard when it is a direct child; otherwise
+    /// learn it as a grandchild (relayed assoc/annce or child-table
+    /// sync): remember the EUI→short map and install a direct route
+    /// leg when none covers the short yet. Unknown shorts still
+    /// report the annce — learning is best-effort, never a refusal.
+    ///
+    /// Requirement `05-3474-23-3661-03` (repo-minted,
+    /// MINTED-pending-confirm).
     fn on_annce(&mut self, zdp: &[u8], now_ms: u64) -> NwkRxOutcome {
         use NwkIgnore as Ig;
         let ann = match DeviceAnnce::decode(zdp) {
@@ -1344,7 +1631,22 @@ impl CoordinatorApp {
         };
         let mut eui = [0u8; 8];
         eui.copy_from_slice(&ann.ieee.to_le_bytes());
-        let _ = self.machine.child_heard(ann.nwk_addr, now_ms);
+        if self.machine.child_heard(ann.nwk_addr, now_ms).is_err() {
+            // Not a direct child: learn as grandchild when space
+            // remains. Direct leg first (radio-reachable lab); the
+            // router leg from `admit_grandchild` / discovery wins
+            // when it was installed cheaper-or-equal.
+            if !self.grandchildren.contains(&Some((eui, ann.nwk_addr))) {
+                if let Some(slot) = self.grandchildren.iter_mut().find(|s| s.is_none()) {
+                    *slot = Some((eui, ann.nwk_addr));
+                }
+            }
+            if self.routes.next_hop(ann.nwk_addr, now_ms).is_none() {
+                let _ =
+                    self.routes
+                        .install(ann.nwk_addr, ann.nwk_addr, 1, now_ms, ROUTE_LIFETIME_MS);
+            }
+        }
         NwkRxOutcome::Annce {
             short: ann.nwk_addr,
             eui,
@@ -1452,6 +1754,27 @@ impl CoordinatorApp {
         netkey: &[u8; 16],
         out: &mut [u8],
     ) -> Result<usize, AppError> {
+        self.build_toggle_request_to(log, netkey, JOINER_SHORT, out)
+    }
+
+    /// Build a routed secured ZCL Toggle to an explicit destination
+    /// (grandchild via the installed next hop, direct when unrouted).
+    ///
+    /// The MAC destination is the next hop covering `dst_short`;
+    /// the NWK/APS/ZCL destinations stay `dst_short`/ep1. The MSDU
+    /// is byte identical to the direct frame for the same counters
+    /// (relay contract), so the router re-wraps it verbatim and the
+    /// grandchild opens it with the normal nonce/AAD.
+    ///
+    /// Requirement `05-3474-23-3661-02` (repo-minted,
+    /// MINTED-pending-confirm).
+    pub fn build_toggle_request_to<L: SerialLog>(
+        &mut self,
+        log: &mut L,
+        netkey: &[u8; 16],
+        dst_short: u16,
+        out: &mut [u8],
+    ) -> Result<usize, AppError> {
         let mut zcl = [0u8; 8];
         let zlen = onoff::client::toggle(self.toggle_tsn, &mut zcl)
             .map_err(|_| AppError::BufferTooSmall)?;
@@ -1472,9 +1795,13 @@ impl CoordinatorApp {
             .encode_into(&zcl[..zlen], &mut abuf)
             .map_err(|_| AppError::BufferTooSmall)?;
         let auxctr = self.nwk_auxctr.take();
+        let mac_dst = self
+            .routes
+            .next_hop(dst_short, self.last_tick_ms)
+            .unwrap_or(dst_short);
         let params = rounddance_commission::SecuredNwkParams {
             dst_pan: APP_PAN,
-            dst_short: JOINER_SHORT,
+            dst_short,
             src_short: COORD_SHORT,
             broadcast: false,
             src_eui: TC_EUI_WIRE,
@@ -1484,7 +1811,12 @@ impl CoordinatorApp {
             auxctr,
             netkey: *netkey,
         };
-        match rounddance_commission::build_secured_nwk_frame(&abuf[..alen], &params, out) {
+        match rounddance_commission::build_secured_nwk_frame_via(
+            &abuf[..alen],
+            &params,
+            mac_dst,
+            out,
+        ) {
             Ok(n) => {
                 self.toggles_sent += 1;
                 log_air(log, "C6APP TX-TOGGLE", &out[..n]);
@@ -1649,6 +1981,14 @@ pub struct JoinerApp<'a> {
     /// Short address assigned by the coordinator's assoc-rsp (set on
     /// the joiner-side handoff; `None` until associated).
     assoc_short: Option<u16>,
+    /// This unit's own EUI in display order (the [`JOINER_EUI`] layout:
+    /// base MAC with `ff:fe` inserted mid-address). The lab joiner
+    /// image uses [`JOINER_EUI`]; the router uplink (`rd-router`)
+    /// provisions its own EUI here so its assoc-req, transport-key
+    /// match, annce, and secured frames carry the router identity
+    /// instead of the joiner's (previously hardcoded, which made the
+    /// TC answer a stranger the router's radio filter then dropped).
+    ieee: [u8; 8],
     /// Adopted network key + sequence (set by the transport-key open;
     /// secures all later joiner traffic).
     netkey: Option<([u8; 16], u8)>,
@@ -1679,8 +2019,17 @@ pub struct JoinerApp<'a> {
 }
 
 impl<'a> JoinerApp<'a> {
-    /// New joiner hosting an On/Off server on `def`.
+    /// New joiner hosting an On/Off server on `def`, with the lab
+    /// joiner identity ([`JOINER_EUI`]).
     pub fn new(def: &'a onoff::ServerDef) -> Result<Self, AppError> {
+        Self::new_with_ieee(def, JOINER_EUI)
+    }
+
+    /// New joiner hosting an On/Off server on `def` with an explicit
+    /// unit identity (display-order EUI, [`eui_from_mac`] layout).
+    /// The router uplink provisions its own EUI; all other behavior
+    /// is identical to [`new`](Self::new).
+    pub fn new_with_ieee(def: &'a onoff::ServerDef, ieee: [u8; 8]) -> Result<Self, AppError> {
         let mut endpoint = Endpoint::new();
         endpoint.add(def).map_err(|_| AppError::BadRole)?;
         let store = onoff::server_store().map_err(|_| AppError::BadRole)?;
@@ -1705,6 +2054,7 @@ impl<'a> JoinerApp<'a> {
             aps_counter: 0,
             mac_seq: 0,
             assoc_short: None,
+            ieee,
             netkey: None,
             join_auxctr: AuxCounter::fresh(JOINER_AUX_BASE),
             tog_last_tsn: None,
@@ -1715,6 +2065,13 @@ impl<'a> JoinerApp<'a> {
             nwk_rx_ignored: 0,
             unsecured_tolerated: 0,
         })
+    }
+
+    /// This unit's EUI in wire order (LSB-first on air).
+    fn ieee_wire(&self) -> [u8; 8] {
+        let mut w = self.ieee;
+        w.reverse();
+        w
     }
 
     /// Current join state.
@@ -1757,7 +2114,7 @@ impl<'a> JoinerApp<'a> {
 
     /// Close the scan window: rank acceptable rows and elect the
     /// winner. Returns the elected PAN, if any. Election requires
-    /// [`MIN_ELECTION_SIGHTINGS`](crate::commission::MIN_ELECTION_SIGHTINGS)
+    /// [`rounddance_commission::MIN_ELECTION_SIGHTINGS`]
     /// acceptable rows for the winning PAN in this window (Phase 4:
     /// a lone phantom beacon can never elect, while any live network
     /// clears the bar in its first window).
@@ -1833,7 +2190,7 @@ impl<'a> JoinerApp<'a> {
             MacIncoming::AssocRsp(ref rsp) => {
                 // EUI orientation-insensitive, like the coordinator
                 // admission path.
-                if !eui_matches(&joiner_ieee().to_le_bytes(), &rsp.dst_eui) {
+                if !eui_matches(&self.ieee, &rsp.dst_eui) {
                     return inc;
                 }
                 self.assoc_short = Some(rsp.short);
@@ -2009,7 +2366,7 @@ impl<'a> JoinerApp<'a> {
         // Destination must be us (wire order, orientation-tolerant).
         let mut dst = [0u8; 8];
         dst.copy_from_slice(&pt[19..27]);
-        if !eui_matches(&joiner_ieee().to_be_bytes(), &dst) {
+        if !eui_matches(&self.ieee_wire(), &dst) {
             return O::Ignored(Ig::BadAps);
         }
         let mut key = [0u8; 16];
@@ -2142,25 +2499,25 @@ impl<'a> JoinerApp<'a> {
     }
 
     /// Build one association-request PSDU into `out` for `dst_pan`
-    /// (coordinator short `0x0000`), with our MAC sequence + EUI.
+    /// (parent short `dst_short`, normally the coordinator short
+    /// `0x0000`; a child joining through a router targets the router
+    /// short instead), with our MAC sequence + EUI.
     ///
     /// # Errors
     ///
     /// [`MacCmdError::BufferTooSmall`] when `out` is short.
-    pub fn take_assoc_req(&mut self, out: &mut [u8], dst_pan: u16) -> Result<usize, MacCmdError> {
+    pub fn take_assoc_req(
+        &mut self,
+        out: &mut [u8],
+        dst_pan: u16,
+        dst_short: u16,
+    ) -> Result<usize, MacCmdError> {
         let seq = self.take_mac_seq();
         // EUI rides LSB-first (wire order), as the NCP-verified
         // handshake shape requires (w93 MG21 reference):
         // `joiner_ieee` is little-endian of the display-order const,
         // so big-endian bytes are the wire order.
-        build_assoc_req(
-            seq,
-            dst_pan,
-            COORD_SHORT,
-            &joiner_ieee().to_be_bytes(),
-            MAC_CAPS,
-            out,
-        )
+        build_assoc_req(seq, dst_pan, dst_short, &self.ieee_wire(), MAC_CAPS, out)
     }
 
     /// Build the joiner's Device_annce broadcast into `out` (MAC +
@@ -2189,7 +2546,7 @@ impl<'a> JoinerApp<'a> {
         let annce = DeviceAnnce {
             tsn: c,
             nwk_addr: short,
-            ieee: u64::from_le_bytes(joiner_ieee().to_be_bytes()),
+            ieee: u64::from_le_bytes(self.ieee_wire()),
             capability: MAC_CAPS,
         };
         let mut zbuf = [0u8; DeviceAnnce::LEN];
@@ -2206,7 +2563,7 @@ impl<'a> JoinerApp<'a> {
             dst_short: 0xFFFD,
             src_short: short,
             broadcast: true,
-            src_eui: joiner_ieee().to_be_bytes(),
+            src_eui: self.ieee_wire(),
             mac_seq: self.take_mac_seq(),
             nwk_seq: self.take_nwk_seq(),
             nwk_radius: 0x1e,
@@ -2285,7 +2642,7 @@ impl<'a> JoinerApp<'a> {
             dst_short,
             src_short: short,
             broadcast: false,
-            src_eui: joiner_ieee().to_be_bytes(),
+            src_eui: self.ieee_wire(),
             mac_seq: self.take_mac_seq(),
             nwk_seq: self.take_nwk_seq(),
             nwk_radius: 0x1e,
@@ -2331,7 +2688,7 @@ impl<'a> JoinerApp<'a> {
     pub fn build_annce(&self, out: &mut [u8]) -> Result<usize, AppError> {
         let annce = self
             .joiner
-            .device_annce(ZCL_TSN, JOINER_SHORT, joiner_ieee());
+            .device_annce(ZCL_TSN, JOINER_SHORT, u64::from_le_bytes(self.ieee));
         annce.encode_into(out).map_err(|_| AppError::BufferTooSmall)
     }
 
@@ -2573,7 +2930,7 @@ impl<'a> JoinerApp<'a> {
             dst_short: COORD_SHORT,
             src_short: short,
             broadcast: false,
-            src_eui: joiner_ieee().to_be_bytes(),
+            src_eui: self.ieee_wire(),
             mac_seq: self.take_mac_seq(),
             nwk_seq: self.take_nwk_seq(),
             nwk_radius: 0x1e,

@@ -9,6 +9,15 @@
 //!
 //! # Transaction discipline
 //!
+//! * MAC headers are built and parsed on the host (see
+//!   [`crate::mac`]): `data_request` wraps the MSDU in a
+//!   short-short intra-PAN header addressed from the provisioned
+//!   PAN/short, `interpan_request` builds the broadcast inter-PAN
+//!   header, and received PSDUs parse back into sources plus MSDUs.
+//!   MAC commands (beacons, association traffic, polls) ride the
+//!   same `TxFrame` proxy as complete PSDUs and surface on the
+//!   [`RcpDriver::poll_mac_indication`] queue for the upper layer to
+//!   classify — the firmware stays a dumb pipe and never classifies.
 //! * Management commands (reset, channel, power, addressing) are
 //!   fire-and-confirm-optional: they encode and write immediately,
 //!   update the driver's provision cache, and re-emit from that
@@ -22,7 +31,12 @@
 //!   resends with a fresh sequence up to `MAX_RETRIES` times, then
 //!   confirms `NoAck`. `data_request` during a reset handshake fails
 //!   `NotReady` — queued frames wait out the handshake, they are
-//!   never silently dropped.
+//!   never silently dropped. `data_request` before PAN/short
+//!   provisioning also fails `NotReady` (there is no source to put
+//!   in the header).
+//! * Confirms and indications carry the injected-clock time
+//!   (`timestamp_us = Some(now)`): host-arrival stamps, not SFD
+//!   captures — honest about their precision (see the capability flags).
 //! * Energy scans are split-phase: [`MacMgmtSap::energy_scan`]
 //!   (re)arms a scan unless one is already pending and reports the
 //!   most recent completed result for that channel, or `NotReady`
@@ -31,30 +45,43 @@
 //!   (bad length or CRC) open a reset handshake — `Reset`, await
 //!   `Ready`, replay the provision cache, resume. The queued TX pool
 //!   survives the handshake.
-//! * v0 scope notes: SAP MSDUs ride as RCP payloads verbatim (no MAC
-//!   header build/parse yet — cf. `rounddance-hal-esp`'s adapter),
-//!   RX indications carry `AddrMode::None` sources for the same
-//!   reason, confirms carry no timestamps, and inter-PAN requests
-//!   ride the peer's tuned channel (per-request retune is a
-//!   follow-up). All recorded in `docs/otbr/protocol.md`.
+//! * Inter-PAN requests retune per request: when the requested
+//!   channel differs from the provisioned one the driver emits a
+//!   `SetChannel` first (tracked in the provision cache), then the
+//!   frame. Arrival channels ride the proto-2
+//!   [`Event::MacFrame`] tag; legacy
+//!   proto-1 [`Event::RxFrame`] events
+//!   fall back to the provisioned channel.
 //!
 //! Requirement traceability (repo-minted, MINTED-pending-confirm):
 //! `RD-RCP-05` (SAP mapping), `RD-RCP-06` (timeout/retry),
 //! `RD-RCP-07` (desync→resync), `RD-RCP-08` (reset handshake),
 //! `RD-RCP-12` (filtered mode cache + replay), `RD-RCP-13`
 //! (version query + latch), `RD-RCP-14` (assoc-short confirm),
-//! `RD-RCP-15` (recovery state machine).
+//! `RD-RCP-15` (recovery state machine), `RD-RCP-17` (MAC header
+//! build/parse + timestamps), `RD-RCP-18` (MAC-command queue +
+//! per-request inter-PAN retune).
+//!
+//! Requirement traceability (repo-minted, MINTED-pending-confirm):
+//! `RD-RCP-05` (SAP mapping), `RD-RCP-06` (timeout/retry),
+//! `RD-RCP-07` (desync→resync), `RD-RCP-08` (reset handshake),
+//! `RD-RCP-12` (filtered mode cache + replay), `RD-RCP-13`
+//! (version query + latch), `RD-RCP-14` (assoc-short confirm),
+//! `RD-RCP-15` (recovery state machine), `RD-RCP-17` (MAC header
+//! build/parse + timestamps), `RD-RCP-18` (MAC-command queue +
+//! per-request inter-PAN retune).
 
 use crate::cmd::{Command, Event, TxOutcome, MAX_PSDU};
 use crate::frame::{Decoder, Outcome};
+use crate::mac::{self, MAX_MAC_PSDU};
 use crate::uart::Uart;
 use crate::{RcpError, MAX_TX_POWER_DBM};
 #[cfg(test)]
 use rounddance_mac_sap::TxOptions;
 use rounddance_mac_sap::{
-    AddrMode, Channel, ExtAddr, FramePayload, HasCapabilities, InterPanIndication, MacAddress,
-    MacCapabilities, MacDataSap, MacError, MacInterPanSap, MacMgmtSap, PanId, RxIndication,
-    ShortAddr, TxConfirm, TxHandle, TxRequest, TxStatus,
+    AddrMode, Channel, ExtAddr, FramePayload, HasCapabilities, InterPanIndication, MacCapabilities,
+    MacDataSap, MacError, MacInterPanSap, MacMgmtSap, PanId, RxIndication, ShortAddr, TxConfirm,
+    TxHandle, TxRequest, TxStatus,
 };
 
 /// Command timeout in microseconds on the injected clock.
@@ -112,6 +139,8 @@ pub enum TraceEvent {
     ScanTimeout,
     /// Version report latched (firmware version).
     VersionSeen(u8),
+    /// MAC-command PSDU queued on the MAC queue (length).
+    MacPushed(u8),
     /// Association-response short confirmed to the RCP (short).
     AssocConfirmed(u16),
     /// Host-side recovery opened (warm reset, queue preserved).
@@ -163,6 +192,12 @@ pub struct RcpStats {
     pub recoveries: u32,
     /// Recoveries that exhausted the budget (peer declared dead).
     pub recovery_failures: u32,
+    /// Received PSDUs that parsed as neither data nor inter-PAN
+    /// shape and were refused by every queue (overlong for the
+    /// bounded queues' element type).
+    pub rx_unparsed: u32,
+    /// MAC-command PSDUs dropped (MAC queue full).
+    pub mac_overruns: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -210,12 +245,61 @@ pub struct VersionInfo {
     pub eui: [u8; 8],
 }
 
+/// One received MAC-protocol PSDU (beacon / MAC command): the raw
+/// on-air bytes with per-frame meters, for the upper layer to
+/// classify (cf. `rounddance-hal-esp`'s `MacIndication` — same shape
+/// minus the task-context log discipline, which lives above this
+/// crate).
+///
+/// The PSDU is the exact air payload the firmware delivered
+/// (MHR-included, FCS-stripped); the driver never classifies it.
+/// Anything the data/inter-PAN parsers reject lands here verbatim
+/// (bounded, overruns counted, never silently dropped).
+#[derive(Clone, Copy, Debug)]
+pub struct MacIndication {
+    psdu: [u8; MAX_PSDU],
+    len: usize,
+    channel: u8,
+    rssi: i8,
+    lqi: u8,
+}
+
+impl MacIndication {
+    /// Exact on-air PSDU bytes.
+    #[must_use]
+    pub fn psdu(&self) -> &[u8] {
+        &self.psdu[..self.len]
+    }
+
+    /// Arrival channel number (11–26).
+    #[must_use]
+    pub fn channel_number(&self) -> u8 {
+        self.channel
+    }
+
+    /// Reception RSSI in dBm.
+    #[must_use]
+    pub fn rssi(&self) -> i8 {
+        self.rssi
+    }
+
+    /// Reception LQI.
+    #[must_use]
+    pub fn lqi(&self) -> u8 {
+        self.lqi
+    }
+}
+
+/// Pending MAC-command indication queue depth.
+pub const MAC_QUEUE_DEPTH: usize = 8;
+
 /// Host-side RCP driver over any [`Uart`].
 pub struct RcpDriver<U: Uart> {
     uart: U,
     now_us: u64,
     next_seq: u8,
     next_handle: u32,
+    mac_seq: u8,
     slots: [Option<Slot>; TX_SLOTS],
     confirms: [Option<TxConfirm>; CONFIRM_DEPTH],
     confirms_len: usize,
@@ -225,6 +309,8 @@ pub struct RcpDriver<U: Uart> {
     interpan_confirms_len: usize,
     interpan_indications: [Option<InterPanIndication>; TX_SLOTS],
     interpan_indications_len: usize,
+    mac_queue: [Option<MacIndication>; MAC_QUEUE_DEPTH],
+    mac_len: usize,
     decoder: Decoder,
     resetting: bool,
     reset_cold: bool,
@@ -269,6 +355,7 @@ impl<U: Uart> RcpDriver<U> {
             now_us: 0,
             next_seq: 0,
             next_handle: 0,
+            mac_seq: 0,
             slots: [None; TX_SLOTS],
             confirms: [None; CONFIRM_DEPTH],
             confirms_len: 0,
@@ -278,6 +365,8 @@ impl<U: Uart> RcpDriver<U> {
             interpan_confirms_len: 0,
             interpan_indications: core::array::from_fn(|_| None),
             interpan_indications_len: 0,
+            mac_queue: [None; MAC_QUEUE_DEPTH],
+            mac_len: 0,
             decoder: Decoder::new(),
             resetting: false,
             reset_cold: true,
@@ -317,6 +406,8 @@ impl<U: Uart> RcpDriver<U> {
                 trace_overflows: 0,
                 recoveries: 0,
                 recovery_failures: 0,
+                rx_unparsed: 0,
+                mac_overruns: 0,
             },
         }
     }
@@ -477,14 +568,145 @@ impl<U: Uart> RcpDriver<U> {
                 self.trace(TraceEvent::TxFailed(slot.handle.0));
             }
             Self::bump(&mut self.stats.tx_confirmed);
+            let stamp = Some(self.now_us);
             self.push_confirm(
                 slot.inter_pan,
                 TxConfirm {
                     handle: slot.handle,
                     status,
-                    timestamp_us: None,
+                    timestamp_us: stamp,
                 },
             );
+        }
+    }
+
+    /// Take the next 802.15.4 MAC sequence number (DSN space, shared
+    /// across the PAN / inter-PAN / MAC-command paths like the
+    /// `EspAdapter` sequence).
+    fn take_mac_seq(&mut self) -> u8 {
+        let s = self.mac_seq;
+        self.mac_seq = self.mac_seq.wrapping_add(1);
+        s
+    }
+
+    /// Arrival channel for events that carry none (proto-1
+    /// `RxFrame`): the provisioned channel, or 15 before
+    /// provisioning (statically legal, 11..=26).
+    fn arrival_fallback(&self) -> u8 {
+        match self.channel {
+            Some(c) => c.number(),
+            None => 15,
+        }
+    }
+
+    /// Route one received PSDU with its meters to the PAN,
+    /// inter-PAN, or MAC-command queue (see [`crate::mac`]).
+    fn route_psdu(&mut self, psdu: &[u8], rssi: i8, lqi: u8, channel: u8) {
+        Self::bump(&mut self.stats.rx_frames);
+        self.trace(TraceEvent::RxPushed(psdu.len().min(255) as u8));
+        let stamp = Some(self.now_us);
+        // Prefer the inter-PAN shape first: its FC0 (0x01) never
+        // equals our PAN FC0 (0x41/0x61), so the two never alias
+        // (same order as `EspAdapter::dispatch_rx`).
+        if let Some(p) = mac::parse_inter_pan_psdu(psdu) {
+            let payload = &psdu[p.msdu_start..p.msdu_end];
+            let msdu = match FramePayload::from_slice(payload) {
+                Ok(m) => m,
+                Err(_) => {
+                    Self::bump(&mut self.stats.rx_overruns);
+                    return;
+                }
+            };
+            let ch = match Channel::new(channel) {
+                Ok(c) => c,
+                Err(_) => match Channel::new(self.arrival_fallback()) {
+                    Ok(c) => c,
+                    Err(_) => unreachable!("fallback is a legal channel"),
+                },
+            };
+            let ind = InterPanIndication { channel: ch, msdu };
+            if self.interpan_indications_len < self.interpan_indications.len() {
+                self.interpan_indications[self.interpan_indications_len] = Some(ind);
+                self.interpan_indications_len += 1;
+            } else {
+                Self::bump(&mut self.stats.rx_overruns);
+            }
+            return;
+        }
+        if let Some(p) = mac::parse_data_psdu(psdu) {
+            let payload = &psdu[p.msdu_start..p.msdu_end];
+            let msdu = match FramePayload::from_slice(payload) {
+                Ok(m) => m,
+                Err(_) => {
+                    // Header parses but the MSDU overflows the SAP
+                    // bound: visible on the MAC queue, never silently
+                    // dropped (see `mac.rs` accounting).
+                    self.push_mac(psdu, rssi, lqi, channel);
+                    return;
+                }
+            };
+            if Some(p.dst_pan) == self.pan {
+                let ind = RxIndication {
+                    src: p.src,
+                    lqi,
+                    timestamp_us: stamp,
+                    msdu,
+                };
+                if self.indications_len < self.indications.len() {
+                    self.indications[self.indications_len] = Some(ind);
+                    self.indications_len += 1;
+                } else {
+                    Self::bump(&mut self.stats.rx_overruns);
+                }
+            } else if let Ok(ch) = Channel::new(channel) {
+                // Foreign PAN data (e.g. touchlink scan traffic on a
+                // neighbour PAN) rides the inter-PAN queue with its
+                // arrival channel, like `EspAdapter`.
+                let ind = InterPanIndication { channel: ch, msdu };
+                if self.interpan_indications_len < self.interpan_indications.len() {
+                    self.interpan_indications[self.interpan_indications_len] = Some(ind);
+                    self.interpan_indications_len += 1;
+                } else {
+                    Self::bump(&mut self.stats.rx_overruns);
+                }
+            } else {
+                Self::bump(&mut self.stats.rx_overruns);
+            }
+            return;
+        }
+        // Not a data frame: a MAC-protocol PSDU (beacon / command /
+        // poll) or line garbage the CRC did not catch — surface it
+        // verbatim on the MAC queue for the upper layer to classify.
+        self.push_mac(psdu, rssi, lqi, channel);
+    }
+
+    /// Push one raw PSDU on the MAC-command queue (bounded, overruns
+    /// counted, never silently dropped).
+    fn push_mac(&mut self, psdu: &[u8], rssi: i8, lqi: u8, channel: u8) {
+        if psdu.len() > MAX_PSDU {
+            Self::bump(&mut self.stats.rx_unparsed);
+            return;
+        }
+        let ch = if mac::legal_channel(channel) {
+            channel
+        } else {
+            self.arrival_fallback()
+        };
+        let mut raw = [0u8; MAX_PSDU];
+        raw[..psdu.len()].copy_from_slice(psdu);
+        let ind = MacIndication {
+            psdu: raw,
+            len: psdu.len(),
+            channel: ch,
+            rssi,
+            lqi,
+        };
+        if self.mac_len < self.mac_queue.len() {
+            self.mac_queue[self.mac_len] = Some(ind);
+            self.mac_len += 1;
+            self.trace(TraceEvent::MacPushed(psdu.len().min(255) as u8));
+        } else {
+            Self::bump(&mut self.stats.mac_overruns);
         }
     }
 
@@ -543,59 +765,31 @@ impl<U: Uart> RcpDriver<U> {
             }
             Event::RxFrame {
                 inter_pan,
+                rssi,
                 lqi,
                 len,
                 psdu,
-                ..
             } => {
-                Self::bump(&mut self.stats.rx_frames);
-                self.trace(TraceEvent::RxPushed(len));
-                let msdu = match FramePayload::from_slice(&psdu[..len as usize]) {
-                    Ok(m) => m,
-                    Err(_) => {
-                        // Peer-bounded at 127, SAP-bounded at 116: an
-                        // over-long air frame cannot queue; count it.
-                        Self::bump(&mut self.stats.rx_overruns);
-                        return;
-                    }
-                };
-                if inter_pan {
-                    // Arrival channel is the peer's tuned channel; the
-                    // 15 fallback below is statically legal (11..=26)
-                    // and only applies before provisioning.
-                    let ch = match self.channel {
-                        Some(c) => c,
-                        None => match Channel::new(15) {
-                            Ok(c) => c,
-                            Err(_) => unreachable!("15 is a legal 802.15.4 channel"),
-                        },
-                    };
-                    let ind = InterPanIndication { channel: ch, msdu };
-                    if self.interpan_indications_len < self.interpan_indications.len() {
-                        self.interpan_indications[self.interpan_indications_len] = Some(ind);
-                        self.interpan_indications_len += 1;
-                    } else {
-                        Self::bump(&mut self.stats.rx_overruns);
-                    }
-                } else {
-                    let ind = RxIndication {
-                        // v0: no MAC header parse yet — source is
-                        // unparsed, payload is the whole PSDU.
-                        src: MacAddress {
-                            pan: self.pan,
-                            addr: AddrMode::None,
-                        },
-                        lqi,
-                        timestamp_us: None,
-                        msdu,
-                    };
-                    if self.indications_len < self.indications.len() {
-                        self.indications[self.indications_len] = Some(ind);
-                        self.indications_len += 1;
-                    } else {
-                        Self::bump(&mut self.stats.rx_overruns);
-                    }
-                }
+                // Proto-1 shape: no arrival channel — fall back to the
+                // provisioned channel (back-compat with v0 firmware).
+                let channel = self.arrival_fallback();
+                let _ = inter_pan;
+                // NOTE: the proto-1 inter-PAN bit is subsumed by the
+                // header parse below (the PSDU shape, not the flag,
+                // routes) — a proto-1 peer that misflags still lands
+                // in the right queue.
+                self.route_psdu(&psdu[..len as usize], rssi, lqi, channel);
+            }
+            Event::MacFrame {
+                inter_pan,
+                rssi,
+                lqi,
+                channel,
+                len,
+                psdu,
+            } => {
+                let _ = inter_pan;
+                self.route_psdu(&psdu[..len as usize], rssi, lqi, channel);
             }
             Event::EnergyResult { channel, energy } => {
                 Self::bump(&mut self.stats.scans);
@@ -839,11 +1033,11 @@ impl<U: Uart> RcpDriver<U> {
         self.recovery
     }
 
-    fn queue_tx(&mut self, inter_pan: bool, msdu: &FramePayload) -> Result<TxHandle, MacError> {
+    fn queue_raw(&mut self, inter_pan: bool, psdu: &[u8]) -> Result<TxHandle, MacError> {
         if self.resetting {
             return Err(MacError::NotReady);
         }
-        if msdu.len() > MAX_PSDU {
+        if psdu.len() > MAX_PSDU {
             return Err(MacError::FrameTooLong);
         }
         let mut free = None;
@@ -859,14 +1053,14 @@ impl<U: Uart> RcpDriver<U> {
         };
         let handle = TxHandle(self.next_handle);
         self.next_handle = self.next_handle.wrapping_add(1);
-        let mut psdu = [0u8; MAX_PSDU];
-        psdu[..msdu.len()].copy_from_slice(msdu.as_slice());
+        let mut buf = [0u8; MAX_PSDU];
+        buf[..psdu.len()].copy_from_slice(psdu);
         self.slots[i] = Some(Slot {
             handle,
             inter_pan,
             cancelled: false,
-            len: msdu.len() as u8,
-            psdu,
+            len: psdu.len() as u8,
+            psdu: buf,
             state: SlotState::Queued,
         });
         self.trace(TraceEvent::TxQueued(handle.0));
@@ -875,6 +1069,46 @@ impl<U: Uart> RcpDriver<U> {
         // re-attempts whenever a confirm frees the flight.
         self.try_submit();
         Ok(handle)
+    }
+
+    /// Queue one raw MAC-protocol PSDU for transmission (beacon /
+    /// command / poll — the `TxFrame` proxy path): the bytes must
+    /// already carry their MHR (e.g. from
+    /// `rounddance-hal-esp`'s `mac_cmd` builders); the driver wraps
+    /// them in the RCP envelope and the firmware radiates them
+    /// verbatim. Confirms arrive via the normal `poll_confirm`
+    /// queue. Single-flight shared with data, so command and data
+    /// TX share backpressure (mirrors `EspAdapter::transmit_mac`).
+    ///
+    /// # Errors
+    ///
+    /// [`MacError::NotReady`] during the reset handshake,
+    /// [`MacError::FrameTooLong`] for an empty/oversize PSDU,
+    /// [`MacError::QueueFull`] when no TX slot is free.
+    pub fn transmit_mac(&mut self, psdu: &[u8]) -> Result<TxHandle, MacError> {
+        if psdu.is_empty() || psdu.len() > MAX_PSDU {
+            return Err(MacError::FrameTooLong);
+        }
+        self.queue_raw(false, psdu)
+    }
+
+    /// Take the oldest pending MAC-protocol indication, if any (see
+    /// [`MacIndication`]: the upper layer classifies these, e.g. via
+    /// `rounddance-hal-esp`'s `mac_cmd::classify`).
+    pub fn poll_mac_indication(&mut self) -> Option<MacIndication> {
+        if self.mac_len == 0 {
+            return None;
+        }
+        let ind = self.mac_queue[0].take();
+        self.mac_queue.rotate_left(1);
+        self.mac_len -= 1;
+        ind
+    }
+
+    /// Pending MAC-protocol indication count.
+    #[must_use]
+    pub fn mac_pending(&self) -> usize {
+        self.mac_len
     }
 
     fn shift_confirms(&mut self) -> Option<TxConfirm> {
@@ -935,8 +1169,11 @@ impl<U: Uart> HasCapabilities for RcpDriver<U> {
             hw_csma_ca: true,
             hw_retries: false,
             energy_scan: true,
-            // v0 carries no timestamps yet.
-            frame_timestamping: false,
+            // Host-arrival stamps (injected clock at confirm /
+            // indication queueing), not SFD captures — honest about
+            // their precision: millisecond-scale on a wall clock,
+            // exact on an injected one.
+            frame_timestamping: true,
             // Filtered + HW auto-ACK is the default associated mode
             // (see `set_promiscuous_mode`); promiscuous scanning is
             // one command away.
@@ -947,10 +1184,31 @@ impl<U: Uart> HasCapabilities for RcpDriver<U> {
 
 impl<U: Uart> MacDataSap for RcpDriver<U> {
     fn data_request(&mut self, req: TxRequest) -> Result<TxHandle, MacError> {
-        if matches!(req.dst.addr, AddrMode::None) {
-            return Err(MacError::InvalidAddress);
-        }
-        self.queue_tx(false, &req.msdu)
+        let dst = match req.dst.addr {
+            AddrMode::Short(a) => a,
+            // Well-formed but beyond the short-only RCP path
+            // (mirrors `EspAdapter`).
+            AddrMode::Extended(_) => return Err(MacError::Unsupported),
+            AddrMode::None => return Err(MacError::InvalidAddress),
+        };
+        // The header needs a source: unprovisioned radios refuse
+        // before touching the UART (the address would be fiction).
+        let (pan, src) = match (self.pan, self.short) {
+            (Some(pan), Some(src)) => (pan, src),
+            _ => return Err(MacError::NotReady),
+        };
+        let seq = self.take_mac_seq();
+        let mut psdu = [0u8; MAX_MAC_PSDU];
+        let n = mac::build_data_psdu(
+            seq,
+            pan,
+            dst,
+            src,
+            req.msdu.as_slice(),
+            req.options.wants_ack(),
+            &mut psdu,
+        )?;
+        self.queue_raw(false, &psdu[..n])
     }
 
     fn data_cancel(&mut self, handle: TxHandle) -> Result<(), MacError> {
@@ -967,7 +1225,7 @@ impl<U: Uart> MacDataSap for RcpDriver<U> {
                                 TxConfirm {
                                     handle,
                                     status: TxStatus::Cancelled,
-                                    timestamp_us: None,
+                                    timestamp_us: Some(self.now_us),
                                 },
                             );
                             return Ok(());
@@ -1013,6 +1271,8 @@ impl<U: Uart> MacMgmtSap for RcpDriver<U> {
         self.interpan_confirms_len = 0;
         self.interpan_indications = core::array::from_fn(|_| None);
         self.interpan_indications_len = 0;
+        self.mac_queue = [None; MAC_QUEUE_DEPTH];
+        self.mac_len = 0;
         self.pending_scan = None;
         self.recovery = RecoveryState::Idle;
         self.recovery_gave_up = false;
@@ -1073,12 +1333,30 @@ impl<U: Uart> MacMgmtSap for RcpDriver<U> {
 impl<U: Uart> MacInterPanSap for RcpDriver<U> {
     fn interpan_request(
         &mut self,
-        _channel: Channel,
+        channel: Channel,
         msdu: &FramePayload,
     ) -> Result<TxHandle, MacError> {
-        // v0 rides the peer's tuned channel (per-request retune is a
-        // follow-up); the path bit, not the channel, selects routing.
-        self.queue_tx(true, msdu)
+        // Per-request retune: the peer has one tuned channel, so a
+        // request for any other channel re-tunes it first (the
+        // `SetChannel` lands in the provision cache, keeping the
+        // re-tuned channel authoritative after a reset handshake).
+        if self.channel != Some(channel) {
+            self.channel = Some(channel);
+            self.send_cmd(&Command::SetChannel {
+                channel: channel.number(),
+            });
+        }
+        // Unassociated initiators use the 0xFFFF placeholders the
+        // touchlink exchange expects; provisioned units use their own
+        // identity.
+        let (src_pan, src) = match (self.pan, self.short) {
+            (Some(pan), Some(short)) => (pan, short),
+            _ => (0xFFFF, 0xFFFF),
+        };
+        let seq = self.take_mac_seq();
+        let mut psdu = [0u8; MAX_MAC_PSDU];
+        let n = mac::build_inter_pan_psdu(seq, src_pan, src, msdu.as_slice(), &mut psdu)?;
+        self.queue_raw(true, &psdu[..n])
     }
 
     fn poll_interpan_confirm(&mut self) -> Option<TxConfirm> {
@@ -1095,6 +1373,7 @@ mod tests {
     use super::*;
     use crate::peer::EmulatedRcp;
     use crate::uart::HostSide;
+    use rounddance_mac_sap::MacAddress;
     use std::vec::Vec;
 
     fn pair() -> (RcpDriver<HostSide>, EmulatedRcp) {
@@ -1167,8 +1446,25 @@ mod tests {
         pump(&mut driver, &mut peer);
         let c = driver.poll_confirm().unwrap();
         assert_eq!((c.handle, c.status), (h, TxStatus::Delivered));
+        assert!(c.timestamp_us.is_some(), "confirms carry host time");
         let tx = peer.take_tx().unwrap();
-        assert_eq!(&tx.psdu[..tx.len as usize], &[0xDE, 0xAD]);
+        // v1 contract: the driver builds the 9-octet data MHR around
+        // the MSDU (ACK bit set — TxOptions::ACK above).
+        let tx_bytes = &tx.psdu[..tx.len as usize];
+        assert_eq!(
+            &tx_bytes[..9],
+            &[0x61, 0x88, tx_bytes[2], 0x2B, 0x1A, 0x02, 0x00, 0x00, 0x00]
+        );
+        assert_eq!(&tx_bytes[9..], &[0xDE, 0xAD]);
+        let parsed = crate::mac::parse_data_psdu(tx_bytes).unwrap();
+        assert_eq!(
+            parsed.src,
+            MacAddress {
+                pan: Some(0x1a2b),
+                addr: AddrMode::Short(0x0000),
+            }
+        );
+        assert_eq!(parsed.dst_pan, 0x1a2b);
 
         // Cancelling a queued frame reports Cancelled: hold the
         // single flight with A, queue B behind it, cancel B.
@@ -1299,6 +1595,193 @@ mod tests {
         assert_eq!(v.proto_version, crate::RCP_PROTO_VERSION);
         assert_eq!(v.caps, crate::RCP_CAPS);
         assert_eq!(v.eui, peer.eui());
+    }
+
+    #[test]
+    fn version_probe_names_target_for_universal_runner() {
+        // The universal PC runner speaks identical classes to every
+        // target and names the radio from the target caps bit.
+        use crate::cmd::{CAPS_TARGET_C6, CAPS_TARGET_H2, CAPS_TARGET_S31};
+        for (bit, name) in [
+            (CAPS_TARGET_H2, "H2"),
+            (CAPS_TARGET_C6, "C6"),
+            (CAPS_TARGET_S31, "S31"),
+        ] {
+            let (mut driver, mut peer) = pair();
+            form(&mut driver, &mut peer);
+            peer.target_caps = bit;
+            driver.query_version();
+            pump(&mut driver, &mut peer);
+            let v = driver.last_version().expect("version latched");
+            assert_eq!(
+                crate::cmd::caps_target_name(v.caps),
+                Some(name),
+                "probe names the radio"
+            );
+        }
+    }
+
+    #[test]
+    fn rx_carries_parsed_src_and_host_time() {
+        // RD-RCP-17: received PSDUs parse back into sources plus
+        // MSDUs, with host-arrival timestamps (no more AddrMode::None
+        // + whole-PSDU indications).
+        let (mut driver, mut peer) = pair();
+        form(&mut driver, &mut peer);
+        // A data PSDU from short 0x0002 (built the way the far end
+        // builds it): MHR + the two payload octets.
+        let mut psdu = [0u8; crate::mac::MAX_MAC_PSDU];
+        let n = crate::mac::build_data_psdu(
+            0x09,
+            0x1a2b,
+            0x0000,
+            0x0002,
+            &[0xCA, 0xFE],
+            true,
+            &mut psdu,
+        )
+        .unwrap();
+        driver.advance(1_234_567);
+        assert!(peer.queue_rx(&psdu[..n], -50, 200, false));
+        pump(&mut driver, &mut peer);
+        let ind = driver.poll_indication().expect("PAN indication");
+        assert_eq!(
+            ind.src,
+            MacAddress {
+                pan: Some(0x1a2b),
+                addr: AddrMode::Short(0x0002),
+            }
+        );
+        assert_eq!(ind.msdu.as_slice(), &[0xCA, 0xFE]);
+        assert_eq!(ind.lqi, 200);
+        assert_eq!(ind.timestamp_us, Some(1_234_567));
+        assert!(driver.poll_mac_indication().is_none());
+    }
+
+    #[test]
+    fn mac_command_psdu_surfaces_on_mac_queue() {
+        // RD-RCP-18: anything that is not a data/inter-PAN frame
+        // (here a 26-octet OTA-shaped beacon) lands verbatim on the
+        // MAC queue with its meters, for the upper layer to classify.
+        let (mut driver, mut peer) = pair();
+        form(&mut driver, &mut peer);
+        let mut beacon = [0u8; 26];
+        beacon[..14].copy_from_slice(&[
+            0x00, 0x80, 0x5a, 0x01, 0xc6, 0x00, 0x00, 0xff, 0xcf, 0x00, 0x00, 0x00, 0x22, 0x8c,
+        ]);
+        driver.advance(500);
+        assert!(peer.queue_rx(&beacon, -60, 180, false));
+        pump(&mut driver, &mut peer);
+        assert!(driver.poll_indication().is_none());
+        let mac = driver.poll_mac_indication().expect("MAC indication");
+        assert_eq!(mac.psdu(), &beacon);
+        assert_eq!(mac.rssi(), -60);
+        assert_eq!(mac.lqi(), 180);
+        assert_eq!(mac.channel_number(), 15);
+        // And the proxy path radiates a MAC PSDU verbatim: the peer
+        // sees exactly the bytes the upper layer built.
+        let h = driver.transmit_mac(&beacon).unwrap();
+        pump(&mut driver, &mut peer);
+        let c = driver.poll_confirm().expect("confirm lands");
+        assert_eq!((c.handle, c.status), (h, TxStatus::Delivered));
+        let tx = peer.take_tx().unwrap();
+        assert_eq!(&tx.psdu[..tx.len as usize], &beacon);
+    }
+
+    #[test]
+    fn interpan_request_retunes_per_request() {
+        // RD-RCP-18: an inter-PAN request for a non-tuned channel
+        // re-tunes the peer first, then radiates the broadcast
+        // header shape; the arrival channel tags the indication.
+        let (mut driver, mut peer) = pair();
+        form(&mut driver, &mut peer);
+        let h = driver
+            .interpan_request(
+                Channel::new(20).unwrap(),
+                &FramePayload::from_slice(&[0x78, 0x56]).unwrap(),
+            )
+            .unwrap();
+        pump(&mut driver, &mut peer);
+        assert_eq!(peer.channel(), Some(20), "peer retuned first");
+        let c = driver.poll_interpan_confirm().unwrap();
+        assert_eq!((c.handle, c.status), (h, TxStatus::Delivered));
+        let tx = peer.take_tx().unwrap();
+        assert!(tx.inter_pan);
+        let tx_bytes = &tx.psdu[..tx.len as usize];
+        assert_eq!(&tx_bytes[..3], &[0x01, 0x88, tx_bytes[2]]);
+        assert_eq!(&tx_bytes[3..7], &[0xFF, 0xFF, 0xFF, 0xFF]);
+        let qp = crate::mac::parse_inter_pan_psdu(tx_bytes).unwrap();
+        assert_eq!(&tx_bytes[qp.msdu_start..qp.msdu_end], &[0x78, 0x56]);
+    }
+
+    #[test]
+    fn tx_guards_refuse_unbuildable_requests() {
+        // RD-RCP-17 accounting + addressing gates: nothing
+        // unbuildable reaches the UART.
+        let (mut driver, mut peer) = pair();
+        // During the reset handshake everything refuses NotReady.
+        assert_eq!(
+            driver.data_request(TxRequest {
+                dst: MacAddress::short(0x1a2b, 0x0002),
+                msdu: FramePayload::from_slice(&[1]).unwrap(),
+                options: TxOptions::ACK,
+            }),
+            Err(MacError::NotReady)
+        );
+        driver.reset(true);
+        pump(&mut driver, &mut peer);
+        assert!(driver.ready());
+        // Ready but unprovisioned: no source for the header.
+        assert_eq!(
+            driver.data_request(TxRequest {
+                dst: MacAddress::short(0x1a2b, 0x0002),
+                msdu: FramePayload::from_slice(&[1]).unwrap(),
+                options: TxOptions::ACK,
+            }),
+            Err(MacError::NotReady)
+        );
+        form(&mut driver, &mut peer);
+        // Extended destinations are beyond the short-only path.
+        assert_eq!(
+            driver.data_request(TxRequest {
+                dst: MacAddress::extended(0x1a2b, 0x0200_0000_0000_0002),
+                msdu: FramePayload::from_slice(&[1]).unwrap(),
+                options: TxOptions::ACK,
+            }),
+            Err(MacError::Unsupported)
+        );
+        assert_eq!(
+            driver.data_request(TxRequest {
+                dst: MacAddress {
+                    pan: Some(0x1a2b),
+                    addr: AddrMode::None,
+                },
+                msdu: FramePayload::from_slice(&[1]).unwrap(),
+                options: TxOptions::ACK,
+            }),
+            Err(MacError::InvalidAddress)
+        );
+        // 116 octets fit the data path (9 + 116 + 2 = 127, exactly
+        // the ceiling) but overflow the inter-PAN one (11 + 116 + 2).
+        let full = [0xAAu8; 116];
+        assert!(driver
+            .data_request(TxRequest {
+                dst: MacAddress::short(0x1a2b, 0x0002),
+                msdu: FramePayload::from_slice(&full).unwrap(),
+                options: TxOptions::ACK,
+            })
+            .is_ok());
+        assert_eq!(
+            driver.interpan_request(
+                Channel::new(15).unwrap(),
+                &FramePayload::from_slice(&full).unwrap()
+            ),
+            Err(MacError::FrameTooLong)
+        );
+        // Empty MAC PSDUs are refused, like overlong ones.
+        assert_eq!(driver.transmit_mac(&[]), Err(MacError::FrameTooLong));
+        let huge = [0xBBu8; 128];
+        assert_eq!(driver.transmit_mac(&huge), Err(MacError::FrameTooLong));
     }
 
     #[test]

@@ -13,8 +13,9 @@
 //! * `no_std` + `#![forbid(unsafe_code)]`, no allocator: decode is
 //!   zero-copy (`Decoded::payload` borrows the input), encode writes
 //!   into a caller buffer, relay lists live in a fixed-size array.
-//! * Every fallible path returns [`Error`]; nothing panics, including on
-//!   adversarial input (short buffers, reserved discriminants).
+//! * Every fallible path returns a typed error ([`NwkError`],
+//!   [`CommandError`], [`NldeError`], [`RoutingError`]); nothing panics,
+//!   including on adversarial input (short buffers, reserved discriminants).
 //! * Reserved frame-control bits 14–15 are zeroed on encode and ignored
 //!   on decode (reserved-field handling per §1.4.2).
 #![no_std]
@@ -44,10 +45,11 @@ pub use nlde::{
     NldeDataRequest, TxPipeline,
 };
 pub use route::{
-    add_path_cost, DiscoverySession, DiscoveryTable, NeighborCosts, NeighborLink, RouteEntry,
-    RouteError as RoutingError, RouteTable, SeenRequests, DISCOVERY_RETRY_INTERVAL_MS,
-    DISCOVERY_TIMEOUT_MS, LINK_COST_AGE_MS, MAX_DISCOVERY_ATTEMPTS, MAX_NEIGHBOR_LINKS,
-    MAX_PENDING_DISCOVERIES, MAX_ROUTES, MAX_SEEN_REQUESTS, ROUTE_LIFETIME_MS, SEEN_LIFETIME_MS,
+    accumulate_path_cost, add_path_cost, DiscoverySession, DiscoveryTable, LinkEstimator,
+    NeighborCosts, NeighborLink, PathCostMetric, RouteEntry, RouteError as RoutingError,
+    RouteTable, SeenRequests, DISCOVERY_RETRY_INTERVAL_MS, DISCOVERY_TIMEOUT_MS, LINK_COST_AGE_MS,
+    MAX_DISCOVERY_ATTEMPTS, MAX_NEIGHBOR_LINKS, MAX_PENDING_DISCOVERIES, MAX_ROUTES,
+    MAX_SEEN_REQUESTS, ROUTE_LIFETIME_MS, SEEN_LIFETIME_MS,
 };
 
 /// Crate identifier.

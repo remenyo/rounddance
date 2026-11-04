@@ -9,7 +9,7 @@
 //! bytes without allocating, with the exact field semantics of the
 //! shared [`sniffer`](crate::sniffer) line parser (FCS stripped,
 //! missing radio fields defaulting to zero). [`Ingest`] folds framed
-//! lines through the dissect legs plus [`SessionEngine`](crate::session::SessionEngine)
+//! lines through the dissect legs plus [`crate::session::SessionEngine`]
 //! incrementally, so a session snapshot after any frame matches the
 //! line-at-a-time batch replay exactly.
 //!

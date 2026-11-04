@@ -136,8 +136,9 @@ fn live_wire_parser_matches_replay_parser() {
 
 #[test]
 fn radio_file_replay_is_report_identical() {
-    let dir = std::env::temp_dir();
-    let path = dir.join("w2-live-radio-feed.txt");
+    // PID-unique scratch: concurrent `cargo test` runners (or a stale
+    // file from a killed run) must never share or collide on this path.
+    let path = std::env::temp_dir().join(format!("w2-live-radio-feed-{}.txt", std::process::id()));
     let mut text = String::new();
     for l in LINES {
         text.push_str(l);

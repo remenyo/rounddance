@@ -15,7 +15,7 @@
 use esp_idf_hal::gpio::PinDriver;
 use esp_idf_hal::peripherals::Peripherals;
 use rounddance_hal_esp::app::{
-    eui_from_mac, log_air, role_from_mac, JoinerNwkOutcome, HA_PROFILE, UNASSOC_SHORT,
+    eui_from_mac, log_air, role_from_mac, JoinerNwkOutcome, APP_PAN, HA_PROFILE, UNASSOC_SHORT,
 };
 use rounddance_hal_esp::mac_cmd::Incoming as MacIncoming;
 use rounddance_hal_esp::{AppRole, EspAdapter, EspIdfDriver, JoinerApp, SerialLog};
@@ -45,6 +45,58 @@ const fn parse_channel(s: &str) -> u8 {
 const JOINER_SCAN_CHANNEL: u8 = match option_env!("RD_JOINER_SCAN_CHANNEL") {
     Some(s) => parse_channel(s),
     None => 15,
+};
+// Association parent: the short address the assoc-req is sent to.
+// Default is the coordinator (`0x0000`); a child joining through a
+// router overrides it at build time (e.g. `RD_ASSOC_PARENT=0002`),
+// no source edit needed. Four lower-case-insensitive hex digits.
+const fn parse_hex4(s: &str) -> u16 {
+    let b = s.as_bytes();
+    assert!(b.len() == 4, "RD_ASSOC_PARENT must be 4 hex digits");
+    let mut v: u16 = 0;
+    let mut i = 0;
+    while i < 4 {
+        let d = match b[i] {
+            b'0'..=b'9' => b[i] - b'0',
+            b'a'..=b'f' => b[i] - b'a' + 10,
+            b'A'..=b'F' => b[i] - b'A' + 10,
+            _ => panic!("RD_ASSOC_PARENT not hex"),
+        };
+        v = (v << 4) | d as u16;
+        i += 1;
+    }
+    v
+}
+const JOINER_ASSOC_PARENT: u16 = match option_env!("RD_ASSOC_PARENT") {
+    Some(s) => parse_hex4(s),
+    None => 0x0000,
+};
+/// Provisioned joiner base MAC: `RD_JOINER_MAC` (12 hex digits)
+/// bakes the unit identity in at build time; unset falls back to the
+/// lab joiner unit (97A4). Lets a second unit act as a downstream
+/// child (e.g. of the router) without touching the shared role gate.
+const fn parse_mac(s: &str) -> [u8; 6] {
+    let b = s.as_bytes();
+    let mut out = [0u8; 6];
+    let mut i = 0;
+    while i < 6 {
+        let h = (hex_val(b[2 * i]) << 4) | hex_val(b[2 * i + 1]);
+        out[i] = h;
+        i += 1;
+    }
+    out
+}
+const fn hex_val(c: u8) -> u8 {
+    match c {
+        b'0'..=b'9' => c - b'0',
+        b'a'..=b'f' => c - b'a' + 10,
+        b'A'..=b'F' => c - b'A' + 10,
+        _ => panic!("RD_JOINER_MAC not hex"),
+    }
+}
+const PROVISIONED_JOINER_MAC: [u8; 6] = match option_env!("RD_JOINER_MAC") {
+    Some(s) => parse_mac(s),
+    None => [0xa0, 0xf2, 0x62, 0x85, 0x97, 0xa4],
 };
 // Beacon-req / assoc-req retry cadence while unassociated.
 const REQ_INTERVAL_MS: u64 = 2_000;
@@ -160,15 +212,16 @@ fn main() {
     ant3.set_low().expect("ant3 low");
     ant14.set_low().expect("ant14 low");
 
-    // Role gate BEFORE the radio: only the verified lab joiner unit
-    // (97A4) boots this image; anything else refuses silently.
+    // Role gate BEFORE the radio: this image boots on the provisioned
+    // joiner unit (default 97A4); anything else refuses silently.
     let mut mac = [0u8; 6];
     let rc = unsafe { esp_read_mac(mac.as_mut_ptr(), ESP_MAC_BASE) };
     assert!(rc == 0, "esp_read_mac BASE rc={rc}");
     let eui = eui_from_mac(&mac);
     println!("RDJOIN ident mac={mac:02x?} eui={eui:02x?}");
-    println!("RDJOIN scan ch={JOINER_SCAN_CHANNEL}");
-    if role_from_mac(&mac) != Some(AppRole::Joiner) {
+    println!("RDJOIN scan ch={JOINER_SCAN_CHANNEL} parent={JOINER_ASSOC_PARENT:#06x}");
+    let generic_ok = mac == PROVISIONED_JOINER_MAC || role_from_mac(&mac) == Some(AppRole::Joiner);
+    if !generic_ok {
         println!("RDJOIN refuse: not the joiner unit, radio untouched");
         loop {
             std::thread::sleep(std::time::Duration::from_secs(60));
@@ -201,8 +254,10 @@ fn main() {
     let ch = Channel::new(JOINER_SCAN_CHANNEL).expect("scan channel 11-26");
     adapter.set_channel(ch).expect("tune scan channel");
 
+    // Provisioned identity: the app answers and announces as THIS unit
+    // (matches the role gate above; the default is the lab joiner).
     let app: &'static mut JoinerApp<'static> =
-        Box::leak(Box::new(JoinerApp::new(&LAMP_DEF).expect("joiner app")));
+        Box::leak(Box::new(JoinerApp::new_with_ieee(&LAMP_DEF, eui).expect("joiner app")));
     // NVM-backed aux counter (Phase 4, joiner side): resume from the
     // persisted chunk so a reboot never rewinds into the TC's replay
     // window. Reads after `init` (the driver NVS-first-inits there);
@@ -237,6 +292,8 @@ fn main() {
     const SCAN_WINDOW_MS: u64 = 4_000;
     let mut last_req_ms: u64 = 0;
     let mut assoc_tries: u32 = 0;
+    let mut last_poll_ms: u64 = 0;
+    const POLL_INTERVAL_MS: u64 = 5_000;
     let mut assoc_done_logged = false;
     // PAN adopted from the elected candidate (0xFFFF until then).
     // The radio's hardware filter drops unicast frames for a foreign
@@ -345,7 +402,7 @@ fn main() {
                     println!("RDJOIN ADOPTED pan={pan:#06x}");
                 }
                 // Associated-candidate known: ask to join it.
-                match app.take_assoc_req(&mut tx_buf, pan) {
+                match app.take_assoc_req(&mut tx_buf, pan, JOINER_ASSOC_PARENT) {
                     Ok(n) if n > 0 => {
                         log_air(&mut log, "RDJOIN TX-ASSOC-REQ", &tx_buf[..n]);
                         if let Err(e) = adapter.transmit_mac(&tx_buf[..n]) {
@@ -379,6 +436,28 @@ fn main() {
             if !assoc_done_logged {
                 assoc_done_logged = true;
                 println!("RDJOIN ASSOC-DONE short={short:#06x} (waiting for Trust-Center key)");
+            }
+            // Sleepy-child polling (goal RTR-02): once associated,
+            // poll the parent on a slow cadence so a router parent's
+            // indirect queue drains onto the air.
+            if now_ms.wrapping_sub(last_poll_ms) >= POLL_INTERVAL_MS {
+                last_poll_ms = now_ms;
+                mac_seq = mac_seq.wrapping_add(1);
+                match rounddance_hal_esp::mac_cmd::build_data_poll_short(
+                    mac_seq,
+                    adopted_pan.unwrap_or(APP_PAN),
+                    JOINER_ASSOC_PARENT,
+                    short,
+                    &mut tx_buf,
+                ) {
+                    Ok(n) => {
+                        log_air(&mut log, "RDJOIN TX-POLL", &tx_buf[..n]);
+                        if let Err(e) = adapter.transmit_mac(&tx_buf[..n]) {
+                            println!("RDJOIN TX-POLL-FAILED {e:?}");
+                        }
+                    }
+                    Err(e) => println!("RDJOIN POLL-BUILD-FAILED {e:?}"),
+                }
             }
         }
         // NWK RX: Trust-Center key open (adopt) + post-adoption

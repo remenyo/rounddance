@@ -1,7 +1,7 @@
 //! NWK decryptor: lab-key-gated integrity-checked open of secured
 //! NWK payloads.
 //!
-//! The session [`KeySlots`](crate::keys::KeySlots) record which lab
+//! The session [`crate::keys::KeySlots`] record which lab
 //! keys the operator loaded; this module turns a slotted key into a
 //! verified plaintext. It never decrypts without a slotted key, it
 //! resolves the key strictly by the auxiliary header's key sequence

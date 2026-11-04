@@ -13,6 +13,7 @@
 
 use rounddance_security::{compress_point, decompress_point, EccBackend, EccError, COMPRESSED_LEN};
 
+#[cfg(feature = "host")]
 fn unhex<const N: usize>(s: &str) -> [u8; N] {
     let bytes: Vec<u8> = (0..s.len())
         .step_by(2)

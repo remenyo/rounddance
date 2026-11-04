@@ -7,10 +7,10 @@
 //! and hands accepted commands to the network layer as routing
 //! records. [`receive`] wires the existing machines
 //! ([`Gpdf::decode`](crate::frame::Gpdf),
-//! [`GpReplay`](crate::security::GpReplay),
-//! [`SinkTable`](crate::sink::SinkTable),
-//! [`TranslationTable`](crate::sink::TranslationTable),
-//! [`CommissioningSession`](crate::commissioning::CommissioningSession))
+//! [`crate::security::GpReplay`],
+//! [`crate::sink::SinkTable`],
+//! [`crate::sink::TranslationTable`],
+//! [`crate::commissioning::CommissioningSession`])
 //! into that single intake so callers never re-derive the order:
 //! decode, ingress filter, secured open, freshness, Success
 //! completion, table admission, then route.

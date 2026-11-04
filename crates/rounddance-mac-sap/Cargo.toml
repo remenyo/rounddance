@@ -4,3 +4,4 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "MAC service access point traits for the Rounddance Zigbee stack"

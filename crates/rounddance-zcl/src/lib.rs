@@ -34,12 +34,14 @@ pub mod behavior;
 pub mod cluster;
 pub mod discovery;
 pub mod dispatch;
+pub mod drlc;
 pub mod electrical;
 pub mod frame;
 pub mod general;
 pub mod ias_zone;
 pub mod keyest;
 pub mod level;
+pub mod messaging;
 pub mod metering;
 pub mod mirror;
 pub mod notify;
@@ -53,6 +55,7 @@ pub mod status;
 pub mod supply;
 pub mod transaction;
 pub mod types;
+pub mod uncovered;
 pub mod wd;
 
 pub use attrs::{
@@ -100,11 +103,11 @@ pub enum Error {
     MalformedList,
     /// More records than the bounded output holds.
     TooManyRecords,
-    /// String body exceeds [`MAX_STR_LEN`](crate::types::MAX_STR_LEN).
+    /// String body exceeds [`crate::types::MAX_STR_LEN`].
     StringTooLong,
     /// Array body/count exceeds the bounded codec.
     ArrayTooLong,
-    /// More attributes than [`MAX_ATTRS`](crate::attrs::MAX_ATTRS).
+    /// More attributes than [`crate::attrs::MAX_ATTRS`].
     TooManyAttributes,
     /// Duplicate attribute registration.
     DuplicateAttribute,

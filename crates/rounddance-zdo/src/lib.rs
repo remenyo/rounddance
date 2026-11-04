@@ -32,11 +32,20 @@ pub mod zdp;
 
 pub use bind::{endpoint_bindable, group_member_endpoint, BindManager};
 pub use cluster::{
-    response_cluster, CLUSTER_ACTIVE_EP_REQ, CLUSTER_BIND_REQ, CLUSTER_DEVICE_ANNCE,
-    CLUSTER_IEEE_ADDR_REQ, CLUSTER_MATCH_DESC_REQ, CLUSTER_MGMT_LEAVE_REQ, CLUSTER_MGMT_LQI_REQ,
-    CLUSTER_MGMT_NWK_UPDATE_REQ, CLUSTER_MGMT_PERMIT_JOINING_REQ, CLUSTER_NODE_DESC_REQ,
-    CLUSTER_NWK_ADDR_REQ, CLUSTER_POWER_DESC_REQ, CLUSTER_SIMPLE_DESC_REQ, CLUSTER_UNBIND_REQ,
-    RESPONSE_BIT,
+    response_cluster, CLUSTER_ACTIVE_EP_REQ, CLUSTER_BACKUP_BIND_TABLE_REQ,
+    CLUSTER_BACKUP_SOURCE_BIND_REQ, CLUSTER_BIND_REGISTER_REQ, CLUSTER_BIND_REQ,
+    CLUSTER_CLEAR_ALL_BINDINGS_REQ, CLUSTER_COMPLEX_DESC_REQ, CLUSTER_DEVICE_ANNCE,
+    CLUSTER_DISCOVERY_CACHE_REQ, CLUSTER_DISCOVERY_STORE_REQ, CLUSTER_END_DEVICE_BIND_REQ,
+    CLUSTER_IEEE_ADDR_REQ, CLUSTER_MATCH_DESC_REQ, CLUSTER_MGMT_BIND_REQ, CLUSTER_MGMT_CACHE_REQ,
+    CLUSTER_MGMT_DIRECT_JOIN_REQ, CLUSTER_MGMT_LEAVE_REQ, CLUSTER_MGMT_LQI_REQ,
+    CLUSTER_MGMT_NWK_BEACON_SURVEY_REQ, CLUSTER_MGMT_NWK_DISC_REQ,
+    CLUSTER_MGMT_NWK_ENHANCED_UPDATE_REQ, CLUSTER_MGMT_NWK_IEEE_JOINING_LIST_REQ,
+    CLUSTER_MGMT_NWK_UPDATE_REQ, CLUSTER_MGMT_PERMIT_JOINING_REQ, CLUSTER_MGMT_RTG_REQ,
+    CLUSTER_NODE_DESC_REQ, CLUSTER_NODE_DESC_STORE_REQ, CLUSTER_NWK_ADDR_REQ, CLUSTER_PARENT_ANNCE,
+    CLUSTER_POWER_DESC_REQ, CLUSTER_RECOVER_BIND_TABLE_REQ, CLUSTER_RECOVER_SOURCE_BIND_REQ,
+    CLUSTER_REMOVE_BAK_BIND_ENTRY_REQ, CLUSTER_REPLACE_DEVICE_REQ, CLUSTER_SIMPLE_DESC_REQ,
+    CLUSTER_STORE_BAK_BIND_ENTRY_REQ, CLUSTER_SYSTEM_SERVER_DISCOVERY_REQ, CLUSTER_UNBIND_REQ,
+    CLUSTER_USER_DESC_REQ, CLUSTER_USER_DESC_SET_REQ, RESPONSE_BIT,
 };
 pub use desc::{
     Error as ZdoError, LogicalType, NodeDescriptor, PowerDescriptor, PowerMode, SimpleDescriptor,
@@ -45,17 +54,28 @@ pub use desc::{
 pub use endpoint::{endpoint_answerable, simple_desc_fits, EndpointTable, MAX_LOCAL_ENDPOINTS};
 pub use mgmt::{
     decide_local_conflict, decide_remote_conflict, detect_local_conflict, first_table_conflict,
-    reannounce, ConflictDecision, ConflictOutcome, ConflictRole, MgmtLeaveReq, MgmtLeaveRsp,
-    MgmtLqiReq, MgmtLqiRsp, MgmtNwkUpdateNotify, MgmtNwkUpdateReq, MgmtPermitJoiningReq,
-    MgmtPermitJoiningRsp, NeighborEntry, MAX_ENERGY_VALUES, MAX_NEIGHBORS,
+    reannounce, BeaconSurveyResults, CacheEntry, ChannelList, ChannelPageMask, ConflictDecision,
+    ConflictOutcome, ConflictRole, JoiningPolicy, MgmtBindEntry, MgmtBindReq, MgmtBindRsp,
+    MgmtCacheReq, MgmtCacheRsp, MgmtDirectJoinReq, MgmtDirectJoinRsp, MgmtLeaveReq, MgmtLeaveRsp,
+    MgmtLqiReq, MgmtLqiRsp, MgmtNwkBeaconSurveyReq, MgmtNwkBeaconSurveyRsp, MgmtNwkDiscReq,
+    MgmtNwkDiscRsp, MgmtNwkEnhancedUpdateNotify, MgmtNwkEnhancedUpdateReq,
+    MgmtNwkIeeeJoiningListReq, MgmtNwkIeeeJoiningListRsp, MgmtNwkUpdateNotify, MgmtNwkUpdateReq,
+    MgmtPermitJoiningReq, MgmtPermitJoiningRsp, MgmtRtgReq, MgmtRtgRsp, NeighborEntry,
+    NetworkEntry, PotentialParent, RtgEntry, BEACON_SURVEY_CONFIG_TAG, MAX_CACHE_ENTRIES,
+    MAX_CHANNEL_PAGES, MAX_ENERGY_VALUES, MAX_ENHANCED_ENERGY, MAX_JOINING_IEEE,
+    MAX_MGMT_BIND_ENTRIES, MAX_NEIGHBORS, MAX_NETWORKS, MAX_POTENTIAL_PARENTS, MAX_RTG_ENTRIES,
 };
 pub use status::ZdpStatus;
 pub use transaction::{transaction_expected, Pending, PendingTable, TxnError};
 pub use zdp::{
-    ActiveEpReq, ActiveEpRsp, BindDstMode, BindEntry, BindRsp, DeviceAnnce, IeeeAddrReq,
-    IeeeAddrRsp, MatchDescReq, MatchDescRsp, NodeDescReq, NodeDescRsp, NwkAddrReq, NwkAddrRsp,
-    PowerDescReq, PowerDescRsp, RequestType, SimpleDescReq, SimpleDescRsp, MAX_ASSOC_DEVICES,
-    MAX_EP_LIST,
+    ActiveEpReq, ActiveEpRsp, BindDstMode, BindEntry, BindRsp, ChildInfo, ClearAllBindingsReq,
+    ClearAllBindingsRsp, ComplexDescReq, ComplexDescRsp, ComplexField, DeviceAnnce,
+    EndDeviceBindReq, EndDeviceBindRsp, IeeeAddrReq, IeeeAddrRsp, MatchDescReq, MatchDescRsp,
+    NodeDescReq, NodeDescRsp, NwkAddrReq, NwkAddrRsp, ParentAnnce, ParentAnnceRsp, PowerDescReq,
+    PowerDescRsp, RequestType, SimpleDescReq, SimpleDescRsp, SystemServerDiscoveryReq,
+    SystemServerDiscoveryRsp, UserDescReq, UserDescRsp, CLEAR_BINDINGS_EUI64_TAG,
+    MAX_ASSOC_DEVICES, MAX_CHILD_INFO, MAX_CLEAR_EUI64S, MAX_COMPLEX_FIELDS, MAX_COMPLEX_FIELD_LEN,
+    MAX_EP_LIST, MAX_EZB_CLUSTERS, MAX_USER_DESC_LEN,
 };
 
 /// Crate identifier.

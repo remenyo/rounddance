@@ -4,3 +4,4 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Zigbee APS layer frame codecs, fragmentation and retries (no_std)"
