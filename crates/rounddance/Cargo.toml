@@ -1,0 +1,32 @@
+[package]
+name = "rounddance"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Rounddance Zigbee-compatible stack: one library over the portable no_std layers, sim, and host HAL"
+
+[lib]
+name = "rounddance"
+path = "src/lib.rs"
+
+[dependencies]
+rounddance-mac-sap = { path = "../rounddance-mac-sap" }
+rounddance-nwk = { path = "../rounddance-nwk" }
+rounddance-aps = { path = "../rounddance-aps" }
+rounddance-zdo = { path = "../rounddance-zdo" }
+rounddance-security = { path = "../rounddance-security" }
+rounddance-zcl = { path = "../rounddance-zcl" }
+rounddance-gp = { path = "../rounddance-gp" }
+rounddance-ifc = { path = "../rounddance-ifc" }
+rounddance-commission = { path = "../rounddance-commission" }
+rounddance-compat = { path = "../rounddance-compat" }
+rounddance-direct = { path = "../rounddance-direct" }
+rounddance-roles = { path = "../rounddance-roles" }
+rounddance-sim = { path = "../rounddance-sim" }
+rounddance-hal-host = { path = "../rounddance-hal-host" }
+rounddance-hal-esp = { path = "../rounddance-hal-esp" }
+rounddance-browser = { path = "../rounddance-browser" }
+rounddance-rcp = { path = "../rounddance-rcp" }
+rounddance-inspect = { path = "../rounddance-inspect" }
+rounddance-sniffer = { path = "../rounddance-sniffer" }

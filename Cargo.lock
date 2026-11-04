@@ -1009,6 +1009,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "rounddance"
+version = "0.1.0"
+dependencies = [
+ "rounddance-aps",
+ "rounddance-browser",
+ "rounddance-commission",
+ "rounddance-compat",
+ "rounddance-direct",
+ "rounddance-gp",
+ "rounddance-hal-esp",
+ "rounddance-hal-host",
+ "rounddance-ifc",
+ "rounddance-inspect",
+ "rounddance-mac-sap",
+ "rounddance-nwk",
+ "rounddance-rcp",
+ "rounddance-roles",
+ "rounddance-security",
+ "rounddance-sim",
+ "rounddance-sniffer",
+ "rounddance-zcl",
+ "rounddance-zdo",
+]
+
+[[package]]
 name = "rounddance-aps"
 version = "0.1.0"
 
