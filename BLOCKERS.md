@@ -179,6 +179,23 @@ Status: PARKED 2026-10-31 (cause: C6-specific assoc silence is fully isolated bu
   hypothesis for the w102 C6 silence is now TC-state-at-the-time
   (that TC died detach-adjacent twice, documented). NEXT (ran w109 - still silent, 3rd campaign): 30 assocs on air to permit-open MG21 (first ACKed), ZERO RSPs on serial + sniffer (507 s capture). Fresh-TC control confounded (TC died detach-adjacent/spontaneously twice more - datapoints 4-5; bellows CLI flaky both ways, `form` silent-fail + `permit` NetworkNotFormed - new single-session direct-EZSP form+permit script pays both debts, NETWORK_UP confirmed in-session). New leading hypothesis: retry-storm suppression (MG24 answered on a SINGLE assoc in w108; our C6 retries every 2 s in all 3 silent campaigns - cheapest next: single-shot assoc one-off fw). ALSO NEW: phantom C601 election input - ch25 joiner twice elected/assoc'd 0xc601 with ZERO sniffer corroboration (925 beacons all MG21); one byte-exact 7F68-shaped beacon logged at -35 that never reached air per sniffer; cause UNDETERMINED (transient source vs log artifact); parked follow-up: election hardening (N-sighting confirmation before electing an unseen PAN). Evidence ~/hwscratch/w109/.
 - W117 6th campaign (second Ember TC generation) SILENT, re-park: ZBDongle-E 7.4.4.0 (ttyUSB2) fresh PAN 0x3777/ch25, formed+permit-held in ONE bellows session (detach-death repro on re-attach; hold workaround; permitJoining takes uint8 ≤255), beacon-verified permit-open (331 beacons, `ff cf`), TC JOINED 0x0000 at every 30 s check; C6 one-off single-shot ch25 fw (retries=1): serial 1× assoc-req seq 00, sniffer 3× identical ACKed (3-vs-1 is dual-reader UART-split artifact — verdict count-independent); ZERO assoc-rsp (0× `63cc` in 482 s) on serial and sniffer. Silence now spans MG21 stick + ZBDongle-E. Remaining opens: CC2652 cross-family (goal-2 Phase 2), NCP-side trace mapping. 97A4 workhorse restored (revert + rebuild + ch15 boot; readback differs by rebuild variance + NVS, functionally verified). Evidence ~/hwscratch/w117/.
+- W118 Phase-2 attempt BLOCKED on the stick, not on C6: CC2652
+  (ttyUSB3) pre-state inventoried + backed up to `cc2652-pre.json`
+  (0x2665/ch20, key counter 1250 — radio worked historically); fresh
+  0x3779/ch25 formed + started + permit-open (own zigpy script;
+  `form_network` writes NV only, `start_network` required; direct
+  MgmtPermitJoinReq bypasses a 2.4/1.1.1 version-gate crash); ~700
+  beacon solicitations over ~30 min → ZERO 0x3779 answers on clean
+  single-reader serial and sniffer (1219 frames: 587 reqs, 590 0x3777
+  answers, 0 from 0x3779); stick self-scan hears nothing; energy-scan
+  RX alive; soft-reset clean, still mute; `zigpy radio reset` is a
+  FACTORY NV wipe (recovered via re-form — my error, documented).
+  Muteness spans pre-existing, formed, and post-wipe states: TX path
+  dead or MAC wedged beyond NV. Pre-state NV restored + verified;
+  97A4 workhorse restored (ch15). No flash write to the stick.
+  Phantom 0xc601 reproduced once more (3 sightings → elected;
+  absent in clean run). OUI-keying stays open; B-010 CC leg needs a
+  known-good unit. Evidence ~/hwscratch/w118/.
 - W110 single-shot test KILLS the storm hypothesis: one-off fw
   (ASSOC_RETRIES_MAX 30->1, ch25) sends exactly ONE assoc per boot
   (sniffer-confirmed, seq 00, ACKed) to a freshly-formed permit-open
