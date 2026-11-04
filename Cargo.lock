@@ -1083,7 +1083,11 @@ dependencies = [
 name = "rounddance-ffi"
 version = "0.1.0"
 dependencies = [
+ "rounddance-commission",
+ "rounddance-hal-esp",
  "rounddance-hal-host",
+ "rounddance-security",
+ "rounddance-zcl",
 ]
 
 [[package]]

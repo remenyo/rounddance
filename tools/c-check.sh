@@ -68,5 +68,15 @@ print(f'DECISION-MATCH: digest {digest_native}, '
       f'trace_lines={trace_native}, C + C++ == native')
 EOF
 
+echo "== compile C apps harness =="
+gcc -std=c11 -Wall -Wextra -Werror -O2 harness/c/apps.c "$LIB" \
+    -o /tmp/c-apps -lpthread -ldl -lm
+echo "C apps compile OK"
+
+echo "== run C apps harness =="
+/tmp/c-apps > /tmp/c-apps.txt
+tail -1 /tmp/c-apps.txt
+grep -q "C-APPS-MATCH: lamp=1 defrsp=1 dup-firewalled" /tmp/c-apps.txt
+
 echo "== test suites =="
 cargo test -q -p rounddance-ffi 2>&1 | grep -E "test result" || true

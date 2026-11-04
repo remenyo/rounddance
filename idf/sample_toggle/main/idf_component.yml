@@ -1,0 +1,6 @@
+dependencies:
+  # Local-development form of the components.yaml import: resolved to
+  # idf/components/rounddance without registry traffic. Publication
+  # swaps this for: rounddance: ">=0.1.0" (registry).
+  rounddance:
+    path: ../../components/rounddance
