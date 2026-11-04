@@ -11,17 +11,17 @@ default = ["std"]
 std = ["rounddance-inspect/std"]
 
 [dependencies]
-rounddance-inspect = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-inspect" }
+rounddance-inspect = { version = ">=0.1.0-alpha.3, <0.2.0", path = "../rounddance-inspect" }
 # Raw termios serial driver for the `rd-sniff --live` binary (unix).
 # The library itself stays `forbid(unsafe_code)`-clean: it is generic
 # over any `Read + Write` port, and only the binary touches `libc`.
 libc = "0.2"
 
 [dev-dependencies]
-rounddance-aps = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-aps" }
-rounddance-nwk = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-nwk" }
-rounddance-zcl = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-zcl" }
-rounddance-security = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-security" }
+rounddance-aps = { version = ">=0.1.0-alpha.3, <0.2.0", path = "../rounddance-aps" }
+rounddance-nwk = { version = ">=0.1.0-alpha.3, <0.2.0", path = "../rounddance-nwk" }
+rounddance-zcl = { version = ">=0.1.0-alpha.3, <0.2.0", path = "../rounddance-zcl" }
+rounddance-security = { version = ">=0.1.0-alpha.3, <0.2.0", path = "../rounddance-security" }
 
 [[bin]]
 name = "rd-sniff"

@@ -7,9 +7,9 @@ repository.workspace = true
 description = "Zigbee Direct commissioning core, session and advert (no_std)"
 
 [dependencies]
-rounddance-commission = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-commission" }
-rounddance-security = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-security" }
+rounddance-commission = { version = ">=0.1.0-alpha.3, <0.2.0", path = "../rounddance-commission" }
+rounddance-security = { version = ">=0.1.0-alpha.3, <0.2.0", path = "../rounddance-security" }
 
 [dev-dependencies]
-rounddance-commission = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-commission" }
-rounddance-security = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-security" }
+rounddance-commission = { version = ">=0.1.0-alpha.3, <0.2.0", path = "../rounddance-commission" }
+rounddance-security = { version = ">=0.1.0-alpha.3, <0.2.0", path = "../rounddance-security" }

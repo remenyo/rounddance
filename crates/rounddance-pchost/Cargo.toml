@@ -11,16 +11,16 @@ name = "rd-pchost"
 path = "src/main.rs"
 
 [dependencies]
-rounddance-mac-sap = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-mac-sap" }
-rounddance-rcp = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-rcp" }
-rounddance-hal-esp = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-hal-esp" }
-rounddance-commission = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-commission" }
-rounddance-nwk = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-nwk" }
-rounddance-aps = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-aps" }
-rounddance-security = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-security" }
-rounddance-zcl = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-zcl" }
-rounddance-zdo = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-zdo" }
-rounddance-roles = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-roles" }
+rounddance-mac-sap = { version = ">=0.1.0-alpha.3, <0.2.0", path = "../rounddance-mac-sap" }
+rounddance-rcp = { version = ">=0.1.0-alpha.3, <0.2.0", path = "../rounddance-rcp" }
+rounddance-hal-esp = { version = ">=0.1.0-alpha.3, <0.2.0", path = "../rounddance-hal-esp" }
+rounddance-commission = { version = ">=0.1.0-alpha.3, <0.2.0", path = "../rounddance-commission" }
+rounddance-nwk = { version = ">=0.1.0-alpha.3, <0.2.0", path = "../rounddance-nwk" }
+rounddance-aps = { version = ">=0.1.0-alpha.3, <0.2.0", path = "../rounddance-aps" }
+rounddance-security = { version = ">=0.1.0-alpha.3, <0.2.0", path = "../rounddance-security" }
+rounddance-zcl = { version = ">=0.1.0-alpha.3, <0.2.0", path = "../rounddance-zcl" }
+rounddance-zdo = { version = ">=0.1.0-alpha.3, <0.2.0", path = "../rounddance-zdo" }
+rounddance-roles = { version = ">=0.1.0-alpha.3, <0.2.0", path = "../rounddance-roles" }
 libc = "0.2"
 
 [dev-dependencies]

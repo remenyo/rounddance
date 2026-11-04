@@ -751,7 +751,7 @@ checksum = "a4933f3f57a8e9d9da04db23fb153356ecaf00cbd14aee46279c33dc80925c37"
 
 [[package]]
 name = "lab-arbitrator"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "libc",
  "serde",
@@ -1010,7 +1010,7 @@ dependencies = [
 
 [[package]]
 name = "rounddance"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "rounddance-aps",
  "rounddance-browser",
@@ -1036,18 +1036,18 @@ dependencies = [
 
 [[package]]
 name = "rounddance-aps"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 
 [[package]]
 name = "rounddance-browser"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "rounddance-hal-host",
 ]
 
 [[package]]
 name = "rounddance-commission"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "rounddance-aps",
  "rounddance-mac-sap",
@@ -1058,7 +1058,7 @@ dependencies = [
 
 [[package]]
 name = "rounddance-compat"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "rounddance-aps",
  "rounddance-commission",
@@ -1072,7 +1072,7 @@ dependencies = [
 
 [[package]]
 name = "rounddance-direct"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "rounddance-commission",
  "rounddance-security",
@@ -1080,7 +1080,7 @@ dependencies = [
 
 [[package]]
 name = "rounddance-ffi"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "rounddance-commission",
  "rounddance-hal-esp",
@@ -1091,7 +1091,7 @@ dependencies = [
 
 [[package]]
 name = "rounddance-gp"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "rounddance-mac-sap",
  "rounddance-security",
@@ -1099,7 +1099,7 @@ dependencies = [
 
 [[package]]
 name = "rounddance-hal-esp"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "esp-idf-sys",
  "rounddance-aps",
@@ -1114,7 +1114,7 @@ dependencies = [
 
 [[package]]
 name = "rounddance-hal-host"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "rounddance-aps",
  "rounddance-commission",
@@ -1129,7 +1129,7 @@ dependencies = [
 
 [[package]]
 name = "rounddance-hal-wasm"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "rounddance-commission",
  "rounddance-hal-esp",
@@ -1141,14 +1141,14 @@ dependencies = [
 
 [[package]]
 name = "rounddance-ifc"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "rounddance-inspect"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "libc",
  "rounddance-aps",
@@ -1162,15 +1162,15 @@ dependencies = [
 
 [[package]]
 name = "rounddance-mac-sap"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 
 [[package]]
 name = "rounddance-nwk"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 
 [[package]]
 name = "rounddance-pchost"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "libc",
  "rounddance-aps",
@@ -1187,14 +1187,14 @@ dependencies = [
 
 [[package]]
 name = "rounddance-rcp"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "rounddance-mac-sap",
 ]
 
 [[package]]
 name = "rounddance-roles"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "rounddance-commission",
  "rounddance-nwk",
@@ -1203,7 +1203,7 @@ dependencies = [
 
 [[package]]
 name = "rounddance-security"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "hmac",
  "p256",
@@ -1215,7 +1215,7 @@ dependencies = [
 
 [[package]]
 name = "rounddance-sim"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "rounddance-aps",
  "rounddance-commission",
@@ -1233,7 +1233,7 @@ dependencies = [
 
 [[package]]
 name = "rounddance-sniffer"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "libc",
  "rounddance-aps",
@@ -1245,7 +1245,7 @@ dependencies = [
 
 [[package]]
 name = "rounddance-zcl"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "rounddance-aps",
  "rounddance-mac-sap",
@@ -1255,7 +1255,7 @@ dependencies = [
 
 [[package]]
 name = "rounddance-zdo"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "rounddance-aps",
  "rounddance-mac-sap",

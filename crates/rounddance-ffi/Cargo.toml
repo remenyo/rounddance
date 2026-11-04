@@ -10,11 +10,11 @@ description = "C ABI over the first complete host transaction (adapter shim, not
 crate-type = ["staticlib", "rlib"]
 
 [dependencies]
-rounddance-commission = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-commission" }
-rounddance-hal-esp = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-hal-esp" }
-rounddance-hal-host = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-hal-host" }
-rounddance-security = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-security" }
-rounddance-zcl = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-zcl" }
+rounddance-commission = { version = ">=0.1.0-alpha.3, <0.2.0", path = "../rounddance-commission" }
+rounddance-hal-esp = { version = ">=0.1.0-alpha.3, <0.2.0", path = "../rounddance-hal-esp" }
+rounddance-hal-host = { version = ">=0.1.0-alpha.3, <0.2.0", path = "../rounddance-hal-host" }
+rounddance-security = { version = ">=0.1.0-alpha.3, <0.2.0", path = "../rounddance-security" }
+rounddance-zcl = { version = ">=0.1.0-alpha.3, <0.2.0", path = "../rounddance-zcl" }
 
 [dev-dependencies]
-rounddance-commission = { version = ">=0.1.0-alpha.2, <0.2.0", path = "../rounddance-commission" }
+rounddance-commission = { version = ">=0.1.0-alpha.3, <0.2.0", path = "../rounddance-commission" }
