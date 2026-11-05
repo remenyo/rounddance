@@ -7,9 +7,9 @@ repository.workspace = true
 description = "Zigbee ZDO clusters, descriptors, ZDP and bind/mgmt codecs (no_std)"
 
 [dependencies]
-rounddance-aps = { version = ">=0.1.0-alpha.3, <0.2.0", path = "../rounddance-aps" }
+rounddance-aps = { version = ">=0.1.0-alpha.4, <0.2.0", path = "../rounddance-aps" }
 
 [dev-dependencies]
-rounddance-aps = { version = ">=0.1.0-alpha.3, <0.2.0", path = "../rounddance-aps" }
-rounddance-mac-sap = { version = ">=0.1.0-alpha.3, <0.2.0", path = "../rounddance-mac-sap" }
-rounddance-nwk = { version = ">=0.1.0-alpha.3, <0.2.0", path = "../rounddance-nwk" }
+rounddance-aps = { version = ">=0.1.0-alpha.4, <0.2.0", path = "../rounddance-aps" }
+rounddance-mac-sap = { version = ">=0.1.0-alpha.4, <0.2.0", path = "../rounddance-mac-sap" }
+rounddance-nwk = { version = ">=0.1.0-alpha.4, <0.2.0", path = "../rounddance-nwk" }

@@ -7,8 +7,8 @@ repository.workspace = true
 description = "Zigbee commissioning: formation, steering, finding, classical/Touchlink/Direct (no_std)"
 
 [dependencies]
-rounddance-aps = { version = ">=0.1.0-alpha.3, <0.2.0", path = "../rounddance-aps" }
-rounddance-mac-sap = { version = ">=0.1.0-alpha.3, <0.2.0", path = "../rounddance-mac-sap" }
-rounddance-nwk = { version = ">=0.1.0-alpha.3, <0.2.0", path = "../rounddance-nwk" }
-rounddance-zdo = { version = ">=0.1.0-alpha.3, <0.2.0", path = "../rounddance-zdo" }
-rounddance-security = { version = ">=0.1.0-alpha.3, <0.2.0", path = "../rounddance-security" }
+rounddance-aps = { version = ">=0.1.0-alpha.4, <0.2.0", path = "../rounddance-aps" }
+rounddance-mac-sap = { version = ">=0.1.0-alpha.4, <0.2.0", path = "../rounddance-mac-sap" }
+rounddance-nwk = { version = ">=0.1.0-alpha.4, <0.2.0", path = "../rounddance-nwk" }
+rounddance-zdo = { version = ">=0.1.0-alpha.4, <0.2.0", path = "../rounddance-zdo" }
+rounddance-security = { version = ">=0.1.0-alpha.4, <0.2.0", path = "../rounddance-security" }

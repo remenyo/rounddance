@@ -7,4 +7,4 @@ repository.workspace = true
 description = "S3+H2 OTBR path: UART RCP framing, host-side RCP driver over the MAC SAP, emulated-RCP test peer"
 
 [dependencies]
-rounddance-mac-sap = { version = ">=0.1.0-alpha.3, <0.2.0", path = "../rounddance-mac-sap" }
+rounddance-mac-sap = { version = ">=0.1.0-alpha.4, <0.2.0", path = "../rounddance-mac-sap" }

@@ -11,23 +11,23 @@ name = "rounddance"
 path = "src/lib.rs"
 
 [dependencies]
-rounddance-mac-sap = { version = ">=0.1.0-alpha.3, <0.2.0", path = "../rounddance-mac-sap" }
-rounddance-nwk = { version = ">=0.1.0-alpha.3, <0.2.0", path = "../rounddance-nwk" }
-rounddance-aps = { version = ">=0.1.0-alpha.3, <0.2.0", path = "../rounddance-aps" }
-rounddance-zdo = { version = ">=0.1.0-alpha.3, <0.2.0", path = "../rounddance-zdo" }
-rounddance-security = { version = ">=0.1.0-alpha.3, <0.2.0", path = "../rounddance-security" }
-rounddance-zcl = { version = ">=0.1.0-alpha.3, <0.2.0", path = "../rounddance-zcl" }
-rounddance-gp = { version = ">=0.1.0-alpha.3, <0.2.0", path = "../rounddance-gp" }
-rounddance-ifc = { version = ">=0.1.0-alpha.3, <0.2.0", path = "../rounddance-ifc" }
-rounddance-commission = { version = ">=0.1.0-alpha.3, <0.2.0", path = "../rounddance-commission" }
-rounddance-compat = { version = ">=0.1.0-alpha.3, <0.2.0", path = "../rounddance-compat" }
-rounddance-direct = { version = ">=0.1.0-alpha.3, <0.2.0", path = "../rounddance-direct" }
-rounddance-roles = { version = ">=0.1.0-alpha.3, <0.2.0", path = "../rounddance-roles" }
-rounddance-sim = { version = ">=0.1.0-alpha.3, <0.2.0", path = "../rounddance-sim" }
-rounddance-hal-host = { version = ">=0.1.0-alpha.3, <0.2.0", path = "../rounddance-hal-host" }
-rounddance-hal-esp = { version = ">=0.1.0-alpha.3, <0.2.0", path = "../rounddance-hal-esp" }
-rounddance-hal-wasm = { version = ">=0.1.0-alpha.3, <0.2.0", path = "../rounddance-hal-wasm" }
-rounddance-browser = { version = ">=0.1.0-alpha.3, <0.2.0", path = "../rounddance-browser" }
-rounddance-rcp = { version = ">=0.1.0-alpha.3, <0.2.0", path = "../rounddance-rcp" }
-rounddance-inspect = { version = ">=0.1.0-alpha.3, <0.2.0", path = "../rounddance-inspect" }
-rounddance-sniffer = { version = ">=0.1.0-alpha.3, <0.2.0", path = "../rounddance-sniffer" }
+rounddance-mac-sap = { version = ">=0.1.0-alpha.4, <0.2.0", path = "../rounddance-mac-sap" }
+rounddance-nwk = { version = ">=0.1.0-alpha.4, <0.2.0", path = "../rounddance-nwk" }
+rounddance-aps = { version = ">=0.1.0-alpha.4, <0.2.0", path = "../rounddance-aps" }
+rounddance-zdo = { version = ">=0.1.0-alpha.4, <0.2.0", path = "../rounddance-zdo" }
+rounddance-security = { version = ">=0.1.0-alpha.4, <0.2.0", path = "../rounddance-security" }
+rounddance-zcl = { version = ">=0.1.0-alpha.4, <0.2.0", path = "../rounddance-zcl" }
+rounddance-gp = { version = ">=0.1.0-alpha.4, <0.2.0", path = "../rounddance-gp" }
+rounddance-ifc = { version = ">=0.1.0-alpha.4, <0.2.0", path = "../rounddance-ifc" }
+rounddance-commission = { version = ">=0.1.0-alpha.4, <0.2.0", path = "../rounddance-commission" }
+rounddance-compat = { version = ">=0.1.0-alpha.4, <0.2.0", path = "../rounddance-compat" }
+rounddance-direct = { version = ">=0.1.0-alpha.4, <0.2.0", path = "../rounddance-direct" }
+rounddance-roles = { version = ">=0.1.0-alpha.4, <0.2.0", path = "../rounddance-roles" }
+rounddance-sim = { version = ">=0.1.0-alpha.4, <0.2.0", path = "../rounddance-sim" }
+rounddance-hal-host = { version = ">=0.1.0-alpha.4, <0.2.0", path = "../rounddance-hal-host" }
+rounddance-hal-esp = { version = ">=0.1.0-alpha.4, <0.2.0", path = "../rounddance-hal-esp" }
+rounddance-hal-wasm = { version = ">=0.1.0-alpha.4, <0.2.0", path = "../rounddance-hal-wasm" }
+rounddance-browser = { version = ">=0.1.0-alpha.4, <0.2.0", path = "../rounddance-browser" }
+rounddance-rcp = { version = ">=0.1.0-alpha.4, <0.2.0", path = "../rounddance-rcp" }
+rounddance-inspect = { version = ">=0.1.0-alpha.4, <0.2.0", path = "../rounddance-inspect" }
+rounddance-sniffer = { version = ">=0.1.0-alpha.4, <0.2.0", path = "../rounddance-sniffer" }

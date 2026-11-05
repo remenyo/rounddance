@@ -14,13 +14,13 @@ std = []
 live = ["std", "dep:libc"]
 
 [dependencies]
-rounddance-mac-sap = { version = ">=0.1.0-alpha.3, <0.2.0", path = "../rounddance-mac-sap" }
-rounddance-nwk = { version = ">=0.1.0-alpha.3, <0.2.0", path = "../rounddance-nwk" }
-rounddance-aps = { version = ">=0.1.0-alpha.3, <0.2.0", path = "../rounddance-aps" }
-rounddance-zcl = { version = ">=0.1.0-alpha.3, <0.2.0", path = "../rounddance-zcl" }
-rounddance-security = { version = ">=0.1.0-alpha.3, <0.2.0", path = "../rounddance-security" }
-rounddance-gp = { version = ">=0.1.0-alpha.3, <0.2.0", path = "../rounddance-gp" }
-rounddance-direct = { version = ">=0.1.0-alpha.3, <0.2.0", path = "../rounddance-direct" }
+rounddance-mac-sap = { version = ">=0.1.0-alpha.4, <0.2.0", path = "../rounddance-mac-sap" }
+rounddance-nwk = { version = ">=0.1.0-alpha.4, <0.2.0", path = "../rounddance-nwk" }
+rounddance-aps = { version = ">=0.1.0-alpha.4, <0.2.0", path = "../rounddance-aps" }
+rounddance-zcl = { version = ">=0.1.0-alpha.4, <0.2.0", path = "../rounddance-zcl" }
+rounddance-security = { version = ">=0.1.0-alpha.4, <0.2.0", path = "../rounddance-security" }
+rounddance-gp = { version = ">=0.1.0-alpha.4, <0.2.0", path = "../rounddance-gp" }
+rounddance-direct = { version = ">=0.1.0-alpha.4, <0.2.0", path = "../rounddance-direct" }
 libc = { version = "0.2", optional = true }
 
 [[bin]]
