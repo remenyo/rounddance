@@ -21,8 +21,17 @@ pub struct UartConfig {
     pub flow_ctrl: i32,
     /// RX flow threshold (unused without flow control).
     pub rx_flow_ctrl_thresh: u8,
-    /// Clock source (`UART_SCLK_DEFAULT` = 0).
+    /// RX glitch-filter width in ns, 0 = disabled (`driver/uart.h`
+    /// `rx_glitch_filt_thresh`; IDF v6.1 field — omitting it shifts
+    /// `source_clk` out of place and the driver reads garbage).
+    pub rx_glitch_filt_thresh: u32,
+    /// Clock source (`UART_SCLK_DEFAULT` = 0; S31 pins XTAL, see
+    /// `Board::uart_sclk`).
     pub source_clk: i32,
+    /// Driver flags bitfield (`allow_pd`/`backup_before_sleep`).
+    /// Must be present and zero: without it the driver reads past
+    /// the struct (IDF v6.1 `uart_config_t` layout).
+    pub flags: u32,
 }
 
 /// `UART_PIN_NO_CHANGE` (`driver/uart.h`): leave a pin unassigned.

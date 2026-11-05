@@ -19,9 +19,10 @@ const ESP_OK: i32 = 0;
 static UART_NUM: AtomicI32 = AtomicI32::new(1);
 
 /// Install + configure the RCP UART: 460800 8N1, no flow control,
-/// no event queue, 2K RX ring. Console stays on USB_SERIAL_JTAG —
-/// this UART carries RCP frames only.
-pub fn init(uart_num: i32, rx_pin: i32, tx_pin: i32) {
+/// no event queue, 2K RX ring. `sclk` is the IDF UART source clock
+/// (`UartConfig.source_clk`; 0 = driver default, S31 pins XTAL —
+/// see `Board::uart_sclk`).
+pub fn init(uart_num: i32, rx_pin: i32, tx_pin: i32, sclk: i32) {
     let cfg = ffi::UartConfig {
         baud_rate: RCP_BAUD,
         data_bits: 3,
@@ -29,7 +30,9 @@ pub fn init(uart_num: i32, rx_pin: i32, tx_pin: i32) {
         stop_bits: 1,
         flow_ctrl: 0,
         rx_flow_ctrl_thresh: 0,
-        source_clk: 0,
+        rx_glitch_filt_thresh: 0,
+        source_clk: sclk,
+        flags: 0,
     };
     // SAFETY: scalar FFI on a live UART number; `cfg` outlives the
     // call; return codes map to panics (a misconfigured wire wedges

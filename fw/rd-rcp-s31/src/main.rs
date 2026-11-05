@@ -11,17 +11,9 @@
 use rd_rcp::{pin_or, run, Board};
 
 fn main() {
-    // BENCH ADAPTER (rdpc-air 2026-11-04, reverted after the proof):
-    // the S31 lab carrier wires its CP2102N bridge to UART0
-    // (GPIO59 RX / GPIO58 TX = the S31 UART0 defaults), not to the
-    // documented RCP UART1 (GPIO15/16, unconnected on this bench).
-    // The RCP wire therefore runs on UART0 here; the IDF console is
-    // moved to USB-Serial-JTAG (sdkconfig) so no console byte can
-    // interleave with RCP frames. Caps bit stays s31.
     let board = Board {
-        uart_num: 0,
-        rx_pin: pin_or(option_env!("RD_RCP_RX_PIN"), 59),
-        tx_pin: pin_or(option_env!("RD_RCP_TX_PIN"), 58),
+        rx_pin: pin_or(option_env!("RD_RCP_RX_PIN"), Board::s31().rx_pin),
+        tx_pin: pin_or(option_env!("RD_RCP_TX_PIN"), Board::s31().tx_pin),
         ..Board::s31()
     };
     run(board);

@@ -1006,6 +1006,19 @@ impl<U: Uart> RcpDriver<U> {
         if status != 0x00 {
             return false;
         }
+        // Role guard (air-proven 2026-11-05): adopt the assignment
+        // only when we do not already hold a *different* concrete
+        // own short. A provisioned coordinator (e.g. short 0x0000)
+        // must ignore peer assignments — programming the radio with
+        // the joiner's short blinds unicast to self (post-assoc
+        // unicast blackout, broadcasts still pass). A joiner
+        // (unprovisioned/0xFFFF, or re-confirming its own short)
+        // latches normally.
+        if let Some(cur) = self.short {
+            if cur != 0xFFFF && cur != short {
+                return false;
+            }
+        }
         self.short = Some(short);
         self.send_cmd(&Command::SetShortAddr { addr: short });
         self.trace(TraceEvent::AssocConfirmed(short));
@@ -1786,17 +1799,29 @@ mod tests {
 
     #[test]
     fn w53_assoc_response_confirms_short() {
-        // Failing-first: SHORT-SNOOP host half (w53 §4b) — the short
-        // is confirmed to the H2 immediately, before any slow path.
+        // SHORT-SNOOP host half (w53 §4b) — role-guarded (air fix
+        // 2026-11-05): a provisioned coordinator ignores peer
+        // assignments (adopting one reprograms the radio with the
+        // peer's short and blinds unicast to self — post-assoc
+        // unicast blackout on air), while a host with no concrete
+        // own short latches its assignment normally.
         let (mut driver, mut peer) = pair();
         form(&mut driver, &mut peer);
         assert!(!driver.note_assoc_response(0x1234, 0x01));
         assert_eq!(peer.short(), Some(0x0000), "denied rsp changes nothing");
-        assert!(driver.note_assoc_response(0x1234, 0x00));
+        // Coordinator holds 0x0000: the peer assignment is refused.
+        assert!(!driver.note_assoc_response(0x1234, 0x00));
         pump(&mut driver, &mut peer);
-        assert_eq!(peer.short(), Some(0x1234), "confirmed pre-log");
-        assert!((0..driver.trace_len())
-            .filter_map(|i| driver.trace_at(i))
+        assert_eq!(peer.short(), Some(0x0000), "coord keeps its own short");
+        // Joiner side (no concrete own short yet): latches normally.
+        let (mut jdriver, mut jpeer) = pair();
+        jdriver.reset(true);
+        pump(&mut jdriver, &mut jpeer);
+        assert!(jdriver.note_assoc_response(0x1234, 0x00));
+        pump(&mut jdriver, &mut jpeer);
+        assert_eq!(jpeer.short(), Some(0x1234), "joiner latches own short");
+        assert!((0..jdriver.trace_len())
+            .filter_map(|i| jdriver.trace_at(i))
             .any(|e| e == TraceEvent::AssocConfirmed(0x1234)));
     }
 

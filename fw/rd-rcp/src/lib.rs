@@ -99,6 +99,12 @@ pub struct Board {
     pub rx_pin: i32,
     /// UART TX pin (drives host-RX).
     pub tx_pin: i32,
+    /// IDF UART source clock (`UartConfig.source_clk`; 0 = driver
+    /// default). The S31 preview clock tree cannot resolve the
+    /// default (PLL_F80M) in `uart_param_config` ("unknown clk src",
+    /// air-proven 2026-11-05), so S31 pins XTAL (16 =
+    /// `SOC_MOD_CLK_XTAL`); H2/C6 keep 0 (proven working).
+    pub uart_sclk: i32,
 }
 
 impl Board {
@@ -111,6 +117,7 @@ impl Board {
             uart_num: 1,
             rx_pin: 23,
             tx_pin: 24,
+            uart_sclk: 0,
         }
     }
 
@@ -123,11 +130,14 @@ impl Board {
             uart_num: 1,
             rx_pin: 16,
             tx_pin: 17,
+            uart_sclk: 0,
         }
     }
 
     /// S31 image wiring: UART1 on GPIO15/16 (lab record pending the
     /// air proof; override with `RD_RCP_RX_PIN`/`RD_RCP_TX_PIN`).
+    /// UART clock pinned to XTAL: the S31 tree cannot resolve the
+    /// driver default (see `uart_sclk`).
     #[must_use]
     pub const fn s31() -> Self {
         Self {
@@ -135,6 +145,7 @@ impl Board {
             uart_num: 1,
             rx_pin: 15,
             tx_pin: 16,
+            uart_sclk: 16,
         }
     }
 
@@ -201,7 +212,7 @@ pub fn run(board: Board) -> ! {
     let _ = radio.set_promiscuous(true);
     let eui = board_eui();
     println!("RD-RCP-{} eui={eui:02x?}", board.target.tag());
-    uart::init(board.uart_num, board.rx_pin, board.tx_pin);
+    uart::init(board.uart_num, board.rx_pin, board.tx_pin, board.uart_sclk);
     let mut state = State {
         channel: None,
         power_dbm: 0,

@@ -1,9 +1,7 @@
 CONFIG_IDF_TARGET="esp32s31"
-# BENCH ADAPTER (rdpc-air 2026-11-04, reverted after the proof):
-# console off UART0 (the RCP wire lives there on this bench) onto
-# USB-Serial-JTAG (vanishes harmlessly if the carrier leaves it
-# unconnected; nothing may share UART0 with RCP framing).
-CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+# NOTE: USB_SERIAL_JTAG console was tried first and the unit boot-looped
+# (ROM reloads the 2nd-stage loader, SW_CPU reset, no banner); NONE keeps
+# the 2nd-stage loader from touching any console peripheral at all.
 # RCP firmware: the radio task plus the UART pump share the main task
 # (same 16K discipline as the standalone images).
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
